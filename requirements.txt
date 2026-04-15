@@ -1,0 +1,8 @@
+pandas
+numpy
+openpyxl
+itables
+IPython
+timm
+huggingface_hub
+torch
