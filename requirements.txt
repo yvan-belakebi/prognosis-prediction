@@ -1,8 +1,12 @@
+# For data exploration and manipulation
 pandas
 numpy
 openpyxl
 itables
 IPython
+# For tiling
+wsi-tissue-tiler
+# For feature extraction
 timm
 huggingface_hub
 torch
