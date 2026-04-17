@@ -4,9 +4,16 @@ numpy
 openpyxl
 itables
 IPython
+# For image processing
+Pillow
 # For tiling
 wsi-tissue-tiler
 # For feature extraction
 timm
 huggingface_hub
 torch
+torchvision
+# For machine learning utilities
+scikit-learn
+# For multiple instance learning
+dsmil

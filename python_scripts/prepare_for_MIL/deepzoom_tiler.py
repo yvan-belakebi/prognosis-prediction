@@ -14,6 +14,7 @@ from skimage.color import rgb2hsv
 from skimage.util import img_as_ubyte
 from skimage import filters
 from PIL import Image, ImageFilter, ImageStat
+import logging
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -21,14 +22,22 @@ import openslide
 from openslide import open_slide, ImageSlide
 from openslide.deepzoom import DeepZoomGenerator
 
-VIEWER_SLIDE_NAME = 'slide'
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+VIEWER_SLIDE_NAME = "slide"
+
 
 class TileWorker(Process):
     """A child process that generates and writes tiles."""
 
-    def __init__(self, queue, slidepath, tile_size, overlap, limit_bounds,
-                quality, threshold):
-        Process.__init__(self, name='TileWorker')
+    def __init__(
+        self, queue, slidepath, tile_size, overlap, limit_bounds, quality, threshold
+    ):
+        Process.__init__(self, name="TileWorker")
         self.daemon = True
         self._queue = queue
         self._slidepath = slidepath
@@ -56,30 +65,32 @@ class TileWorker(Process):
                 tile = dz.get_tile(level, address)
                 edge = tile.filter(ImageFilter.FIND_EDGES)
                 edge = ImageStat.Stat(edge).sum
-                edge = np.mean(edge)/(self._tile_size**2)
+                edge = np.mean(edge) / (self._tile_size**2)
                 w, h = tile.size
                 if edge > self._threshold:
-                    if not (w==self._tile_size and h==self._tile_size):
+                    if not (w == self._tile_size and h == self._tile_size):
                         tile = tile.resize((self._tile_size, self._tile_size))
                     tile.save(outfile, quality=self._quality)
             except:
                 pass
             self._queue.task_done()
-            
 
     def _get_dz(self, associated=None):
         if associated is not None:
             image = ImageSlide(self._slide.associated_images[associated])
         else:
             image = self._slide
-        return DeepZoomGenerator(image, self._tile_size, self._overlap,
-                    limit_bounds=self._limit_bounds)
+        return DeepZoomGenerator(
+            image, self._tile_size, self._overlap, limit_bounds=self._limit_bounds
+        )
 
 
 class DeepZoomImageTiler(object):
     """Handles generation of tiles and metadata for a single image."""
 
-    def __init__(self, dz, basename, target_levels, mag_base, format, associated, queue):
+    def __init__(
+        self, dz, basename, target_levels, mag_base, format, associated, queue
+    ):
         self._dz = dz
         self._basename = basename
         self._format = format
@@ -93,8 +104,8 @@ class DeepZoomImageTiler(object):
         self._write_tiles()
 
     def _write_tiles(self):
-        target_levels = [self._dz.level_count-i-1 for i in self._target_levels]
-        mag_list = [int(self._mag_base/2**i) for i in self._target_levels]
+        target_levels = [self._dz.level_count - i - 1 for i in self._target_levels]
+        mag_list = [int(self._mag_base / 2**i) for i in self._target_levels]
         mag_idx = 0
         for level in range(self._dz.level_count):
             if not (level in target_levels):
@@ -105,11 +116,11 @@ class DeepZoomImageTiler(object):
             cols, rows = self._dz.level_tiles[level]
             for row in range(rows):
                 for col in range(cols):
-                    tilename = os.path.join(tiledir, '%d_%d.%s' % (
-                                    col, row, self._format))
+                    tilename = os.path.join(
+                        tiledir, "%d_%d.%s" % (col, row, self._format)
+                    )
                     if not os.path.exists(tilename):
-                        self._queue.put((self._associated, level, (col, row),
-                                    tilename))
+                        self._queue.put((self._associated, level, (col, row), tilename))
                     self._tile_done()
             mag_idx += 1
 
@@ -117,9 +128,12 @@ class DeepZoomImageTiler(object):
         self._processed += 1
         count, total = self._processed, self._dz.tile_count
         if count % 100 == 0 or count == total:
-            print("Tiling %s: wrote %d/%d tiles" % (
-                    self._associated or 'slide', count, total),
-                    end='\r', file=sys.stderr)
+            print(
+                "Tiling %s: wrote %d/%d tiles"
+                % (self._associated or "slide", count, total),
+                end="\r",
+                file=sys.stderr,
+            )
             if count == total:
                 print(file=sys.stderr)
 
@@ -127,8 +141,21 @@ class DeepZoomImageTiler(object):
 class DeepZoomStaticTiler(object):
     """Handles generation of tiles and metadata for all images in a slide."""
 
-    def __init__(self, slidepath, basename, mag_levels, base_mag, objective, format, tile_size, overlap,
-                limit_bounds, quality, workers, threshold):
+    def __init__(
+        self,
+        slidepath,
+        basename,
+        mag_levels,
+        base_mag,
+        objective,
+        format,
+        tile_size,
+        overlap,
+        limit_bounds,
+        quality,
+        workers,
+        threshold,
+    ):
         self._slide = open_slide(slidepath)
         self._basename = basename
         self._format = format
@@ -142,8 +169,15 @@ class DeepZoomStaticTiler(object):
         self._workers = workers
         self._dzi_data = {}
         for _i in range(workers):
-            TileWorker(self._queue, slidepath, tile_size, overlap,
-                        limit_bounds, quality, threshold).start()
+            TileWorker(
+                self._queue,
+                slidepath,
+                tile_size,
+                overlap,
+                limit_bounds,
+                quality,
+                threshold,
+            ).start()
 
     def run(self):
         self._run_image()
@@ -157,18 +191,24 @@ class DeepZoomStaticTiler(object):
         else:
             image = ImageSlide(self._slide.associated_images[associated])
             basename = os.path.join(self._basename, self._slugify(associated))
-        dz = DeepZoomGenerator(image, self._tile_size, self._overlap,
-                    limit_bounds=self._limit_bounds)
-        
+        dz = DeepZoomGenerator(
+            image, self._tile_size, self._overlap, limit_bounds=self._limit_bounds
+        )
+
         MAG_BASE = self._slide.properties.get(openslide.PROPERTY_NAME_OBJECTIVE_POWER)
         if MAG_BASE is None:
             MAG_BASE = self._objective
-        first_level = int(math.log2(float(MAG_BASE)/self._base_mag)) # raw / input, 40/20=2, 40/40=0
-        target_levels = [i+first_level for i in self._mag_levels] # levels start from 0
+        first_level = int(
+            math.log2(float(MAG_BASE) / self._base_mag)
+        )  # raw / input, 40/20=2, 40/40=0
+        target_levels = [
+            i + first_level for i in self._mag_levels
+        ]  # levels start from 0
         target_levels.reverse()
-        
-        tiler = DeepZoomImageTiler(dz, basename, target_levels, MAG_BASE, self._format, associated,
-                    self._queue)
+
+        tiler = DeepZoomImageTiler(
+            dz, basename, target_levels, MAG_BASE, self._format, associated, self._queue
+        )
         tiler.run()
 
     def _url_for(self, associated):
@@ -176,7 +216,7 @@ class DeepZoomStaticTiler(object):
             base = VIEWER_SLIDE_NAME
         else:
             base = self._slugify(associated)
-        return '%s.dzi' % base
+        return "%s.dzi" % base
 
     def _copydir(self, src, dest):
         if not os.path.exists(dest):
@@ -188,85 +228,234 @@ class DeepZoomStaticTiler(object):
 
     @classmethod
     def _slugify(cls, text):
-        text = normalize('NFKD', text.lower()).encode('ascii', 'ignore').decode()
-        return re.sub('[^a-z0-9]+', '_', text)
+        text = normalize("NFKD", text.lower()).encode("ascii", "ignore").decode()
+        return re.sub("[^a-z0-9]+", "_", text)
 
     def _shutdown(self):
         for _i in range(self._workers):
             self._queue.put(None)
         self._queue.join()
 
-def nested_patches(img_slide, out_base, level=(0,), ext='jpeg'):
-    print('\n Organizing patches')
-    img_name = img_slide.split(os.sep)[-1].split('.')[0]
+
+def nested_patches(img_slide, out_base, level=(0,), ext="jpeg"):
+    print("\n Organizing patches")
+    img_name = img_slide.split(os.sep)[-1].split(".")[0]
     img_class = img_slide.split(os.sep)[2]
-    n_levels = len(glob.glob('WSI_temp_files/*'))
+    n_levels = len(glob.glob("WSI_temp_files/*"))
     bag_path = os.path.join(out_base, img_class, img_name)
     os.makedirs(bag_path, exist_ok=True)
-    if len(level)==1:
-        patches = glob.glob(os.path.join('WSI_temp_files', '*', '*.'+ext))
+    if len(level) == 1:
+        patches = glob.glob(os.path.join("WSI_temp_files", "*", "*." + ext))
         for i, patch in enumerate(patches):
             patch_name = patch.split(os.sep)[-1]
             shutil.move(patch, os.path.join(bag_path, patch_name))
-            sys.stdout.write('\r Patch [%d/%d]' % (i+1, len(patches)))
-        print('Done.')
+            sys.stdout.write("\r Patch [%d/%d]" % (i + 1, len(patches)))
+        print("Done.")
     else:
-        level_factor = 2**int(level[1]-level[0])
-        levels = [int(os.path.basename(i)) for i in glob.glob(os.path.join('WSI_temp_files', '*'))]
+        level_factor = 2 ** int(level[1] - level[0])
+        levels = [
+            int(os.path.basename(i))
+            for i in glob.glob(os.path.join("WSI_temp_files", "*"))
+        ]
         levels.sort()
-        low_patches = glob.glob(os.path.join('WSI_temp_files', str(levels[0]), '*.'+ext))
+        low_patches = glob.glob(
+            os.path.join("WSI_temp_files", str(levels[0]), "*." + ext)
+        )
         for i, low_patch in enumerate(low_patches):
             low_patch_name = low_patch.split(os.sep)[-1]
             shutil.move(low_patch, os.path.join(bag_path, low_patch_name))
-            low_patch_folder = low_patch_name.split('.')[0]
+            low_patch_folder = low_patch_name.split(".")[0]
             high_patch_path = os.path.join(bag_path, low_patch_folder)
             os.makedirs(high_patch_path, exist_ok=True)
-            low_x = int(low_patch_folder.split('_')[0])
-            low_y = int(low_patch_folder.split('_')[1])
-            high_x_list = list( range(low_x*level_factor, (low_x+1)*level_factor) )
-            high_y_list = list( range(low_y*level_factor, (low_y+1)*level_factor) )
+            low_x = int(low_patch_folder.split("_")[0])
+            low_y = int(low_patch_folder.split("_")[1])
+            high_x_list = list(range(low_x * level_factor, (low_x + 1) * level_factor))
+            high_y_list = list(range(low_y * level_factor, (low_y + 1) * level_factor))
             for x_pos in high_x_list:
                 for y_pos in high_y_list:
-                    high_patch = glob.glob(os.path.join('WSI_temp_files', str(levels[1]), '{}_{}.'.format(x_pos, y_pos)+ext))
-                    if len(high_patch)!=0:
+                    high_patch = glob.glob(
+                        os.path.join(
+                            "WSI_temp_files",
+                            str(levels[1]),
+                            "{}_{}.".format(x_pos, y_pos) + ext,
+                        )
+                    )
+                    if len(high_patch) != 0:
                         high_patch = high_patch[0]
-                        shutil.move(high_patch, os.path.join(bag_path, low_patch_folder, high_patch.split(os.sep)[-1]))
+                        shutil.move(
+                            high_patch,
+                            os.path.join(
+                                bag_path, low_patch_folder, high_patch.split(os.sep)[-1]
+                            ),
+                        )
             try:
                 os.rmdir(os.path.join(bag_path, low_patch_folder))
                 os.remove(low_patch)
             except:
                 pass
-            sys.stdout.write('\r Patch [%d/%d]' % (i+1, len(low_patches)))
-        print('Done.')
+            sys.stdout.write("\r Patch [%d/%d]" % (i + 1, len(low_patches)))
+        print("Done.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     Image.MAX_IMAGE_PIXELS = None
-    parser = argparse.ArgumentParser(description='Patch extraction for WSI')
-    parser.add_argument('-d', '--dataset', type=str, default='TCGA-lung', help='Dataset name')
-    parser.add_argument('-e', '--overlap', type=int, default=0, help='Overlap of adjacent tiles [0]')
-    parser.add_argument('-f', '--format', type=str, default='jpeg', help='Image format for tiles [jpeg]')
-    parser.add_argument('-v', '--slide_format', type=str, default='svs', help='Image format for tiles [svs]')
-    parser.add_argument('-j', '--workers', type=int, default=4, help='Number of worker processes to start [4]')
-    parser.add_argument('-q', '--quality', type=int, default=70, help='JPEG compression quality [70]')
-    parser.add_argument('-s', '--tile_size', type=int, default=224, help='Tile size [224]')
-    parser.add_argument('-b', '--base_mag', type=float, default=20, help='Maximum magnification for patch extraction [20]')
-    parser.add_argument('-m', '--magnifications', type=int, nargs='+', default=(0,), help='Levels for patch extraction [0]')
-    parser.add_argument('-o', '--objective', type=float, default=20, help='The default objective power if metadata does not present [20]')
-    parser.add_argument('-t', '--background_t', type=int, default=15, help='Threshold for filtering background [15]')  
+    parser = argparse.ArgumentParser(
+        description="Patch extraction for WSI from data/raw_wsi/"
+    )
+    parser.add_argument(
+        "-d",
+        "--dataset",
+        type=str,
+        default="prognosis",
+        help="Dataset name for output organization [prognosis]",
+    )
+    parser.add_argument(
+        "-i",
+        "--input_dir",
+        type=str,
+        default="data/raw_wsi",
+        help="Input directory containing WSI files [data/raw_wsi]",
+    )
+    parser.add_argument(
+        "-e", "--overlap", type=int, default=0, help="Overlap of adjacent tiles [0]"
+    )
+    parser.add_argument(
+        "-f", "--format", type=str, default="jpeg", help="Image format for tiles [jpeg]"
+    )
+    parser.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of worker processes to start [4]",
+    )
+    parser.add_argument(
+        "-q", "--quality", type=int, default=70, help="JPEG compression quality [70]"
+    )
+    parser.add_argument(
+        "-s", "--tile_size", type=int, default=224, help="Tile size [224]"
+    )
+    parser.add_argument(
+        "-b",
+        "--base_mag",
+        type=float,
+        default=20,
+        help="Target magnification for patch extraction [20]",
+    )
+    parser.add_argument(
+        "-m",
+        "--magnifications",
+        type=int,
+        nargs="+",
+        default=(0,),
+        help="Magnification levels for patch extraction [0]",
+    )
+    parser.add_argument(
+        "-o",
+        "--objective",
+        type=float,
+        default=40,
+        help="The default objective power if metadata does not present [40]",
+    )
+    parser.add_argument(
+        "-t",
+        "--background_t",
+        type=int,
+        default=15,
+        help="Threshold for filtering background [15]",
+    )
     args = parser.parse_args()
+
     levels = tuple(sorted(args.magnifications))
-    assert len(levels)<=2, 'Only 1 or 2 magnifications are supported!'
-    path_base = os.path.join('WSI', args.dataset)
+    assert len(levels) <= 2, "Only 1 or 2 magnifications are supported!"
+
+    # Create output directory structure
     if len(levels) == 2:
-        out_base = os.path.join('WSI', args.dataset, 'pyramid')
+        out_base = os.path.join("WSI", args.dataset, "pyramid")
     else:
-        out_base = os.path.join('WSI', args.dataset, 'single')
-    all_slides = glob.glob(os.path.join(path_base, '*/*.'+args.slide_format)) +  glob.glob(os.path.join(path_base, '*/*/*.'+args.slide_format))
-    
-    # pos-i_pos-j -> x, y
+        out_base = os.path.join("WSI", args.dataset, "single")
+
+    os.makedirs(out_base, exist_ok=True)
+
+    # Find all .svs and .ndpi files in input directory
+    input_dir = args.input_dir
+    if not os.path.exists(input_dir):
+        logger.error(f"Input directory not found: {input_dir}")
+        sys.exit(1)
+
+    all_slides = (
+        glob.glob(os.path.join(input_dir, "*.svs"))
+        + glob.glob(os.path.join(input_dir, "*.ndpi"))
+        + glob.glob(os.path.join(input_dir, "**/*.svs"), recursive=True)
+        + glob.glob(os.path.join(input_dir, "**/*.ndpi"), recursive=True)
+    )
+
+    if not all_slides:
+        logger.error(f"No .svs or .ndpi files found in {input_dir}")
+        sys.exit(1)
+
+    logger.info(f"Found {len(all_slides)} slide(s) to process")
+
+    # Process each slide
     for idx, c_slide in enumerate(all_slides):
-        print('Process slide {}/{}'.format(idx+1, len(all_slides)))
-        DeepZoomStaticTiler(c_slide, 'WSI_temp', levels, args.base_mag, args.objective, args.format, args.tile_size, args.overlap, True, args.quality, args.workers, args.background_t).run()
-        nested_patches(c_slide, out_base, levels, ext=args.format)
-        shutil.rmtree('WSI_temp_files') 
-    print('Patch extraction done for {} slides.'.format(len(all_slides)))
+        try:
+            logger.info(
+                f"Processing slide {idx+1}/{len(all_slides)}: {os.path.basename(c_slide)}"
+            )
+
+            # Use slide filename (without extension) as the image name/ID
+            slide_name = os.path.splitext(os.path.basename(c_slide))[0]
+
+            # Create a temporary directory for processing this slide
+            temp_dir = "WSI_temp_files"
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+            # Run the tiling process
+            DeepZoomStaticTiler(
+                c_slide,
+                "WSI_temp",
+                levels,
+                args.base_mag,
+                args.objective,
+                args.format,
+                args.tile_size,
+                args.overlap,
+                True,
+                args.quality,
+                args.workers,
+                args.background_t,
+            ).run()
+
+            # Organize patches into the output structure (one "patient" per slide)
+            # This stores patches in out_base/slide_name/ directory
+            nested_patches(
+                c_slide,
+                os.path.join(out_base, "default_patient"),
+                levels,
+                ext=args.format,
+            )
+
+            # Move the organized patches to slide-specific directory
+            slide_output_dir = os.path.join(out_base, "default_patient", slide_name)
+            if os.path.exists(slide_output_dir):
+                final_output_dir = os.path.join(out_base, slide_name)
+                if os.path.exists(final_output_dir):
+                    shutil.rmtree(final_output_dir)
+                shutil.move(slide_output_dir, final_output_dir)
+
+            # Clean up temporary directory
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+            logger.info(f"Successfully processed: {os.path.basename(c_slide)}")
+
+        except Exception as e:
+            logger.error(f"Error processing slide {c_slide}: {str(e)}")
+            # Clean up on error
+            if os.path.exists("WSI_temp_files"):
+                shutil.rmtree("WSI_temp_files")
+            continue
+
+    logger.info(f"Patch extraction done for {len(all_slides)} slides.")
+    logger.info(f"Output stored in: {out_base}")

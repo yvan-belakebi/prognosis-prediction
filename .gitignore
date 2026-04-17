@@ -1,3 +1,12 @@
+# Miscellaneous
+*.log
 *.pptx
-*.csv
 *.xlsx
+# Ignore all wsi files
+*.svs
+*.ndpi
+*.tif
+*.tiff
+# Ignore patches and features
+*.jpg
+*.csv
