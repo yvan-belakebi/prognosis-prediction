@@ -1,9 +1,8 @@
+import torch
 import timm
+from timm.layers import SwiGLUPacked
 from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
-from huggingface_hub import login
-
-login()  # login with your User Access Token, found at https://huggingface.co/settings/tokens
 
 
 def load_uni2h_feature_extractor():
@@ -42,7 +41,6 @@ def load_hoptimus1_feature_extractor():
         init_values=1e-5,
         dynamic_img_size=False,
     )
-    model.to("cuda")
     model.eval()
     transform = transforms.Compose(
         [
@@ -68,20 +66,3 @@ def load_virchow2_feature_extractor():
         **resolve_data_config(model.pretrained_cfg, model=model)
     )
     return model, transform
-
-
-#### Inference
-
-from PIL import Image
-
-
-def infer_on_image(model, transform, image_path):
-    image = Image.open(image_path)
-    image = transform(image).unsqueeze(
-        dim=0
-    )  # Image (torch.Tensor) with shape [1, 3, 224, 224] following image resizing and normalization
-    with torch.inference_mode():
-        feature_emb = model(
-            image
-        )  # Extracted features (torch.Tensor) with shape [1,1536] for example
-    return feature_emb
