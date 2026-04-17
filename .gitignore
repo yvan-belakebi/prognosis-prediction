@@ -10,3 +10,5 @@
 # Ignore patches and features
 *.jpg
 *.csv
+# Ignore Python bytecode files
+*.pyc
