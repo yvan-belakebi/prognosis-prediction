@@ -26,30 +26,30 @@ def check_python_venv():
 
 
 def install_dependencies():
-    """Install required packages."""
-    print("\n📦 Installing required packages...\n")
+    """Install required packages from requirements.txt."""
+    print("\n📦 Installing required packages from requirements.txt...\n")
 
-    packages = [
-        "openslide-python",
-        "torch",
-        "torchvision",
-        "scikit-image",
-        "timm",
-        "huggingface_hub",
-    ]
+    # Get the path to requirements.txt
+    root_dir = Path(__file__).parent.parent.parent
+    requirements_file = root_dir / "requirements.txt"
 
-    for package in packages:
-        print(f"Installing {package}...")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", package, "-q"], capture_output=True
-        )
-        if result.returncode != 0:
-            print(f"⚠️  Failed to install {package}")
-            print(result.stderr.decode())
-        else:
-            print(f"✅ {package} installed")
+    if not requirements_file.exists():
+        print(f"❌ requirements.txt not found at {requirements_file}")
+        return False
 
-    print()
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        print("✅ All packages from requirements.txt installed successfully!")
+        return True
+    else:
+        print("⚠️  Failed to install some packages")
+        print(result.stderr)
+        return False
 
 
 def run_extraction():
