@@ -110,14 +110,20 @@ def compute_feats(
             print("No valid patch extracted from: " + bags_list[i])
         else:
             df = pd.DataFrame(feats_list)
-            os.makedirs(
-                os.path.join(save_path, bags_list[i].split(os.path.sep)[-2]),
-                exist_ok=True,
-            )
+            # Extract class label from directory path (class_0 or class_1)
+            class_dir = bags_list[i].split(os.path.sep)[-2]
+            if class_dir.startswith("class_"):
+                class_label = int(class_dir.split("_")[1])
+            else:
+                class_label = -1  # Unknown class
+            # Add class label as the last column
+            df["label"] = class_label
+            # Create class-specific directory
+            class_output_dir = os.path.join(save_path, class_dir)
+            os.makedirs(class_output_dir, exist_ok=True)
             df.to_csv(
                 os.path.join(
-                    save_path,
-                    bags_list[i].split(os.path.sep)[-2],
+                    class_output_dir,
                     bags_list[i].split(os.path.sep)[-1] + ".csv",
                 ),
                 index=False,

@@ -240,7 +240,7 @@ class DeepZoomStaticTiler(object):
 def nested_patches(img_slide, out_base, level=(0,), ext="jpeg"):
     print("\n Organizing patches")
     img_name = img_slide.split(os.sep)[-1].split(".")[0]
-    img_class = img_slide.split(os.sep)[2]
+    img_class = img_slide.split(os.sep)[-2]
     n_levels = len(glob.glob("WSI_temp_files/*"))
     bag_path = os.path.join(out_base, img_class, img_name)
     os.makedirs(bag_path, exist_ok=True)
@@ -402,6 +402,7 @@ if __name__ == "__main__":
             logger.info(
                 f"Processing slide {idx+1}/{len(all_slides)}: {os.path.basename(c_slide)}"
             )
+            class_dir = c_slide.split(os.sep)[-2]
 
             # Use slide filename (without extension) as the image name/ID
             slide_name = os.path.splitext(os.path.basename(c_slide))[0]
@@ -428,21 +429,13 @@ if __name__ == "__main__":
             ).run()
 
             # Organize patches into the output structure (one "patient" per slide)
-            # This stores patches in out_base/slide_name/ directory
+            # This stores patches in out_base/class_dir/slide_name/ directory
             nested_patches(
                 c_slide,
-                os.path.join(out_base, "default_patient"),
+                out_base,
                 levels,
                 ext=args.format,
             )
-
-            # Move the organized patches to slide-specific directory
-            slide_output_dir = os.path.join(out_base, "default_patient", slide_name)
-            if os.path.exists(slide_output_dir):
-                final_output_dir = os.path.join(out_base, slide_name)
-                if os.path.exists(final_output_dir):
-                    shutil.rmtree(final_output_dir)
-                shutil.move(slide_output_dir, final_output_dir)
 
             # Clean up temporary directory
             if os.path.exists(temp_dir):
