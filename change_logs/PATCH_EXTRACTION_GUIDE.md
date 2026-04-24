@@ -126,16 +126,16 @@ After patch extraction, organized as:
 **Single magnification:**
 ```
 WSI/prognosis/single/
-  └── {slide_name}/
-      ├── {slide_name}_0_0.jpeg
-      ├── {slide_name}_0_1.jpeg
+  └── {patientID}/
+      ├── {patientID}_0_0.jpeg
+      ├── {patientID}_0_1.jpeg
       └── ...
 ```
 
 **Hierarchical (multi-magnification):**
 ```
 WSI/prognosis/pyramid/
-  └── {slide_name}/
+  └── {patientID}/
       ├── {low_mag_patch_0_0}.jpeg
       ├── {low_mag_patch_0_0}/
       │   ├── {high_mag_patch_0_0}.jpeg
