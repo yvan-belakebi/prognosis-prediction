@@ -213,7 +213,7 @@ def main():
     )
     parser.add_argument(
         "--backbone",
-        default="resnet18",
+        default="Virchow2",
         type=str,
         help="Embedder backbone [resnet18|resnet34|resnet50|resnet101|h-optimus-1|UNI2-h|Virchow2]",
     )
@@ -465,6 +465,9 @@ def main():
         bag_df.to_csv(
             os.path.join("datasets", args.dataset, item.split(os.path.sep)[2] + ".csv"),
             index=False,
+        )
+        print(
+            f"Saved {len(bag_csvs)} bags for class {i} in {item.split(os.path.sep)[2]}.csv"
         )
         all_df.append(bag_df)
     bags_path = pd.concat(all_df, axis=0, ignore_index=True)

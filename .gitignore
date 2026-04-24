@@ -8,6 +8,7 @@
 *.tif
 *.tiff
 # Ignore patches and features
+*.jpeg
 *.jpg
 *.csv
 # Ignore Python bytecode files
