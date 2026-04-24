@@ -95,6 +95,10 @@ def compute_feats(
                 patches = batch["input"].float().to(device)
                 outputs = i_classifier(patches)
                 feats = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+                # Handle 3D tensor output from transformer models (batch, sequence, features)
+                if len(feats.shape) == 3:
+                    # Flatten the sequence dimension: (batch, sequence, features) -> (batch * sequence, features)
+                    feats = feats.reshape(-1, feats.shape[-1])
                 feats = feats.cpu().numpy()
                 feats_list.extend(feats)
                 sys.stdout.write(
