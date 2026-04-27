@@ -9,6 +9,7 @@ Pillow
 # For tiling
 openslide-python
 openslide-bin
+scikit-image
 # For feature extraction
 timm
 huggingface_hub
