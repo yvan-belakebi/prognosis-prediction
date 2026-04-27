@@ -13,3 +13,8 @@
 *.csv
 # Ignore Python bytecode files
 *.pyc
+# Ignore model weights
+*.pth
+*.bin
+# Ignore model congiguration files
+*.json 

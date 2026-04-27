@@ -15,9 +15,10 @@ from collections import OrderedDict
 from sklearn.utils import shuffle
 from load_feature_extractor import (
     load_hoptimus1_feature_extractor,
-    load_uni2h_feature_extractor,
+    # load_uni2h_feature_extractor,
     load_virchow2_feature_extractor,
 )
+from load_feature_extractors_offline import load_uni2h_feature_extractor
 
 
 class BagDataset:
