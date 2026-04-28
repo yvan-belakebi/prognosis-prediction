@@ -18,3 +18,5 @@
 *.bin
 # Ignore model congiguration files
 *.json 
+# Ignore feature extractor files
+*.safetensors
