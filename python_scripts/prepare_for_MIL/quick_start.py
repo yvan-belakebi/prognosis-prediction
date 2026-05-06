@@ -237,7 +237,7 @@ def main():
                     "--batch_size",
                     "128",
                     "--num_workers",
-                    "4",
+                    "8",
                 ],
                 capture_output=False,
             )

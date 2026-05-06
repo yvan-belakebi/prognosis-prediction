@@ -74,5 +74,6 @@ def calculate_length_follow_up(row):
 
 df["time_to_event"] = df.apply(lambda row: calculate_length_follow_up(row), axis=1)
 interesting_cols = ["ESKD_year", "Year_RRT_or_death", "Length_follow_up", "Biopsy_year"]
+df.to_csv("full_data.csv", index=False)
 
 df[["File Location", "time_to_event"]].to_csv("labels.csv", index=False)

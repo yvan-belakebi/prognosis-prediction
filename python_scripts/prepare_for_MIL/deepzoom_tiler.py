@@ -71,6 +71,8 @@ class TileWorker(Process):
                     if not (w == self._tile_size and h == self._tile_size):
                         tile = tile.resize((self._tile_size, self._tile_size))
                     tile.save(outfile, quality=self._quality)
+                    coordfile = outfile.replace(f".{self._format}", ".npy")
+                    np.save(coordfile, np.array(address))  # address = (col, row)
             except:
                 pass
             self._queue.task_done()
@@ -239,10 +241,9 @@ class DeepZoomStaticTiler(object):
 
 def nested_patches(img_slide, out_base, level=(0,), ext="jpeg"):
     print("\n Organizing patches")
-    img_name = img_slide.split(os.sep)[-1].split(".")[0]
-    img_class = img_slide.split(os.sep)[-2]
+    img_name = os.path.splitext(os.path.basename(img_slide))[0]
     n_levels = len(glob.glob("WSI_temp_files/*"))
-    bag_path = os.path.join(out_base, img_class, img_name)
+    bag_path = os.path.join(out_base, img_name)
     os.makedirs(bag_path, exist_ok=True)
     if len(level) == 1:
         patches = glob.glob(os.path.join("WSI_temp_files", "*", "*." + ext))
@@ -402,10 +403,17 @@ if __name__ == "__main__":
             logger.info(
                 f"Processing slide {idx+1}/{len(all_slides)}: {os.path.basename(c_slide)}"
             )
-            class_dir = c_slide.split(os.sep)[-2]
 
             # Use slide filename (without extension) as the image name/ID
             slide_name = os.path.splitext(os.path.basename(c_slide))[0]
+
+            # Check if output folder already exists
+            output_folder = os.path.join(out_base, slide_name)
+            if os.path.exists(output_folder):
+                logger.warning(
+                    f"Output folder already exists for {slide_name}, skipping processing: {output_folder}"
+                )
+                continue
 
             # Create a temporary directory for processing this slide
             temp_dir = "WSI_temp_files"
