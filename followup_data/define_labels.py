@@ -5,8 +5,8 @@ from itables import init_notebook_mode
 init_notebook_mode(connected=True)
 
 # Unify the biopsy number format in the slide paths and the follow-up data.
-""" 
-IgA_slides = pd.read_csv("IgA_slide_paths.csv")
+
+IgA_slides = pd.read_csv("IgA_slide_data.csv")
 IgA_followup = pd.read_csv("IgA_cohort_full_data.csv")
 
 test_str = "B12 34"
@@ -45,10 +45,12 @@ def prepare_slides(df):
 
 IgA_slides = prepare_slides(IgA_slides)
 IgA_slides.to_csv("IgA_slide_paths.csv", index=False)
-"""
+
 
 IgA_slides = pd.read_csv("IgA_slide_paths.csv")
-IgA_slides = IgA_slides[["Biopsy_number_transformed", "File Location", "Slide ID"]]
+IgA_slides = IgA_slides[
+    ["Biopsy_number_transformed", "File Location", "Slide ID", "Stain"]
+]
 IgA_slides.rename(columns={"Biopsy_number_transformed": "Biopsy Number"}, inplace=True)
 
 IgA_followup = pd.read_csv("IgA_cohort_full_data.csv")
@@ -58,22 +60,25 @@ df = pd.merge(IgA_slides, IgA_followup, on="Biopsy Number", how="inner")
 
 
 def calculate_length_follow_up(row):
-    if (
-        pd.notna(row["Year_RRT_or_death"])
-        and pd.notna(row["ESKD_year"])
-        and pd.notna(row["Biopsy_year"])
-    ):
-        return min(row["Year_RRT_or_death"], row["ESKD_year"]) - row["Biopsy_year"]
-    elif pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["Biopsy_year"]):
-        return row["Year_RRT_or_death"] - row["Biopsy_year"]
-    elif pd.notna(row["ESKD_year"]) and pd.notna(row["Biopsy_year"]):
-        return row["ESKD_year"] - row["Biopsy_year"]
+    if row["RRT_or_death"] == "Yes":
+        if (
+            pd.notna(row["Year_RRT_or_death"])
+            and pd.notna(row["ESKD_year"])
+            and pd.notna(row["Biopsy_year"])
+        ):
+            return min(row["Year_RRT_or_death"], row["ESKD_year"]) - row["Biopsy_year"]
+        elif pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["Biopsy_year"]):
+            return row["Year_RRT_or_death"] - row["Biopsy_year"]
+        elif pd.notna(row["ESKD_year"]) and pd.notna(row["Biopsy_year"]):
+            return row["ESKD_year"] - row["Biopsy_year"]
+        else:
+            return None
     else:
-        return None
+        return row["Length_follow_up"]
 
 
-df["time_to_event"] = df.apply(lambda row: calculate_length_follow_up(row), axis=1)
+df["time"] = df.apply(lambda row: calculate_length_follow_up(row), axis=1)
 interesting_cols = ["ESKD_year", "Year_RRT_or_death", "Length_follow_up", "Biopsy_year"]
 df.to_csv("full_data.csv", index=False)
 
-df[["File Location", "time_to_event"]].to_csv("labels.csv", index=False)
+df[["File Location", "time", "Stain", "RRT_or_death"]].to_csv("labels.csv", index=False)
