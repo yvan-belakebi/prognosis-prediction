@@ -80,5 +80,6 @@ def calculate_length_follow_up(row):
 df["time"] = df.apply(lambda row: calculate_length_follow_up(row), axis=1)
 interesting_cols = ["ESKD_year", "Year_RRT_or_death", "Length_follow_up", "Biopsy_year"]
 df.to_csv("full_data.csv", index=False)
+df["RRT_or_death"] = df["RRT_or_death"].apply(lambda x: 1 if x == "Yes" else 0)
 
 df[["File Location", "time", "Stain", "RRT_or_death"]].to_csv("labels.csv", index=False)
