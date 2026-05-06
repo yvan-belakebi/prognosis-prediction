@@ -11,6 +11,7 @@
 *.jpeg
 *.jpg
 *.csv
+*.npy
 # Ignore Python bytecode files
 *.pyc
 # Ignore model weights
