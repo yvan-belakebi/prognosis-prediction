@@ -1,0 +1,43 @@
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t prognosis-feature-vector .
+  only:
+    - main
+    - merge_requests
+
+test:
+  stage: test
+  image: python:3.11-slim
+  before_script:
+    - pip install -r requirements.txt
+  script:
+    - python -c "import torch; print('PyTorch version:', torch.__version__)"
+    #- python python_scripts/prepare_for_MIL/check_feat_dimensions.py  # Example test script
+    - python -m pytest torchmil/tests/ -v  # Run tests if pytest is available
+  only:
+    - main
+    - merge_requests
+
+deploy:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t $CI_REGISTRY_IMAGE .
+    - docker push $CI_REGISTRY_IMAGE
+  only:
+    - main

@@ -1,0 +1,15 @@
+.venv
+__pycache__/
+*.pyc
+.git/
+.env
+.idea/
+.pytest_cache/
+
+data/
+datasets/
+models/
+patient_lists/
+followup_data/
+WSI/
+WSI_old/

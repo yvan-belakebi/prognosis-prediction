@@ -1,0 +1,27 @@
+version: "3.13"
+
+services:
+  feature_extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: prognosis-feature-extractor
+    volumes:
+      - .:/app:cached
+      - ./WSI:/app/WSI:cached
+      - ./datasets:/app/datasets:cached
+    environment:
+      DATASET: prognosis
+      BACKBONE: UNI2-h
+      NUM_CLASSES: "2"
+      BATCH_SIZE: "128"
+      NUM_WORKERS: "14"
+      MAGNIFICATION: single
+    command: >
+      --dataset ${DATASET}
+      --backbone ${BACKBONE}
+      --num_classes ${NUM_CLASSES}
+      --batch_size ${BATCH_SIZE}
+      --num_workers ${NUM_WORKERS}
+      --magnification ${MAGNIFICATION}
+    restart: "no"
