@@ -104,26 +104,26 @@ unique_patients = prep_val_df["patient"].unique()
 num_val = int(0.2 * len(unique_patients))
 val_patients = pd.Series(unique_patients).sample(n=num_val, random_state=42).tolist()
 val_df = prep_val_df[prep_val_df["patient"].isin(val_patients)][["file_name"]]
-val_df.to_csv(f"followup_data/validation_files_new.csv", index=False, header=False)
+val_df.to_csv(f"followup_data/validation_files.csv", index=False, header=False)
 
 
 ######## Create labels.csv and individual .npy files for each slide with time and label for prognosis prediction task.
 
 df[["file_name", "time", "Stain", "RRT_or_death"]].to_csv(
-    f"followup_data/labels_new.csv", index=False
+    f"followup_data/labels.csv", index=False
 )
 
-"""
-def save_as_npy(row):
-    import numpy as np
+import numpy as np
 
+
+def save_as_npy(row, output_dir):
     file_name = row["file_name"]
     time = row["time"]
-    stain = row["Stain"]
     label = row["RRT_or_death"]
 
-    np.save(f"WSI/prognosis/labels/{file_name}.npy", np.array([time, label]))
+    os.makedirs(output_dir, exist_ok=True)
+
+    np.save(f"{output_dir}/{file_name}.npy", np.array([time, label]))
 
 
-df.apply(save_as_npy, axis=1)
-"""
+df.apply(lambda x: save_as_npy(x, "WSI_full/IgA/labels"), axis=1)
