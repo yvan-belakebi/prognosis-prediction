@@ -15,11 +15,10 @@ from collections import OrderedDict
 from sklearn.utils import shuffle
 from load_feature_extractor import (
     load_hoptimus1_feature_extractor,
-    load_uni2h_feature_extractor,
+    # load_uni2h_feature_extractor,
     load_virchow2_feature_extractor,
 )
-
-# from load_feature_extractors_offline import load_uni2h_feature_extractor
+from load_feature_extractors_offline import load_uni2h_feature_extractor
 
 
 class BagDataset:
@@ -212,13 +211,13 @@ def main():
         description="Compute features from different backbones and save them as csv files for MIL training."
     )
     parser.add_argument(
-        "--num_classes", default=0, type=int, help="Number of output classes [0]"
+        "--num_classes", default=2, type=int, help="Number of output classes [2]"
     )
     parser.add_argument(
-        "--batch_size", default=512, type=int, help="Batch size of dataloader [512]"
+        "--batch_size", default=128, type=int, help="Batch size of dataloader [128]"
     )
     parser.add_argument(
-        "--num_workers", default=14, type=int, help="Number of threads for datalodaer"
+        "--num_workers", default=4, type=int, help="Number of threads for datalodaer"
     )
     parser.add_argument(
         "--gpu_index", type=int, nargs="+", default=(0,), help="GPU ID(s) [0]"
@@ -443,9 +442,6 @@ def main():
             "Tree magnification is not supported for timm feature extractor backbones."
         )
 
-    feats_path = os.path.join("datasets", args.dataset, "single")
-    os.makedirs(feats_path, exist_ok=True)
-
     if (
         args.magnification == "tree"
         or args.magnification == "low"
@@ -453,17 +449,19 @@ def main():
     ):
         bags_path = os.path.join("WSI", args.dataset, "pyramid", "*", "*")
     else:
-        already_extracted = os.listdir(feats_path)
+        already_extracted = os.listdir(os.path.join("datasets", args.dataset, "single"))
         already_extracted = [
             os.path.splitext(f)[0] for f in already_extracted if f.endswith(".csv")
         ]
         bags_path = os.path.join("WSI", args.dataset, "single", "*")
 
+    feats_path = os.path.join("datasets", args.dataset, "single")
+
+    os.makedirs(bags_path, exist_ok=True)
     bags_list = glob.glob(bags_path)
     bags_list = [
         path for path in bags_list if os.path.basename(path) not in already_extracted
     ]
-    print(bags_list[0:5])
 
     if args.magnification == "tree":
         compute_tree_feats(args, bags_list, i_classifier_l, i_classifier_h, feats_path)
@@ -476,17 +474,22 @@ def main():
             args.magnification,
             transform=feature_transform,
         )
-    # Handle single class "single"
-    single_path = os.path.join("datasets", args.dataset, "single")
-    bag_csvs = glob.glob(os.path.join(single_path, "*.csv"))
-    bag_df = pd.DataFrame(bag_csvs)
-    bag_df["label"] = 0  # Single class label
-    bag_df.to_csv(
-        os.path.join("datasets", args.dataset, "single.csv"),
-        index=False,
-    )
-    print(f"Saved {len(bag_csvs)} bags for single class in single.csv")
-    bags_path = bag_df
+    n_classes = glob.glob(os.path.join("datasets", args.dataset, "*" + os.path.sep))
+    n_classes = sorted(n_classes)
+    all_df = []
+    for i, item in enumerate(n_classes):
+        bag_csvs = glob.glob(os.path.join(item, "*.csv"))
+        bag_df = pd.DataFrame(bag_csvs)
+        bag_df["label"] = i
+        bag_df.to_csv(
+            os.path.join("datasets", args.dataset, item.split(os.path.sep)[2] + ".csv"),
+            index=False,
+        )
+        print(
+            f"Saved {len(bag_csvs)} bags for class {i} in {item.split(os.path.sep)[2]}.csv"
+        )
+        all_df.append(bag_df)
+    bags_path = pd.concat(all_df, axis=0, ignore_index=True)
     bags_path = shuffle(bags_path)
     bags_path.to_csv(
         os.path.join("datasets", args.dataset, args.dataset + ".csv"), index=False
