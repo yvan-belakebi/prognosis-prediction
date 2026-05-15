@@ -6,10 +6,11 @@ itables
 IPython
 # For image processing
 Pillow
-# For tiling
+# For tiling and stain normalization
 openslide-python
 openslide-bin
 scikit-image
+opencv-python
 # For feature extraction
 timm
 huggingface_hub
