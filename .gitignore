@@ -1,6 +1,7 @@
 # Miscellaneous
 *.log
 *.pptx
+*.png
 *.xlsx
 # Ignore all wsi files
 *.svs
