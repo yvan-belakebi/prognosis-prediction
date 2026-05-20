@@ -38,10 +38,11 @@ diagnosis["is_IgA"] = diagnosis["Diagnosis"].str.contains(
 )
 
 data = pd.merge(
-    diagnosis, events, left_on="ID_diagnosis", right_on="ID_event", how="right"
+    diagnosis, events, left_on="ID_diagnosis", right_on="ID_event", how="left"
 )
 
-data = pd.merge(data, death, left_on="ID_event", right_on="ID_death", how="left")
+# use ID_diagnosis (always non-null) so censored patients (null ID_event) also get matched
+data = pd.merge(data, death, left_on="ID_diagnosis", right_on="ID_death", how="left")
 data.drop(columns=["ID_event", "ID_death"], inplace=True)
 data["Event"] = data["Treatment"]
 data["Event_date"] = data["Treatment_date"]
@@ -70,6 +71,10 @@ data["time_to_event"] = data["Event_date"] - data["Biopsy_date"]
 # sort by Event_date and keep the first occurrence per ID_diagnosis
 data.sort_values(by="Event_date", inplace=True)
 data.drop_duplicates(subset=["ID_diagnosis"], keep="first", inplace=True)
+# censored patients (no event): use follow-up time to today
+today = pd.Timestamp.today().normalize()
+censored = data["time_to_event"].isna()
+data.loc[censored, "time_to_event"] = today - data.loc[censored, "Biopsy_date"]
 data = data[data["time_to_event"].dt.days > 60]
 
 # plot histogram for IgA cases and save it
@@ -105,4 +110,14 @@ wsi_registry = pd.concat(
 data_registry = pd.merge(
     data, wsi_registry, left_on="ID_diagnosis", right_on="patient_fnr", how="inner"
 )
-data_registry.to_csv("followup_data/registry_full_data.csv", index=False)
+
+# Create mapping of unique PersNummer to unique IDs
+persnummer_to_id = {
+    persnummer: idx
+    for idx, persnummer in enumerate(data_registry["patient_fnr"].unique(), start=1)
+}
+
+# Add new column with anonymized IDs
+data_registry["AnonymizedID"] = data_registry["patient_fnr"].map(persnummer_to_id)
+data_registry.drop(columns=["patient_fnr"], inplace=True)
+data_registry.to_csv("followup_data/registry_anonymized.csv", index=False)
