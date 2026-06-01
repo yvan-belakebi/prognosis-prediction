@@ -13,19 +13,16 @@ Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
         --pretrain_epochs 20 \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_features_paths WSI/IgA/UNI2-h_feats_val WSI/IgA_registry/UNI2-h_feats_val \\
-        --val_labels_paths   WSI/IgA/labels_val        WSI/IgA_registry/labels_val \\
+        --val_csv followup_data/survival_validation_files.csv \\
         --stain_filter PAS \\
-        --stain_csvs WSI/IgA/labels.csv none \\
-        --val_stain_csvs WSI/IgA/labels.csv none \\
+        --stain_csvs followup_data/labels_combined.csv none \\
         --epochs 50
 
 Usage (single-repo, no pretraining):
     python MIL.py --model_type abmil \\
         --features_paths WSI/IgA/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels \\
-        --val_features_paths WSI/IgA/UNI2-h_feats_val \\
-        --val_labels_paths   WSI/IgA/labels_val
+        --val_csv followup_data/survival_validation_files.csv
 
 Labels (.npy, shape (2,)): [time_to_first_event, censoring_indicator]
 """
@@ -145,31 +142,77 @@ def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     return sorted(matching & available)
 
 
+def load_val_names(val_csv):
+    """Load slide basenames from a CSV into a set.
+
+    Accepts a CSV with a 'file_name' column (header row) or a headerless
+    single-column file (one basename per row). Returns None when val_csv is None.
+    """
+    if val_csv is None:
+        return None
+    raw = pd.read_csv(val_csv, header=None, dtype=str)
+    col = raw.iloc[:, 0].str.strip()
+    if col.iloc[0].lower() == "file_name":
+        col = col.iloc[1:]
+    return set(col)
+
+
 def build_dataset(
     features_paths,
     labels_paths,
     coords_paths,
     bag_keys,
     dist_thr,
+    val_names=None,
     stain_csvs=None,
     stain_filter=None,
 ):
-    """Build a (possibly concatenated) ProcessedMILDataset from lists of paths."""
+    """Build train and (optionally) val datasets from lists of paths.
+
+    When val_names is provided, each repository is split: bags whose basename
+    appears in val_names go to val, the rest go to train.
+    Returns (train_dataset, val_dataset); val_dataset is None when val_names is None.
+    """
     stain_csvs = stain_csvs if stain_csvs is not None else [None] * len(features_paths)
-    datasets = [
-        ProcessedMILDataset(
-            features_path=fp,
-            labels_path=lp,
-            coords_path=cp,
-            bag_keys=bag_keys,
-            dist_thr=dist_thr,
-            bag_names=get_filtered_bag_names(fp, sc, stain_filter),
+    train_datasets, val_datasets = [], []
+
+    for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
+        filtered = get_filtered_bag_names(fp, sc, stain_filter)
+        if filtered is None:
+            available = sorted(
+                os.path.splitext(f)[0]
+                for f in os.listdir(fp)
+                if f.endswith(".npy") or f.endswith(".h5")
+            )
+        else:
+            available = filtered
+
+        if val_names is not None:
+            train_names = [n for n in available if n not in val_names]
+            val_names_here = [n for n in available if n in val_names]
+        else:
+            train_names = available
+            val_names_here = []
+
+        train_datasets.append(
+            ProcessedMILDataset(
+                features_path=fp, labels_path=lp, coords_path=cp,
+                bag_keys=bag_keys, dist_thr=dist_thr, bag_names=train_names,
+            )
         )
-        for fp, lp, cp, sc in zip(
-            features_paths, labels_paths, coords_paths, stain_csvs
-        )
-    ]
-    return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+        if val_names_here:
+            val_datasets.append(
+                ProcessedMILDataset(
+                    features_path=fp, labels_path=lp, coords_path=cp,
+                    bag_keys=bag_keys, dist_thr=dist_thr, bag_names=val_names_here,
+                )
+            )
+
+    train_ds = train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
+    if not val_datasets:
+        return train_ds, None
+    val_ds = val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets)
+    return train_ds, val_ds
 
 
 # ---------------------------------------------------------------------------
@@ -288,22 +331,12 @@ def main():
         help="Training coords folder(s) (deepgraphsurv / patchgcn only).",
     )
     parser.add_argument(
-        "--val_features_paths",
-        nargs="+",
+        "--val_csv",
         default=None,
-        help="Validation features folder(s).",
-    )
-    parser.add_argument(
-        "--val_labels_paths",
-        nargs="+",
-        default=None,
-        help="Validation labels folder(s).",
-    )
-    parser.add_argument(
-        "--val_coords_paths",
-        nargs="+",
-        default=None,
-        help="Validation coords folder(s) (deepgraphsurv / patchgcn only).",
+        help=(
+            "CSV listing validation slide basenames ('file_name' column or headerless). "
+            "The same feature/label directories are used; bags are split at load time."
+        ),
     )
 
     # --- Stain filtering (e.g. for IgA_light which contains multiple stains) -
@@ -320,12 +353,6 @@ def main():
             "Path to labels_combined.csv for each entry in --features_paths, "
             "in the same order. Use 'none' for repos that need no filtering."
         ),
-    )
-    parser.add_argument(
-        "--val_stain_csvs",
-        nargs="+",
-        default=None,
-        help="Same as --stain_csvs but for --val_features_paths.",
     )
 
     parser.add_argument(
@@ -425,30 +452,12 @@ def main():
                 f"--pretrain_coords_path is required for {args.model_type} pretraining."
             )
 
-    do_val = args.val_features_paths is not None
-    if do_val:
-        if args.val_labels_paths is None:
-            parser.error(
-                "--val_labels_paths is required when --val_features_paths is set."
-            )
-        if len(args.val_labels_paths) != len(args.val_features_paths):
-            parser.error(
-                "--val_features_paths and --val_labels_paths must have the same number of entries."
-            )
-
     if args.stain_csvs is not None:
         if args.stain_filter is None:
             parser.error("--stain_filter is required when --stain_csvs is set.")
         if len(args.stain_csvs) != n_train:
             parser.error(
                 "--stain_csvs must have the same number of entries as --features_paths."
-            )
-    if args.val_stain_csvs is not None:
-        if args.stain_filter is None:
-            parser.error("--stain_filter is required when --val_stain_csvs is set.")
-        if not do_val or len(args.val_stain_csvs) != len(args.val_features_paths):
-            parser.error(
-                "--val_stain_csvs must have the same number of entries as --val_features_paths."
             )
 
     finetune_epochs = args.epochs - args.pretrain_epochs
@@ -468,28 +477,17 @@ def main():
         return paths if paths is not None else [None] * n
 
     # --- Build datasets -------------------------------------------------------
-    train_dataset = build_dataset(
+    val_names = load_val_names(args.val_csv)
+    train_dataset, val_dataset = build_dataset(
         args.features_paths,
         args.labels_paths,
         _none_list(args.coords_paths, n_train),
         bag_keys,
         args.dist_thr,
+        val_names=val_names,
         stain_csvs=args.stain_csvs,
         stain_filter=args.stain_filter,
     )
-
-    val_dataset = None
-    if do_val:
-        n_val = len(args.val_features_paths)
-        val_dataset = build_dataset(
-            args.val_features_paths,
-            args.val_labels_paths,
-            _none_list(args.val_coords_paths, n_val),
-            bag_keys,
-            args.dist_thr,
-            stain_csvs=args.val_stain_csvs,
-            stain_filter=args.stain_filter,
-        )
 
     pretrain_dataset = None
     if do_pretrain:

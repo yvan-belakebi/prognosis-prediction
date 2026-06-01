@@ -151,6 +151,13 @@ registry_df[registry_df["split"] == "val"][["file_name"]].to_csv(
     "followup_data/validation_files_registry.csv", index=False, header=False
 )
 
+# Combined validation list used by MIL.py --val_csv
+survival_val = pd.concat([
+    iga_df[iga_df["split"] == "val"][["file_name"]],
+    registry_df[registry_df["split"] == "val"][["file_name"]],
+], ignore_index=True)
+survival_val.to_csv("followup_data/survival_validation_files.csv", index=False)
+
 
 # ── Combined labels ───────────────────────────────────────────────────────────
 
