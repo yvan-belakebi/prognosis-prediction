@@ -1,6 +1,7 @@
 import os
 import torch
 import timm
+from timm.models.vision_transformer import VisionTransformer
 from torchvision import transforms
 
 ############################################
@@ -11,28 +12,27 @@ from torchvision import transforms
 def load_uni2h_feature_extractor():
     uni_dir = "./models/uni2h"
 
-    uni_kwargs = {
-        "model_name": "vit_giant_patch14_224",
-        "img_size": 224,
-        "patch_size": 14,
-        "depth": 24,
-        "num_heads": 24,
-        "init_values": 1e-5,
-        "embed_dim": 1536,
-        "mlp_ratio": 2.66667 * 2,
-        "num_classes": 0,
-        "no_embed_class": True,
-        "mlp_layer": timm.layers.SwiGLUPacked,
-        "act_layer": torch.nn.SiLU,
-        "reg_tokens": 8,
-        "dynamic_img_size": True,
-    }
-
-    uni_model = timm.create_model(pretrained=False, **uni_kwargs)
-
-    uni_weights = torch.load(
-        os.path.join(uni_dir, "pytorch_model.bin"), map_location="cpu"
+    # Instantiate directly to avoid timm's pretrained-weights registry check
+    uni_model = VisionTransformer(
+        img_size=224,
+        patch_size=14,
+        depth=24,
+        num_heads=24,
+        init_values=1e-5,
+        embed_dim=1536,
+        mlp_ratio=2.66667 * 2,
+        num_classes=0,
+        no_embed_class=True,
+        mlp_layer=timm.layers.SwiGLUPacked,
+        act_layer=torch.nn.SiLU,
+        reg_tokens=8,
+        dynamic_img_size=True,
     )
+
+    weights_path = os.path.join(uni_dir, "pytorch_model.bin")
+    if not os.path.exists(weights_path):
+        weights_path = os.path.join(uni_dir, "model.safetensors")
+    uni_weights = torch.load(weights_path, map_location="cpu")
 
     uni_model.load_state_dict(uni_weights, strict=True)
     uni_model.eval()

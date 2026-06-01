@@ -15,11 +15,9 @@ from collections import OrderedDict
 from sklearn.utils import shuffle
 from load_feature_extractor import (
     load_hoptimus1_feature_extractor,
-    load_uni2h_feature_extractor,
     load_virchow2_feature_extractor,
 )
-
-# from load_feature_extractors_offline import load_uni2h_feature_extractor
+from load_feature_extractors_offline import load_uni2h_feature_extractor
 
 
 class BagDataset:
@@ -453,10 +451,8 @@ def main():
     ):
         bags_path = os.path.join("WSI", args.dataset, "pyramid", "*", "*")
     else:
-        already_extracted = os.listdir(feats_path)
-        already_extracted = [
-            os.path.splitext(f)[0] for f in already_extracted if f.endswith(".csv")
-        ]
+        already_extracted = glob.glob(os.path.join(feats_path, "**", "*.csv"), recursive=True)
+        already_extracted = [os.path.splitext(os.path.basename(f))[0] for f in already_extracted]
         bags_path = os.path.join("WSI", args.dataset, "single", "*")
 
     bags_list = glob.glob(bags_path)
@@ -478,7 +474,7 @@ def main():
         )
     # Handle single class "single"
     single_path = os.path.join("datasets", args.dataset, "single")
-    bag_csvs = glob.glob(os.path.join(single_path, "*.csv"))
+    bag_csvs = glob.glob(os.path.join(single_path, "**", "*.csv"), recursive=True)
     bag_df = pd.DataFrame(bag_csvs)
     bag_df["label"] = 0  # Single class label
     bag_df.to_csv(
