@@ -95,17 +95,24 @@ def _forward(model, batch, model_type: str) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Train / validation loops
 # ---------------------------------------------------------------------------
-def train_epoch(model, loader, optimizer, device, model_type: str) -> float:
+def train_epoch(
+    model, loader, optimizer, device, model_type: str, accumulation_steps: int = 1
+) -> float:
     model.train()
     total_loss = 0.0
-    for batch in loader:
+    optimizer.zero_grad()
+    for i, batch in enumerate(loader):
         batch = batch.to(device)
         risk = _forward(model, batch, model_type)
         loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # Scale so that accumulated gradients match a single full-batch step.
+        # Note: for Cox PH the risk set is per micro-batch, which is approximate
+        # but acceptable in practice.
+        (loss / accumulation_steps).backward()
         total_loss += loss.item()
+        if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
+            optimizer.step()
+            optimizer.zero_grad()
     return total_loss / len(loader)
 
 
@@ -119,6 +126,65 @@ def val_epoch(model, loader, device, model_type: str) -> float:
             loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
             total_loss += loss.item()
     return total_loss / len(loader)
+
+
+# ---------------------------------------------------------------------------
+# Collate helpers
+# ---------------------------------------------------------------------------
+def _subsample_adj(adj, idx):
+    """Subsample a 2D sparse or dense adjacency matrix to the given indices.
+
+    For sparse COO tensors the nonzero entries are filtered without ever
+    materialising the full dense matrix, so memory stays proportional to nnz
+    rather than n_patches².
+    """
+    if not adj.is_sparse:
+        return adj[idx][:, idx]
+    adj = adj.coalesce()
+    row, col = adj.indices()   # (2, nnz)
+    vals = adj.values()        # (nnz,)
+    n_new = len(idx)
+    # Map old patch indices → new position (-1 means not selected)
+    old2new = torch.full((adj.size(0),), -1, dtype=torch.long)
+    old2new[idx] = torch.arange(n_new)
+    keep = (old2new[row] >= 0) & (old2new[col] >= 0)
+    return torch.sparse_coo_tensor(
+        torch.stack([old2new[row[keep]], old2new[col[keep]]]),
+        vals[keep],
+        (n_new, n_new),
+    )
+
+
+def make_collate_fn(base_collate, max_patches=None):
+    """Wrap base_collate with random patch subsampling applied per bag.
+
+    ProcessedMILDataset pre-computes adj in __getitem__, so both adj and
+    the patch-level tensors (X, coords) must be subsampled here — before
+    collate_fn stacks and pads them — to keep the batched adj matrix at
+    (batch_size, max_patches, max_patches).
+    """
+    if max_patches is None:
+        return base_collate
+
+    def _collate_and_subsample(bags):
+        subsampled = []
+        for bag in bags:
+            n = bag["X"].shape[0]
+            if n > max_patches:
+                idx = torch.randperm(n)[:max_patches]
+                new_bag = {}
+                for k, v in bag.items():
+                    if k in ("X", "coords") and isinstance(v, torch.Tensor):
+                        new_bag[k] = v[idx]
+                    elif k == "adj" and isinstance(v, torch.Tensor):
+                        new_bag[k] = _subsample_adj(v, idx)
+                    else:
+                        new_bag[k] = v
+                bag = new_bag
+            subsampled.append(bag)
+        return base_collate(subsampled)
+
+    return _collate_and_subsample
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +253,19 @@ def build_dataset(
         else:
             available = filtered
 
+        # Drop bags that have no label file — e.g. slides excluded from the cohort.
+        labelled = {
+            os.path.splitext(f)[0]
+            for f in os.listdir(lp)
+            if f.endswith(".npy")
+        }
+        n_before = len(available)
+        available = [n for n in available if n in labelled]
+        if len(available) < n_before:
+            print(
+                f"  Skipped {n_before - len(available)} bags with no label file in {lp}"
+            )
+
         if val_names is not None:
             train_names = [n for n in available if n not in val_names]
             val_names_here = [n for n in available if n in val_names]
@@ -196,19 +275,29 @@ def build_dataset(
 
         train_datasets.append(
             ProcessedMILDataset(
-                features_path=fp, labels_path=lp, coords_path=cp,
-                bag_keys=bag_keys, dist_thr=dist_thr, bag_names=train_names,
+                features_path=fp,
+                labels_path=lp,
+                coords_path=cp,
+                bag_keys=bag_keys,
+                dist_thr=dist_thr,
+                bag_names=train_names,
             )
         )
         if val_names_here:
             val_datasets.append(
                 ProcessedMILDataset(
-                    features_path=fp, labels_path=lp, coords_path=cp,
-                    bag_keys=bag_keys, dist_thr=dist_thr, bag_names=val_names_here,
+                    features_path=fp,
+                    labels_path=lp,
+                    coords_path=cp,
+                    bag_keys=bag_keys,
+                    dist_thr=dist_thr,
+                    bag_names=val_names_here,
                 )
             )
 
-    train_ds = train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
+    train_ds = (
+        train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
+    )
     if not val_datasets:
         return train_ds, None
     val_ds = val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets)
@@ -377,6 +466,17 @@ def main():
         help="Total training epochs including pretrain (default: 50).",
     )
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size.")
+    parser.add_argument(
+        "--accumulation_steps",
+        type=int,
+        default=1,
+        help=(
+            "Gradient accumulation steps. Use with a reduced --batch_size to lower "
+            "peak GPU memory while preserving the effective batch size "
+            "(e.g. --batch_size 4 --accumulation_steps 4 ≈ batch_size 16). "
+            "Default: 1 (no accumulation)."
+        ),
+    )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
     parser.add_argument("--att_dim", type=int, default=128, help="Attention dimension.")
     parser.add_argument(
@@ -403,13 +503,26 @@ def main():
         "--mlp_depth", type=int, default=1, help="MLP depth after GCN (patchgcn)."
     )
     parser.add_argument(
-        "--dropout", type=float, default=0.0, help="Dropout rate (deepgraphsurv / patchgcn)."
+        "--dropout",
+        type=float,
+        default=0.0,
+        help="Dropout rate (deepgraphsurv / patchgcn).",
     )
     parser.add_argument(
         "--dist_thr",
         type=float,
         default=1.5,
         help="Adjacency distance threshold (deepgraphsurv).",
+    )
+    parser.add_argument(
+        "--max_patches",
+        type=int,
+        default=None,
+        help=(
+            "Randomly subsample each slide to at most this many patches before "
+            "the adjacency matrix is built. Required for PatchGCN / DeepGraphSurv "
+            "on large slides (e.g. --max_patches 4096)."
+        ),
     )
     parser.add_argument(
         "--save_every",
@@ -419,6 +532,7 @@ def main():
     )
 
     args = parser.parse_args()
+    torch.cuda.empty_cache()
 
     # --- Validate argument combinations --------------------------------------
     n_train = len(args.features_paths)
@@ -504,7 +618,11 @@ def main():
     if pretrain_dataset is not None:
         print(f"Pretrain bags: {len(pretrain_dataset)}")
 
-    _collate = partial(collate_fn, sparse=(args.model_type not in ("deepgraphsurv", "patchgcn")))
+    # Subsample patches before adj is built to avoid OOM on large slides.
+    _collate = make_collate_fn(
+        partial(collate_fn, sparse=(args.model_type not in ("deepgraphsurv", "patchgcn"))),
+        max_patches=args.max_patches,
+    )
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=_collate
@@ -532,7 +650,9 @@ def main():
         model = abmil_module.ABMIL(att_dim=args.att_dim)
     else:
         # Resolve feat_dim from the first available sample across datasets.
-        ref_dataset = pretrain_dataset if pretrain_dataset is not None else train_dataset
+        ref_dataset = (
+            pretrain_dataset if pretrain_dataset is not None else train_dataset
+        )
         feat_dim = int(ref_dataset[0]["X"].shape[-1])
         if args.model_type == "deepgraphsurv":
             model = dgs_module.DeepGraphSurv(
@@ -570,7 +690,12 @@ def main():
         print(f"\n--- Pretrain phase: {args.pretrain_epochs} epochs on non-IgA ---")
         for epoch in range(1, args.pretrain_epochs + 1):
             train_loss = train_epoch(
-                model, pretrain_loader, optimizer, device, args.model_type
+                model,
+                pretrain_loader,
+                optimizer,
+                device,
+                args.model_type,
+                accumulation_steps=args.accumulation_steps,
             )
             logger.log(epoch, "pretrain", train_loss)
             print(
@@ -589,7 +714,12 @@ def main():
     for epoch in range(1, finetune_epochs + 1):
         global_epoch = epoch + args.pretrain_epochs
         train_loss = train_epoch(
-            model, train_loader, optimizer, device, args.model_type
+            model,
+            train_loader,
+            optimizer,
+            device,
+            args.model_type,
+            accumulation_steps=args.accumulation_steps,
         )
 
         if val_loader is not None:
