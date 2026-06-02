@@ -37,10 +37,10 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(__file__))
 from define_labels import load_iga_cohort, load_registry_cohort  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Validation-split helper
 # ---------------------------------------------------------------------------
+
 
 def select_val_patients(df, patient_col, value_col, frac, n_bins, random_state):
     """Return patient IDs for the val set, stratified by value quantile.
@@ -58,17 +58,17 @@ def select_val_patients(df, patient_col, value_col, frac, n_bins, random_state):
         n = max(1, math.ceil(frac * len(g)))
         return g.sample(n=n, random_state=random_state)
 
-    return (
-        patient_df.groupby("stratum", group_keys=False).apply(_sample)
-    )[patient_col].tolist()
+    return (patient_df.groupby("stratum", group_keys=False).apply(_sample))[
+        patient_col
+    ].tolist()
 
 
 # ---------------------------------------------------------------------------
 # Per-cohort label writing
 # ---------------------------------------------------------------------------
 
-def _write_cohort(df, label_col, patient_col, output_dir,
-                  val_patients, split_kwargs):
+
+def _write_cohort(df, label_col, patient_col, output_dir, val_patients, split_kwargs):
     """Assign split, save .npy files, return the annotated DataFrame."""
     df = df.dropna(subset=[label_col]).copy()
     df["split"] = df[patient_col].isin(val_patients).map({True: "val", False: "train"})
@@ -86,6 +86,7 @@ def _write_cohort(df, label_col, patient_col, output_dir,
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build eGFR regression label files for regression_MIL.py.",
@@ -93,51 +94,70 @@ def main():
     )
 
     # Input files
-    parser.add_argument("--iga_slides_csv",
-                        default="followup_data/IgA_slide_data.csv")
-    parser.add_argument("--iga_followup_csv",
-                        default="followup_data/IgA_cohort_full_data.csv")
-    parser.add_argument("--registry_csv",
-                        default="followup_data/registry_anonymized.csv")
+    parser.add_argument("--iga_slides_csv", default="followup_data/IgA_slide_data.csv")
+    parser.add_argument(
+        "--iga_followup_csv", default="followup_data/IgA_cohort_full_data.csv"
+    )
+    parser.add_argument(
+        "--registry_csv", default="followup_data/registry_anonymized.csv"
+    )
 
     # Label columns
-    parser.add_argument("--iga_label_col", default="eGFR_diagnosis",
-                        help="eGFR column in IgA_cohort_full_data.csv.")
-    parser.add_argument("--registry_label_col", default="eGFR",
-                        help="eGFR column in registry_anonymized.csv.")
+    parser.add_argument(
+        "--iga_label_col",
+        default="eGFR_diagnosis",
+        help="eGFR column in IgA_cohort_full_data.csv.",
+    )
+    parser.add_argument(
+        "--registry_label_col",
+        default="eGFR",
+        help="eGFR column in registry_anonymized.csv.",
+    )
 
     # Date filter (consistent with define_labels.py)
-    parser.add_argument("--iga_date_filter", default="2006-01-01",
-                        help="Exclude IgA biopsies before this date (same filter as "
-                             "define_labels.py). Pass 'none' to disable.")
+    parser.add_argument(
+        "--iga_date_filter",
+        default="2006-01-01",
+        help="Exclude IgA biopsies before this date (same filter as "
+        "define_labels.py). Pass 'none' to disable.",
+    )
 
     # Validation split
-    parser.add_argument("--val_source", choices=["IgA", "registry", "both"],
-                        default="both",
-                        help="Which cohort(s) contribute slides to the val set.")
-    parser.add_argument("--val_frac",     type=float, default=0.2)
-    parser.add_argument("--n_bins",       type=int,   default=4,
-                        help="Quantile strata for stratified sampling.")
-    parser.add_argument("--random_state", type=int,   default=42)
+    parser.add_argument(
+        "--val_source",
+        choices=["IgA", "registry", "both"],
+        default="both",
+        help="Which cohort(s) contribute slides to the val set.",
+    )
+    parser.add_argument("--val_frac", type=float, default=0.2)
+    parser.add_argument(
+        "--n_bins", type=int, default=4, help="Quantile strata for stratified sampling."
+    )
+    parser.add_argument("--random_state", type=int, default=42)
 
     # Output directories
-    parser.add_argument("--iga_output_dir",
-                        default="WSI/IgA/labels_regression")
-    parser.add_argument("--registry_output_dir",
-                        default="WSI/registry_IgA/labels_regression")
+    parser.add_argument("--iga_output_dir", default="WSI/IgA/labels_regression")
+    parser.add_argument(
+        "--registry_output_dir", default="WSI/IgA_registry/labels_regression"
+    )
 
     # Summary outputs
-    parser.add_argument("--summary_csv",
-                        default="followup_data/labels_regression.csv",
-                        help="Combined summary CSV (both cohorts, with split column).")
-    parser.add_argument("--val_csv",
-                        default="followup_data/regression_validation_files.csv",
-                        help="Combined val slide list for regression_MIL.py --val_csv.")
+    parser.add_argument(
+        "--summary_csv",
+        default="followup_data/labels_regression.csv",
+        help="Combined summary CSV (both cohorts, with split column).",
+    )
+    parser.add_argument(
+        "--val_csv",
+        default="followup_data/regression_validation_files.csv",
+        help="Combined val slide list for regression_MIL.py --val_csv.",
+    )
 
     args = parser.parse_args()
 
-    split_kwargs = dict(frac=args.val_frac, n_bins=args.n_bins,
-                        random_state=args.random_state)
+    split_kwargs = dict(
+        frac=args.val_frac, n_bins=args.n_bins, random_state=args.random_state
+    )
 
     # ── IgA cohort ────────────────────────────────────────────────────────────
 
@@ -145,7 +165,9 @@ def main():
 
     # Apply date filter (same logic as define_labels.py)
     if args.iga_date_filter.lower() != "none":
-        iga_full["Biopsy_date"] = pd.to_datetime(iga_full["Biopsy_date"], errors="coerce")
+        iga_full["Biopsy_date"] = pd.to_datetime(
+            iga_full["Biopsy_date"], errors="coerce"
+        )
         iga_full = iga_full[iga_full["Biopsy_date"] >= args.iga_date_filter]
 
     if args.iga_label_col not in iga_full.columns:
@@ -160,16 +182,22 @@ def main():
 
     iga_val_patients = (
         select_val_patients(iga_df, "patient", "eGFR", **split_kwargs)
-        if args.val_source in ("IgA", "both") else []
+        if args.val_source in ("IgA", "both")
+        else []
     )
-    iga_df = _write_cohort(iga_df, "eGFR", "patient",
-                           args.iga_output_dir, iga_val_patients, split_kwargs)
+    iga_df = _write_cohort(
+        iga_df, "eGFR", "patient", args.iga_output_dir, iga_val_patients, split_kwargs
+    )
 
-    print(f"IgA — {len(iga_df)} slides  "
-          f"(train {(iga_df['split']=='train').sum()}, "
-          f"val {(iga_df['split']=='val').sum()})")
-    print(f"  eGFR: {iga_df['eGFR'].min():.1f} – {iga_df['eGFR'].max():.1f}  "
-          f"(mean {iga_df['eGFR'].mean():.1f})")
+    print(
+        f"IgA — {len(iga_df)} slides  "
+        f"(train {(iga_df['split']=='train').sum()}, "
+        f"val {(iga_df['split']=='val').sum()})"
+    )
+    print(
+        f"  eGFR: {iga_df['eGFR'].min():.1f} – {iga_df['eGFR'].max():.1f}  "
+        f"(mean {iga_df['eGFR'].mean():.1f})"
+    )
 
     # ── Registry cohort ───────────────────────────────────────────────────────
 
@@ -187,22 +215,35 @@ def main():
 
     reg_val_patients = (
         select_val_patients(reg_df, "patient", "eGFR", **split_kwargs)
-        if args.val_source in ("registry", "both") else []
+        if args.val_source in ("registry", "both")
+        else []
     )
-    reg_df = _write_cohort(reg_df, "eGFR", "patient",
-                           args.registry_output_dir, reg_val_patients, split_kwargs)
+    reg_df = _write_cohort(
+        reg_df,
+        "eGFR",
+        "patient",
+        args.registry_output_dir,
+        reg_val_patients,
+        split_kwargs,
+    )
 
-    print(f"Registry — {len(reg_df)} slides  "
-          f"(train {(reg_df['split']=='train').sum()}, "
-          f"val {(reg_df['split']=='val').sum()})")
-    print(f"  eGFR: {reg_df['eGFR'].min():.1f} – {reg_df['eGFR'].max():.1f}  "
-          f"(mean {reg_df['eGFR'].mean():.1f})")
+    print(
+        f"Registry — {len(reg_df)} slides  "
+        f"(train {(reg_df['split']=='train').sum()}, "
+        f"val {(reg_df['split']=='val').sum()})"
+    )
+    print(
+        f"  eGFR: {reg_df['eGFR'].min():.1f} – {reg_df['eGFR'].max():.1f}  "
+        f"(mean {reg_df['eGFR'].mean():.1f})"
+    )
 
     # ── Combined outputs ──────────────────────────────────────────────────────
 
     combined = pd.concat(
-        [iga_df[["file_name", "eGFR", "Stain", "patient", "source", "split"]],
-         reg_df[["file_name", "eGFR", "Stain", "patient", "source", "split"]]],
+        [
+            iga_df[["file_name", "eGFR", "Stain", "patient", "source", "split"]],
+            reg_df[["file_name", "eGFR", "Stain", "patient", "source", "split"]],
+        ],
         ignore_index=True,
     )
     combined.to_csv(args.summary_csv, index=False)
@@ -220,7 +261,9 @@ def main():
     )
 
     print(f"\nCombined val slides: {len(val_list)}")
-    print(f"  Combined eGFR: {combined['eGFR'].mean():.1f} ± {combined['eGFR'].std():.1f}")
+    print(
+        f"  Combined eGFR: {combined['eGFR'].mean():.1f} ± {combined['eGFR'].std():.1f}"
+    )
     print(f"\nOutputs:")
     print(f"  {args.iga_output_dir}/        ({len(iga_df)} .npy files)")
     print(f"  {args.registry_output_dir}/   ({len(reg_df)} .npy files)")
