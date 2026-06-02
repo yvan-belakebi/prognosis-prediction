@@ -22,3 +22,5 @@
 *.json 
 # Ignore feature extractor files
 *.safetensors
+# Ignore shell scripts
+*.sh
