@@ -42,6 +42,7 @@ CKD_STAGE_MAP = {"G1": 0, "G2": 1, "G3a": 2, "G3b": 3, "G4": 4, "G5": 5}
 # Helpers (same biopsy-number normalisation as define_labels.py)
 # ---------------------------------------------------------------------------
 
+
 def transform_label(label):
     if pd.isna(label):
         return label
@@ -58,7 +59,9 @@ def transform_label(label):
 def prepare_slides(df):
     copy_df = df.copy()
     copy_df["Biopsy Number"] = copy_df["Biopsy Number"].astype(str)
-    copy_df["Biopsy_number_transformed"] = copy_df["Biopsy Number"].apply(transform_label)
+    copy_df["Biopsy_number_transformed"] = copy_df["Biopsy Number"].apply(
+        transform_label
+    )
     return copy_df
 
 
@@ -84,9 +87,9 @@ def select_validation_patients(df, patient_col, class_col, frac=0.2, random_stat
         n = max(1, math.ceil(frac * len(g)))
         return g.sample(n=min(n, len(g)), random_state=random_state)
 
-    return (
-        patient_df.groupby(class_col, group_keys=False).apply(sample_stratum)
-    )[patient_col].tolist()
+    return (patient_df.groupby(class_col, group_keys=False).apply(sample_stratum))[
+        patient_col
+    ].tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +117,9 @@ df["ckd_label"] = df["CKD_stage_diagnosis"].map(CKD_STAGE_MAP)
 n_missing = df["ckd_label"].isna().sum()
 if n_missing > 0:
     unknown = df.loc[df["ckd_label"].isna(), "CKD_stage_diagnosis"].unique().tolist()
-    print(f"Warning: {n_missing} slides have an unrecognised CKD stage {unknown} and will be skipped.")
+    print(
+        f"Warning: {n_missing} slides have an unrecognised CKD stage {unknown} and will be skipped."
+    )
     df = df.dropna(subset=["ckd_label"])
 
 df["ckd_label"] = df["ckd_label"].astype(int)
@@ -133,9 +138,9 @@ df["split"] = df["PERSON_NR"].isin(val_patients).map({True: "val", False: "train
 # ---------------------------------------------------------------------------
 
 summary_path = "followup_data/labels_classification.csv"
-df[["file_name", "ckd_label", "CKD_stage_diagnosis", "Stain", "PERSON_NR", "split"]].to_csv(
-    summary_path, index=False
-)
+df[
+    ["file_name", "ckd_label", "CKD_stage_diagnosis", "Stain", "PERSON_NR", "split"]
+].to_csv(summary_path, index=False)
 print(f"Summary saved to {summary_path}")
 
 val_csv_path = "followup_data/classification_validation_files.csv"
@@ -147,10 +152,10 @@ print(f"Validation list saved to {val_csv_path}")
 # ---------------------------------------------------------------------------
 
 TRAIN_DIR = "WSI/IgA/labels_classification"
-VAL_DIR   = "WSI/IgA/labels_classification_val"
+VAL_DIR = "WSI/IgA/labels_classification_val"
 
 os.makedirs(TRAIN_DIR, exist_ok=True)
-os.makedirs(VAL_DIR,   exist_ok=True)
+os.makedirs(VAL_DIR, exist_ok=True)
 
 for _, row in df.iterrows():
     label_array = np.array(int(row["ckd_label"]))
