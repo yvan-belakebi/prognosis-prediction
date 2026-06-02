@@ -1,13 +1,18 @@
 """
 create_label_npy_files.py — Convert a label CSV into per-slide .npy files for MIL training.
 
-Supports two label formats, auto-detected from the CSV columns:
+Supports three label formats (survival and classification are auto-detected;
+regression requires explicit --mode and --label_col):
 
   Survival        columns: file_name, time, event  (+ any extras)
                   saves:   np.array([time, event])  shape (2,), float64
 
   Classification  columns: file_name, ckd_label  (+ any extras)
                   saves:   np.array(int)           scalar int
+
+  Regression      any column specified with --label_col (e.g. eGFR)
+                  saves:   np.array(float)          scalar float64
+                  requires: --mode regression --label_col COLUMN
 
 Output routing
 --------------
@@ -16,11 +21,6 @@ Use --source_dirs when the CSV has a 'source' column and files should be
 routed to different directories depending on the source value.
 
 Run from the project root:
-
-  # Survival, all rows in one directory
-  python python_scripts/prepare_for_MIL/create_label_npy_files.py \\
-      --csv followup_data/labels_pas.csv \\
-      --output_dir WSI/IgA/labels
 
   # Survival, PAS only, split by source into IgA and registry_IgA
   python python_scripts/prepare_for_MIL/create_label_npy_files.py \\
@@ -32,6 +32,12 @@ Run from the project root:
   python python_scripts/prepare_for_MIL/create_label_npy_files.py \\
       --csv followup_data/labels_classification.csv \\
       --output_dir WSI/IgA/labels_classification
+
+  # Regression labels (eGFR from registry)
+  python python_scripts/prepare_for_MIL/create_label_npy_files.py \\
+      --csv followup_data/labels_regression.csv \\
+      --output_dir WSI/registry_IgA/labels_regression \\
+      --mode regression --label_col eGFR
 """
 
 import argparse
@@ -54,9 +60,9 @@ def detect_mode(df: pd.DataFrame, mode_hint: str | None) -> str:
     if "ckd_label" in cols:
         return "classification"
     raise ValueError(
-        "Cannot auto-detect mode: CSV must have either ('time', 'event') "
-        "columns (survival) or a 'ckd_label' column (classification). "
-        "Pass --mode to override."
+        "Cannot auto-detect mode: CSV must have ('time', 'event') columns "
+        "(survival) or a 'ckd_label' column (classification). "
+        "For regression pass --mode regression --label_col COLUMN."
     )
 
 
@@ -84,18 +90,38 @@ def _save_one_classification(row, output_dir: str) -> bool:
     return True
 
 
+def _make_regression_saver(label_col: str):
+    """Return a per-row saver for the given continuous label column."""
+    def _save_one_regression(row, output_dir: str) -> bool:
+        if pd.isna(row[label_col]):
+            print(f"  Warning: skipping '{row['file_name']}' — NaN in {label_col}.")
+            return False
+        np.save(
+            os.path.join(output_dir, f"{row['file_name']}.npy"),
+            np.array(float(row[label_col]), dtype=np.float64),
+        )
+        return True
+    return _save_one_regression
+
+
 # ---------------------------------------------------------------------------
 # Batch save
 # ---------------------------------------------------------------------------
 
-def save_all(df: pd.DataFrame, mode: str, dir_map: dict[str, str]) -> tuple[int, int]:
+def save_all(df: pd.DataFrame, mode: str, dir_map: dict[str, str],
+             label_col: str | None = None) -> tuple[int, int]:
     """Save all rows, routing each row to its output directory via dir_map.
 
     dir_map maps source_value → output_dir, or uses the single key None for
     a flat (no-source) destination.
     Returns (saved, skipped).
     """
-    saver = _save_one_survival if mode == "survival" else _save_one_classification
+    if mode == "survival":
+        saver = _save_one_survival
+    elif mode == "regression":
+        saver = _make_regression_saver(label_col)
+    else:
+        saver = _save_one_classification
     saved = skipped = 0
 
     for _, row in df.iterrows():
@@ -146,8 +172,13 @@ def main():
     )
 
     parser.add_argument(
-        "--mode", choices=["survival", "classification"], default=None,
-        help="Label type. Auto-detected from CSV columns when omitted.",
+        "--mode", choices=["survival", "classification", "regression"], default=None,
+        help="Label type. Auto-detected for survival/classification; "
+             "must be set explicitly for regression.",
+    )
+    parser.add_argument(
+        "--label_col", default=None,
+        help="Column name for the regression target (required when --mode regression).",
     )
     parser.add_argument(
         "--stain_filter", default=None,
@@ -164,6 +195,17 @@ def main():
 
     mode = detect_mode(df, args.mode)
     print(f"Mode: {mode}")
+
+    if mode == "regression":
+        if args.label_col is None:
+            parser.error("--label_col is required when --mode regression.")
+        if args.label_col not in df.columns:
+            parser.error(
+                f"--label_col '{args.label_col}' not found in CSV. "
+                f"Available columns: {list(df.columns)}"
+            )
+        print(f"Regression target: {args.label_col}  "
+              f"(range {df[args.label_col].min():.1f} – {df[args.label_col].max():.1f})")
 
     # Optional stain filter
     if args.stain_filter is not None:
@@ -207,7 +249,7 @@ def main():
     for path in dir_map.values():
         os.makedirs(path, exist_ok=True)
 
-    saved, skipped = save_all(df, mode, dir_map)
+    saved, skipped = save_all(df, mode, dir_map, label_col=args.label_col)
 
     # Summary
     print()

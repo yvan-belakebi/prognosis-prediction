@@ -28,10 +28,11 @@ diagnosis.rename(
         "PersNummer": "ID_diagnosis",
         "Biopsidato": "Biopsy_date",
         "Diagnoser P1.2013_konklusiv_diagnose": "Diagnosis",
+        "Beregnet_eGFR_felles": "eGFR",
     },
     inplace=True,
 )
-diagnosis = diagnosis[["ID_diagnosis", "Biopsy_date", "Diagnosis"]]
+diagnosis = diagnosis[["ID_diagnosis", "Biopsy_date", "Diagnosis", "eGFR"]]
 
 diagnosis["is_IgA"] = diagnosis["Diagnosis"].str.contains(
     "IgA nefropati", case=False, na=False

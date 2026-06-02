@@ -37,12 +37,14 @@ import pandas as pd
 
 try:
     from itables import init_notebook_mode
+
     init_notebook_mode(connected=True)
 except Exception:
     pass
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def transform_label(label):
     """Normalise biopsy-number format to 'number/year' (e.g. 'B2312' → '12/23')."""
@@ -84,16 +86,20 @@ def select_val_patients(df, patient_col, time_col, frac, n_bins, random_state):
         n = max(1, math.ceil(frac * len(g)))
         return g.sample(n=n, random_state=random_state)
 
-    return (
-        patient_df.groupby("stratum", group_keys=False).apply(_sample)
-    )[patient_col].tolist()
+    return (patient_df.groupby("stratum", group_keys=False).apply(_sample))[
+        patient_col
+    ].tolist()
 
 
 def _follow_up_years(row):
     """Compute follow-up length in years for a single IgA cohort row."""
     if row["RRT_or_death"] != "Yes":
         return row["Length_follow_up"]
-    if pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["ESKD_year"]) and pd.notna(row["Biopsy_year"]):
+    if (
+        pd.notna(row["Year_RRT_or_death"])
+        and pd.notna(row["ESKD_year"])
+        and pd.notna(row["Biopsy_year"])
+    ):
         return min(row["Year_RRT_or_death"], row["ESKD_year"]) - row["Biopsy_year"]
     if pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["Biopsy_year"]):
         return row["Year_RRT_or_death"] - row["Biopsy_year"]
@@ -103,6 +109,7 @@ def _follow_up_years(row):
 
 
 # ── cohort loaders ────────────────────────────────────────────────────────────
+
 
 def load_iga_cohort(iga_slides_csv, iga_followup_csv):
     """Return the IgA cohort DataFrame with time (days), event, file_name, source."""
@@ -114,7 +121,7 @@ def load_iga_cohort(iga_slides_csv, iga_followup_csv):
     followup.rename(columns={"Biopsy_nr": "Biopsy Number"}, inplace=True)
 
     df = pd.merge(slides, followup, on="Biopsy Number", how="inner")
-    df["time"] = df.apply(_follow_up_years, axis=1) * 365.25   # years → days
+    df["time"] = df.apply(_follow_up_years, axis=1) * 365.25  # years → days
     df["event"] = (df["RRT_or_death"] == "Yes").astype(int)
     df["file_name"] = df["File Location"].apply(extract_file_name)
     df["source"] = "IgA"
@@ -126,9 +133,7 @@ def load_registry_cohort(registry_csv):
     df = pd.read_csv(registry_csv)
     df = df[df["is_IgA"] == True].copy()
     df["time"] = (
-        df["time_to_event"].astype(str)
-        .str.extract(r"(\d+(?:\.\d+)?)")[0]
-        .astype(float)
+        df["time_to_event"].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
     )
     df["event"] = df["Event"].notna().astype(int)
     df.rename(
@@ -141,6 +146,7 @@ def load_registry_cohort(registry_csv):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build survival labels and train/val split CSVs for MIL.py.",
@@ -149,19 +155,27 @@ def main():
 
     # Validation split
     parser.add_argument(
-        "--val_source", choices=["IgA", "registry", "both"], default="both",
+        "--val_source",
+        choices=["IgA", "registry", "both"],
+        default="both",
         help="Cohort(s) that contribute slides to the validation set.",
     )
     parser.add_argument(
-        "--val_frac", type=float, default=0.2,
+        "--val_frac",
+        type=float,
+        default=0.2,
         help="Fraction of patients assigned to validation.",
     )
     parser.add_argument(
-        "--n_bins", type=int, default=4,
+        "--n_bins",
+        type=int,
+        default=4,
         help="Number of quantile strata for time-stratified patient sampling.",
     )
     parser.add_argument(
-        "--random_state", type=int, default=42,
+        "--random_state",
+        type=int,
+        default=42,
         help="Random seed for reproducibility.",
     )
 
@@ -175,21 +189,25 @@ def main():
         ),
     )
     parser.add_argument(
-        "--output_dir", default="followup_data",
+        "--output_dir",
+        default="followup_data",
         help="Directory for all other CSV outputs.",
     )
 
     # Input paths
     parser.add_argument(
-        "--iga_slides_csv", default="followup_data/IgA_slide_data.csv",
+        "--iga_slides_csv",
+        default="followup_data/IgA_slide_data.csv",
         help="Slide metadata for the IgA cohort.",
     )
     parser.add_argument(
-        "--iga_followup_csv", default="followup_data/IgA_cohort_full_data.csv",
+        "--iga_followup_csv",
+        default="followup_data/IgA_cohort_full_data.csv",
         help="Clinical follow-up data for the IgA cohort.",
     )
     parser.add_argument(
-        "--registry_csv", default="followup_data/registry_anonymized.csv",
+        "--registry_csv",
+        default="followup_data/registry_anonymized.csv",
         help="Registry cohort data.",
     )
 
@@ -199,36 +217,69 @@ def main():
     # ── Load cohorts ──────────────────────────────────────────────────────────
 
     iga_df = load_iga_cohort(args.iga_slides_csv, args.iga_followup_csv)
+    iga_df["Biopsy_date"] = pd.to_datetime(iga_df["Biopsy_date"], errors="coerce")
+    iga_backup = iga_df.copy()  # full IgA cohort before any filtering
+    iga_df = iga_df[
+        iga_df["Biopsy_date"] >= "2006-01-01"
+    ]  # IgA biopsies before 2006 have very short follow-up
+
+    # Slides present in iga_backup but removed by the date filter.
+    # Saved so they can be explicitly excluded from feature directories
+    # before training (e.g. passed to sync_dirs.py or inspected manually).
+    iga_excluded = iga_backup.loc[
+        ~iga_backup["file_name"].isin(set(iga_df["file_name"])),
+        ["file_name", "Biopsy_date", "Stain"],
+    ].drop_duplicates("file_name").sort_values("file_name").reset_index(drop=True)
+
     registry_df = load_registry_cohort(args.registry_csv)
 
     # ── Assign train / val splits ─────────────────────────────────────────────
 
-    split_kwargs = dict(frac=args.val_frac, n_bins=args.n_bins, random_state=args.random_state)
+    split_kwargs = dict(
+        frac=args.val_frac, n_bins=args.n_bins, random_state=args.random_state
+    )
 
     iga_val_patients = (
         select_val_patients(iga_df, "PERSON_NR", "time", **split_kwargs)
-        if args.val_source in ("IgA", "both") else []
+        if args.val_source in ("IgA", "both")
+        else []
     )
     registry_val_patients = (
         select_val_patients(registry_df, "patient", "time", **split_kwargs)
-        if args.val_source in ("registry", "both") else []
+        if args.val_source in ("registry", "both")
+        else []
     )
 
-    iga_df["split"] = iga_df["PERSON_NR"].isin(iga_val_patients).map({True: "val", False: "train"})
-    registry_df["split"] = registry_df["patient"].isin(registry_val_patients).map({True: "val", False: "train"})
+    iga_df["split"] = (
+        iga_df["PERSON_NR"].isin(iga_val_patients).map({True: "val", False: "train"})
+    )
+    registry_df["split"] = (
+        registry_df["patient"]
+        .isin(registry_val_patients)
+        .map({True: "val", False: "train"})
+    )
 
     # ── Save outputs ──────────────────────────────────────────────────────────
 
     # IgA full cohort (all clinical columns, useful for downstream analysis)
     iga_df.to_csv(os.path.join(args.output_dir, "full_data.csv"), index=False)
 
+    # Slides excluded by the date filter — use this list to remove them from
+    # feature/label directories before training.
+    excluded_path = os.path.join(args.output_dir, "iga_excluded_slides.csv")
+    iga_excluded.to_csv(excluded_path, index=False)
+
     # Combined label file (both cohorts)
-    iga_labels = iga_df[["file_name", "time", "event", "Stain", "source", "split"]].rename(
-        columns={"Stain": "stain"}
-    )
-    registry_labels = registry_df[["file_name", "time", "event", "stain", "source", "split"]]
+    iga_labels = iga_df[
+        ["file_name", "time", "event", "Stain", "source", "split"]
+    ].rename(columns={"Stain": "stain"})
+    registry_labels = registry_df[
+        ["file_name", "time", "event", "stain", "source", "split"]
+    ]
     labels_combined = pd.concat([iga_labels, registry_labels], ignore_index=True)
-    labels_combined.to_csv(os.path.join(args.output_dir, "labels_combined.csv"), index=False)
+    labels_combined.to_csv(
+        os.path.join(args.output_dir, "labels_combined.csv"), index=False
+    )
 
     # Per-source validation files (stem of --val_csv + _IgA / _registry)
     val_stem, val_ext = os.path.splitext(args.val_csv)
@@ -240,24 +291,28 @@ def main():
     )
 
     # Combined validation list — consumed by MIL.py --val_csv
-    survival_val = pd.concat([
-        iga_df[iga_df["split"] == "val"][["file_name"]],
-        registry_df[registry_df["split"] == "val"][["file_name"]],
-    ], ignore_index=True)
+    survival_val = pd.concat(
+        [
+            iga_df[iga_df["split"] == "val"][["file_name"]],
+            registry_df[registry_df["split"] == "val"][["file_name"]],
+        ],
+        ignore_index=True,
+    )
     survival_val.to_csv(args.val_csv, index=False)
 
     # ── Summary ───────────────────────────────────────────────────────────────
 
-    n_iga_train  = (iga_df["split"] == "train").sum()
-    n_iga_val    = (iga_df["split"] == "val").sum()
-    n_reg_train  = (registry_df["split"] == "train").sum()
-    n_reg_val    = (registry_df["split"] == "val").sum()
+    n_iga_train = (iga_df["split"] == "train").sum()
+    n_iga_val = (iga_df["split"] == "val").sum()
+    n_reg_train = (registry_df["split"] == "train").sum()
+    n_reg_val = (registry_df["split"] == "val").sum()
 
     print(
         f"val_source={args.val_source}  val_frac={args.val_frac}"
         f"  n_bins={args.n_bins}  random_state={args.random_state}"
     )
-    print(f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}")
+    print(f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}  "
+          f"excluded (pre-2006): {len(iga_excluded):>4d}")
     print(f"  Registry — train: {n_reg_train:>5d}  val: {n_reg_val:>4d}")
     print(f"  Combined val slides: {len(survival_val)}")
     print(f"\nOutputs:")
@@ -266,6 +321,7 @@ def main():
     print(f"  {val_stem}_registry{val_ext}")
     print(f"  {os.path.join(args.output_dir, 'labels_combined.csv')}")
     print(f"  {os.path.join(args.output_dir, 'full_data.csv')}")
+    print(f"  {excluded_path}  ({len(iga_excluded)} slides excluded by date filter)")
 
 
 if __name__ == "__main__":
