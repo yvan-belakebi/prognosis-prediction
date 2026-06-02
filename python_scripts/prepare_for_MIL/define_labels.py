@@ -1,182 +1,272 @@
+"""
+define_labels.py — Build survival labels and the train/val split for MIL.py.
+
+Run from the project root:
+    python python_scripts/prepare_for_MIL/define_labels.py [options]
+
+Key outputs
+-----------
+  <output_dir>/labels_combined.csv          All slides (IgA + registry) with
+                                            time, event, stain, source, split.
+  <val_csv>                                 Flat list of validation slide names
+                                            (file_name column); consumed directly
+                                            by MIL.py --val_csv.
+  <output_dir>/full_data.csv               IgA cohort with all clinical columns.
+
+Parameters
+----------
+--val_source    IgA | registry | both  (default: both)
+                Which cohort(s) contribute slides to the validation set.
+--val_frac      Fraction of patients assigned to validation  (default: 0.2)
+--n_bins        Quantile strata for time-stratified patient sampling  (default: 4)
+--random_state  Random seed  (default: 42)
+--val_csv       Full path of the combined validation list for MIL.py --val_csv
+                (default: followup_data/survival_validation_files.csv)
+--output_dir    Directory for all other CSV outputs  (default: followup_data)
+--iga_slides_csv
+--iga_followup_csv
+--registry_csv  Input file paths (rarely need changing).
+"""
+
+import argparse
 import math
 import os
 import re
 
 import pandas as pd
-from itables import init_notebook_mode
 
-init_notebook_mode(connected=True)
+try:
+    from itables import init_notebook_mode
+    init_notebook_mode(connected=True)
+except Exception:
+    pass
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-
 def transform_label(label):
+    """Normalise biopsy-number format to 'number/year' (e.g. 'B2312' → '12/23')."""
     if pd.isna(label):
         return label
     label = str(label).strip().replace("\xa0", " ")
-    match = re.match(r"^B(\d{2})\s+(\d+)$", label)
-    if match:
-        return f"{match.group(2).lstrip('0')}/{match.group(1)}"
-    match = re.match(r"^B(\d{2})(\d+)$", label)
-    if match:
-        return f"{match.group(2).lstrip('0')}/{match.group(1)}"
+    m = re.match(r"^B(\d{2})\s+(\d+)$", label)
+    if m:
+        return f"{m.group(2).lstrip('0')}/{m.group(1)}"
+    m = re.match(r"^B(\d{2})(\d+)$", label)
+    if m:
+        return f"{m.group(2).lstrip('0')}/{m.group(1)}"
     return label
 
 
-def prepare_slides(df):
-    copy_df = df.copy()
-    copy_df["Biopsy Number"] = copy_df["Biopsy Number"].astype(str)
-    copy_df["Biopsy_number_transformed"] = copy_df["Biopsy Number"].apply(
-        transform_label
-    )
-    return copy_df
-
-
 def extract_file_name(file_location):
+    """Return the stem of a file path (no directory, no extension)."""
     if pd.isna(file_location):
         return file_location
     path = str(file_location).strip().replace("\xa0", " ")
     basename = re.split(r"[\\\\/]", path)[-1]
-    basename = basename.split("?")[0].split("#")[0].strip()
-    return os.path.splitext(basename)[0]
+    return os.path.splitext(basename.split("?")[0].split("#")[0].strip())[0]
 
 
-def select_validation_patients(df, patient_col, time_col, frac=0.2, n_bins=4, random_state=42):
-    """Return the list of patient IDs assigned to the validation set.
+def select_val_patients(df, patient_col, time_col, frac, n_bins, random_state):
+    """Return patient IDs for the validation set, stratified by time quantile.
 
-    Patients are binned into n_bins quantile strata by time, then ceil(frac)
-    of patients is sampled from each stratum, preserving the time-to-event
-    distribution.  Selecting at the patient level guarantees that every slide
-    from a given patient lands in the same set.
+    Patients are binned into n_bins equal-frequency strata on time, then
+    ceil(frac) of patients is sampled from each stratum.  Stratification
+    preserves the event-time distribution across splits and guarantees every
+    slide from a given patient lands in the same set.
     """
     patient_df = df.groupby(patient_col)[time_col].first().reset_index()
     patient_df["stratum"] = pd.qcut(
         patient_df[time_col], q=n_bins, labels=False, duplicates="drop"
     )
 
-    def sample_stratum(g):
+    def _sample(g):
         n = max(1, math.ceil(frac * len(g)))
         return g.sample(n=n, random_state=random_state)
 
     return (
-        patient_df.groupby("stratum", group_keys=False).apply(sample_stratum)
+        patient_df.groupby("stratum", group_keys=False).apply(_sample)
     )[patient_col].tolist()
 
 
-# ── IgA cohort ────────────────────────────────────────────────────────────────
-
-IgA_slides = prepare_slides(pd.read_csv("followup_data/IgA_slide_data.csv"))
-IgA_slides.to_csv("followup_data/IgA_slide_paths.csv", index=False)
-
-IgA_slides = pd.read_csv("followup_data/IgA_slide_paths.csv")[
-    ["Biopsy_number_transformed", "File Location", "Slide ID", "Stain"]
-]
-IgA_slides.rename(columns={"Biopsy_number_transformed": "Biopsy Number"}, inplace=True)
-
-IgA_followup = pd.read_csv("followup_data/IgA_cohort_full_data.csv")
-IgA_followup.rename(columns={"Biopsy_nr": "Biopsy Number"}, inplace=True)
-
-iga_df = pd.merge(IgA_slides, IgA_followup, on="Biopsy Number", how="inner")
-
-
-def calculate_length_follow_up(row):
-    if row["RRT_or_death"] == "Yes":
-        if (
-            pd.notna(row["Year_RRT_or_death"])
-            and pd.notna(row["ESKD_year"])
-            and pd.notna(row["Biopsy_year"])
-        ):
-            return min(row["Year_RRT_or_death"], row["ESKD_year"]) - row["Biopsy_year"]
-        elif pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["Biopsy_year"]):
-            return row["Year_RRT_or_death"] - row["Biopsy_year"]
-        elif pd.notna(row["ESKD_year"]) and pd.notna(row["Biopsy_year"]):
-            return row["ESKD_year"] - row["Biopsy_year"]
-        else:
-            return None
-    else:
+def _follow_up_years(row):
+    """Compute follow-up length in years for a single IgA cohort row."""
+    if row["RRT_or_death"] != "Yes":
         return row["Length_follow_up"]
+    if pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["ESKD_year"]) and pd.notna(row["Biopsy_year"]):
+        return min(row["Year_RRT_or_death"], row["ESKD_year"]) - row["Biopsy_year"]
+    if pd.notna(row["Year_RRT_or_death"]) and pd.notna(row["Biopsy_year"]):
+        return row["Year_RRT_or_death"] - row["Biopsy_year"]
+    if pd.notna(row["ESKD_year"]) and pd.notna(row["Biopsy_year"]):
+        return row["ESKD_year"] - row["Biopsy_year"]
+    return None
 
 
-iga_df["time_years"] = iga_df.apply(calculate_length_follow_up, axis=1)
-iga_df["time"] = iga_df["time_years"] * 365.25  # convert to days
-iga_df["event"] = iga_df["RRT_or_death"].apply(lambda x: 1 if x == "Yes" else 0)
-iga_df["file_name"] = iga_df["File Location"].apply(extract_file_name)
-iga_df["source"] = "IgA"
+# ── cohort loaders ────────────────────────────────────────────────────────────
 
-# legacy outputs (IgA-only, unchanged format)
-iga_df.to_csv("followup_data/full_data.csv", index=False)
-iga_df[["file_name", "time", "Stain", "event"]].to_csv(
-    "followup_data/labels_new.csv", index=False
-)
+def load_iga_cohort(iga_slides_csv, iga_followup_csv):
+    """Return the IgA cohort DataFrame with time (days), event, file_name, source."""
+    slides = pd.read_csv(iga_slides_csv)
+    slides["Biopsy Number"] = slides["Biopsy Number"].astype(str).apply(transform_label)
+    slides = slides[["Biopsy Number", "File Location", "Slide ID", "Stain"]]
 
+    followup = pd.read_csv(iga_followup_csv)
+    followup.rename(columns={"Biopsy_nr": "Biopsy Number"}, inplace=True)
 
-# ── Registry ──────────────────────────────────────────────────────────────────
-
-registry_df = pd.read_csv("followup_data/registry_anonymized.csv")
-registry_df = registry_df[registry_df["is_IgA"] == True]
-
-# "62 days" → 62.0
-registry_df["time"] = (
-    registry_df["time_to_event"]
-    .astype(str)
-    .str.extract(r"(\d+(?:\.\d+)?)")
-    .astype(float)
-    .squeeze()
-)
-
-# event=1 for any death, treatment or ESKD; event=0 for censored patients
-registry_df["event"] = registry_df["Event"].notna().astype(int)
-registry_df.rename(
-    columns={"ANON_name": "file_name", "ID_diagnosis": "patient", "Stain": "stain"},
-    inplace=True,
-)
-registry_df["source"] = "registry"
+    df = pd.merge(slides, followup, on="Biopsy Number", how="inner")
+    df["time"] = df.apply(_follow_up_years, axis=1) * 365.25   # years → days
+    df["event"] = (df["RRT_or_death"] == "Yes").astype(int)
+    df["file_name"] = df["File Location"].apply(extract_file_name)
+    df["source"] = "IgA"
+    return df
 
 
-# ── Stratified validation split ───────────────────────────────────────────────
-# Patients are selected first; every slide belonging to a patient inherits
-# the same split, so no patient is split across train and validation.
-
-iga_val_patients = select_validation_patients(iga_df, patient_col="PERSON_NR", time_col="time")
-iga_df["split"] = iga_df["PERSON_NR"].isin(iga_val_patients).map({True: "val", False: "train"})
-
-registry_val_patients = select_validation_patients(registry_df, patient_col="patient", time_col="time")
-registry_df["split"] = registry_df["patient"].isin(registry_val_patients).map({True: "val", False: "train"})
-
-iga_df[iga_df["split"] == "val"][["file_name"]].to_csv(
-    "followup_data/validation_files_IgA.csv", index=False, header=False
-)
-registry_df[registry_df["split"] == "val"][["file_name"]].to_csv(
-    "followup_data/validation_files_registry.csv", index=False, header=False
-)
-
-# Combined validation list used by MIL.py --val_csv
-survival_val = pd.concat([
-    iga_df[iga_df["split"] == "val"][["file_name"]],
-    registry_df[registry_df["split"] == "val"][["file_name"]],
-], ignore_index=True)
-survival_val.to_csv("followup_data/survival_validation_files.csv", index=False)
+def load_registry_cohort(registry_csv):
+    """Return the registry cohort DataFrame with time (days), event, file_name, source."""
+    df = pd.read_csv(registry_csv)
+    df = df[df["is_IgA"] == True].copy()
+    df["time"] = (
+        df["time_to_event"].astype(str)
+        .str.extract(r"(\d+(?:\.\d+)?)")[0]
+        .astype(float)
+    )
+    df["event"] = df["Event"].notna().astype(int)
+    df.rename(
+        columns={"ANON_name": "file_name", "ID_diagnosis": "patient", "Stain": "stain"},
+        inplace=True,
+    )
+    df["source"] = "registry"
+    return df
 
 
-# ── Combined labels ───────────────────────────────────────────────────────────
+# ── main ──────────────────────────────────────────────────────────────────────
 
-iga_labels = iga_df[["file_name", "time", "event", "Stain", "source", "split"]].rename(
-    columns={"Stain": "stain"}
-)
-registry_labels = registry_df[["file_name", "time", "event", "stain", "source", "split"]]
+def main():
+    parser = argparse.ArgumentParser(
+        description="Build survival labels and train/val split CSVs for MIL.py.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
-labels_combined = pd.concat([iga_labels, registry_labels], ignore_index=True)
-labels_combined.to_csv("followup_data/labels_combined.csv", index=False)
+    # Validation split
+    parser.add_argument(
+        "--val_source", choices=["IgA", "registry", "both"], default="both",
+        help="Cohort(s) that contribute slides to the validation set.",
+    )
+    parser.add_argument(
+        "--val_frac", type=float, default=0.2,
+        help="Fraction of patients assigned to validation.",
+    )
+    parser.add_argument(
+        "--n_bins", type=int, default=4,
+        help="Number of quantile strata for time-stratified patient sampling.",
+    )
+    parser.add_argument(
+        "--random_state", type=int, default=42,
+        help="Random seed for reproducibility.",
+    )
+
+    # Output paths
+    parser.add_argument(
+        "--val_csv",
+        default="followup_data/survival_validation_files.csv",
+        help=(
+            "Output path for the combined validation slide list consumed by "
+            "MIL.py --val_csv."
+        ),
+    )
+    parser.add_argument(
+        "--output_dir", default="followup_data",
+        help="Directory for all other CSV outputs.",
+    )
+
+    # Input paths
+    parser.add_argument(
+        "--iga_slides_csv", default="followup_data/IgA_slide_data.csv",
+        help="Slide metadata for the IgA cohort.",
+    )
+    parser.add_argument(
+        "--iga_followup_csv", default="followup_data/IgA_cohort_full_data.csv",
+        help="Clinical follow-up data for the IgA cohort.",
+    )
+    parser.add_argument(
+        "--registry_csv", default="followup_data/registry_anonymized.csv",
+        help="Registry cohort data.",
+    )
+
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── Load cohorts ──────────────────────────────────────────────────────────
+
+    iga_df = load_iga_cohort(args.iga_slides_csv, args.iga_followup_csv)
+    registry_df = load_registry_cohort(args.registry_csv)
+
+    # ── Assign train / val splits ─────────────────────────────────────────────
+
+    split_kwargs = dict(frac=args.val_frac, n_bins=args.n_bins, random_state=args.random_state)
+
+    iga_val_patients = (
+        select_val_patients(iga_df, "PERSON_NR", "time", **split_kwargs)
+        if args.val_source in ("IgA", "both") else []
+    )
+    registry_val_patients = (
+        select_val_patients(registry_df, "patient", "time", **split_kwargs)
+        if args.val_source in ("registry", "both") else []
+    )
+
+    iga_df["split"] = iga_df["PERSON_NR"].isin(iga_val_patients).map({True: "val", False: "train"})
+    registry_df["split"] = registry_df["patient"].isin(registry_val_patients).map({True: "val", False: "train"})
+
+    # ── Save outputs ──────────────────────────────────────────────────────────
+
+    # IgA full cohort (all clinical columns, useful for downstream analysis)
+    iga_df.to_csv(os.path.join(args.output_dir, "full_data.csv"), index=False)
+
+    # Combined label file (both cohorts)
+    iga_labels = iga_df[["file_name", "time", "event", "Stain", "source", "split"]].rename(
+        columns={"Stain": "stain"}
+    )
+    registry_labels = registry_df[["file_name", "time", "event", "stain", "source", "split"]]
+    labels_combined = pd.concat([iga_labels, registry_labels], ignore_index=True)
+    labels_combined.to_csv(os.path.join(args.output_dir, "labels_combined.csv"), index=False)
+
+    # Per-source validation files (stem of --val_csv + _IgA / _registry)
+    val_stem, val_ext = os.path.splitext(args.val_csv)
+    iga_df[iga_df["split"] == "val"][["file_name"]].to_csv(
+        f"{val_stem}_IgA{val_ext}", index=False, header=False
+    )
+    registry_df[registry_df["split"] == "val"][["file_name"]].to_csv(
+        f"{val_stem}_registry{val_ext}", index=False, header=False
+    )
+
+    # Combined validation list — consumed by MIL.py --val_csv
+    survival_val = pd.concat([
+        iga_df[iga_df["split"] == "val"][["file_name"]],
+        registry_df[registry_df["split"] == "val"][["file_name"]],
+    ], ignore_index=True)
+    survival_val.to_csv(args.val_csv, index=False)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+
+    n_iga_train  = (iga_df["split"] == "train").sum()
+    n_iga_val    = (iga_df["split"] == "val").sum()
+    n_reg_train  = (registry_df["split"] == "train").sum()
+    n_reg_val    = (registry_df["split"] == "val").sum()
+
+    print(
+        f"val_source={args.val_source}  val_frac={args.val_frac}"
+        f"  n_bins={args.n_bins}  random_state={args.random_state}"
+    )
+    print(f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}")
+    print(f"  Registry — train: {n_reg_train:>5d}  val: {n_reg_val:>4d}")
+    print(f"  Combined val slides: {len(survival_val)}")
+    print(f"\nOutputs:")
+    print(f"  {args.val_csv}")
+    print(f"  {val_stem}_IgA{val_ext}")
+    print(f"  {val_stem}_registry{val_ext}")
+    print(f"  {os.path.join(args.output_dir, 'labels_combined.csv')}")
+    print(f"  {os.path.join(args.output_dir, 'full_data.csv')}")
 
 
-# legacy combined validation (IgA-only, unchanged)
-prep_val_df = iga_df[["PERSON_NR", "file_name"]].rename(
-    columns={"PERSON_NR": "patient"}
-)
-unique_patients = prep_val_df["patient"].unique()
-num_val = int(0.2 * len(unique_patients))
-val_patients = pd.Series(unique_patients).sample(n=num_val, random_state=42).tolist()
-prep_val_df[prep_val_df["patient"].isin(val_patients)][["file_name"]].to_csv(
-    "followup_data/validation_files_new.csv", index=False, header=False
-)
+if __name__ == "__main__":
+    main()
