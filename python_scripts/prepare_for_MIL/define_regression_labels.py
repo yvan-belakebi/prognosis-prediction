@@ -35,7 +35,7 @@ import pandas as pd
 # Reuse cohort loaders from define_labels.py (avoids duplicating biopsy-number
 # normalisation helpers and the IgA merge logic).
 sys.path.insert(0, os.path.dirname(__file__))
-from define_labels import load_iga_cohort, load_registry_cohort  # noqa: E402
+from define_labels import load_iga_cohort, load_registry_cohort, load_non_iga_cohort  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Validation-split helper
@@ -136,10 +136,10 @@ def main():
     parser.add_argument("--random_state", type=int, default=42)
 
     # Output directories
-    parser.add_argument("--iga_output_dir", default="WSI/IgA/labels_regression")
-    parser.add_argument(
-        "--registry_output_dir", default="WSI/IgA_registry/labels_regression"
-    )
+    parser.add_argument("--iga_output_dir",      default="WSI/IgA/labels_regression")
+    parser.add_argument("--registry_output_dir", default="WSI/IgA_registry/labels_regression")
+    parser.add_argument("--non_iga_output_dir",  default="WSI/non_IgA/labels_regression",
+                        help="Output dir for non-IgA .npy files (always train).")
 
     # Summary outputs
     parser.add_argument(
@@ -237,13 +237,39 @@ def main():
         f"(mean {reg_df['eGFR'].mean():.1f})"
     )
 
+    # ── Non-IgA cohort (always train) ─────────────────────────────────────────
+
+    non_iga_full = load_non_iga_cohort(args.registry_csv)
+
+    if args.registry_label_col not in non_iga_full.columns:
+        print(f"Warning: '{args.registry_label_col}' not found in non-IgA registry data "
+              f"— non-IgA will be skipped.")
+        non_iga_df = pd.DataFrame(
+            columns=["file_name", "eGFR", "Stain", "patient", "source", "split"]
+        )
+    else:
+        non_iga_df = non_iga_full[
+            ["file_name", "patient", args.registry_label_col, "stain"]
+        ].copy()
+        non_iga_df = non_iga_df.rename(
+            columns={args.registry_label_col: "eGFR", "stain": "Stain"}
+        )
+        non_iga_df["source"] = "non_IgA"
+        # val_patients=[] → all rows get split="train"
+        non_iga_df = _write_cohort(
+            non_iga_df, "eGFR", "patient", args.non_iga_output_dir, [], split_kwargs
+        )
+        print(f"non-IgA — {len(non_iga_df)} slides (all train)")
+        print(
+            f"  eGFR: {non_iga_df['eGFR'].min():.1f} – {non_iga_df['eGFR'].max():.1f}  "
+            f"(mean {non_iga_df['eGFR'].mean():.1f})"
+        )
+
     # ── Combined outputs ──────────────────────────────────────────────────────
 
+    _cols = ["file_name", "eGFR", "Stain", "patient", "source", "split"]
     combined = pd.concat(
-        [
-            iga_df[["file_name", "eGFR", "Stain", "patient", "source", "split"]],
-            reg_df[["file_name", "eGFR", "Stain", "patient", "source", "split"]],
-        ],
+        [iga_df[_cols], reg_df[_cols], non_iga_df[_cols]],
         ignore_index=True,
     )
     combined.to_csv(args.summary_csv, index=False)
@@ -267,6 +293,7 @@ def main():
     print(f"\nOutputs:")
     print(f"  {args.iga_output_dir}/        ({len(iga_df)} .npy files)")
     print(f"  {args.registry_output_dir}/   ({len(reg_df)} .npy files)")
+    print(f"  {args.non_iga_output_dir}/    ({len(non_iga_df)} .npy files, all train)")
     print(f"  {args.summary_csv}")
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")

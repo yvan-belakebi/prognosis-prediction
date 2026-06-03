@@ -6,8 +6,9 @@ Run from the project root:
 
 Key outputs
 -----------
-  <output_dir>/labels_combined.csv          All slides (IgA + registry) with
+  <output_dir>/labels_combined.csv          All slides (IgA + registry + non-IgA) with
                                             time, event, stain, source, split.
+                                            non-IgA slides always have split="train".
   <val_csv>                                 Flat list of validation slide names
                                             (file_name column); consumed directly
                                             by MIL.py --val_csv.
@@ -128,10 +129,8 @@ def load_iga_cohort(iga_slides_csv, iga_followup_csv):
     return df
 
 
-def load_registry_cohort(registry_csv):
-    """Return the registry cohort DataFrame with time (days), event, file_name, source."""
-    df = pd.read_csv(registry_csv)
-    df = df[df["is_IgA"] == True].copy()
+def _parse_registry_time_event(df):
+    """Add time (days) and event columns to a registry-format DataFrame in-place."""
     df["time"] = (
         df["time_to_event"].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
     )
@@ -140,7 +139,26 @@ def load_registry_cohort(registry_csv):
         columns={"ANON_name": "file_name", "ID_diagnosis": "patient", "Stain": "stain"},
         inplace=True,
     )
+    return df
+
+
+def load_registry_cohort(registry_csv):
+    """Return the IgA registry cohort (is_IgA == True) with time, event, file_name."""
+    df = pd.read_csv(registry_csv)
+    df = _parse_registry_time_event(df[df["is_IgA"] == True].copy())
     df["source"] = "registry"
+    return df
+
+
+def load_non_iga_cohort(registry_csv):
+    """Return the non-IgA registry cohort (is_IgA == False) with time, event, file_name.
+
+    Non-IgA slides are always assigned to the training set; they are never
+    included in the validation split.
+    """
+    df = pd.read_csv(registry_csv)
+    df = _parse_registry_time_event(df[df["is_IgA"] == False].copy())
+    df["source"] = "non_IgA"
     return df
 
 
@@ -233,6 +251,10 @@ def main():
 
     registry_df = load_registry_cohort(args.registry_csv)
 
+    # Non-IgA registry — always train, never validated
+    non_iga_df = load_non_iga_cohort(args.registry_csv)
+    non_iga_df["split"] = "train"
+
     # ── Assign train / val splits ─────────────────────────────────────────────
 
     split_kwargs = dict(
@@ -269,14 +291,19 @@ def main():
     excluded_path = os.path.join(args.output_dir, "iga_excluded_slides.csv")
     iga_excluded.to_csv(excluded_path, index=False)
 
-    # Combined label file (both cohorts)
+    # Combined label file (all three cohorts)
     iga_labels = iga_df[
         ["file_name", "time", "event", "Stain", "source", "split"]
     ].rename(columns={"Stain": "stain"})
     registry_labels = registry_df[
         ["file_name", "time", "event", "stain", "source", "split"]
     ]
-    labels_combined = pd.concat([iga_labels, registry_labels], ignore_index=True)
+    non_iga_labels = non_iga_df[
+        ["file_name", "time", "event", "stain", "source", "split"]
+    ]
+    labels_combined = pd.concat(
+        [iga_labels, registry_labels, non_iga_labels], ignore_index=True
+    )
     labels_combined.to_csv(
         os.path.join(args.output_dir, "labels_combined.csv"), index=False
     )
@@ -314,6 +341,7 @@ def main():
     print(f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}  "
           f"excluded (pre-2006): {len(iga_excluded):>4d}")
     print(f"  Registry — train: {n_reg_train:>5d}  val: {n_reg_val:>4d}")
+    print(f"  non-IgA  — train: {len(non_iga_df):>5d}  val:    0  (always train)")
     print(f"  Combined val slides: {len(survival_val)}")
     print(f"\nOutputs:")
     print(f"  {args.val_csv}")
