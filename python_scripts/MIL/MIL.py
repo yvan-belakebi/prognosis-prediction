@@ -18,7 +18,7 @@ Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
         --stain_csvs followup_data/labels_combined.csv none \\
         --epochs 50
 
-python python_scripts/MIL/MIL.py --model_type deepgraphsurv --pretrain_features_path WSI/non_IgA/UNI2-h_feats --pretrain_labels_path WSI/non_IgA/labels --pretrain_coords_path WSI/non_IgA/coords --pretrain_epochs 10 --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats --labels_paths WSI/IgA/labels WSI/IgA_registry/labels --coords_paths WSI/IgA/coords WSI/IgA_registry/coords --val_csv followup_data/survival_validation_files.csv --stain_filter "PAS" --stain_csvs followup_data/labels_combined.csv followup_data/labels_combined.csv --checkpoint_dir checkpoints_10_epochs_pretraining/ --log_dir results/losses_10_pretraining/ --dropout 0.1 --save_every 5
+python python_scripts/MIL/MIL.py --model_type deepgraphsurv --pretrain_features_path WSI/non_IgA/UNI2-h_feats --pretrain_labels_path WSI/non_IgA/labels --pretrain_coords_path WSI/non_IgA/coords --pretrain_epochs 10 --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats --labels_paths WSI/IgA/labels WSI/IgA_registry/labels --coords_paths WSI/IgA/coords WSI/IgA_registry/coords --val_csv followup_data/survival_validation_files.csv --stain_filter "PAS" --stain_csvs followup_data/labels_combined.csv followup_data/labels_combined.csv --checkpoint_dir checkpoints_10_epochs_pretraining/ --log_dir results/losses_10_pretraining/ --dropout 0.1 --save_every 5 --batch_size 4
 
 
 Usage (single-repo, no pretraining):
@@ -193,6 +193,29 @@ def make_collate_fn(base_collate, max_patches=None):
 # ---------------------------------------------------------------------------
 # Dataset helpers
 # ---------------------------------------------------------------------------
+
+def discover_bags(base_dir, extensions=(".npy", ".h5")):
+    """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
+
+    Flat   : base_dir/slide.h5          → 'slide'
+    Nested : base_dir/biopsy_nr/slide.h5 → 'biopsy_nr/slide'
+    Always uses forward slashes so the result is portable across platforms.
+    """
+    bags = []
+    for entry in os.scandir(base_dir):
+        if entry.is_file():
+            stem, ext = os.path.splitext(entry.name)
+            if ext in extensions:
+                bags.append(stem)
+        elif entry.is_dir():
+            for sub in os.scandir(entry.path):
+                if sub.is_file():
+                    stem, ext = os.path.splitext(sub.name)
+                    if ext in extensions:
+                        bags.append(f"{entry.name}/{stem}")
+    return sorted(bags)
+
+
 def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     """Return sorted bag names from features_path whose Stain matches stain_filter.
 
@@ -203,11 +226,7 @@ def get_filtered_bag_names(features_path, stain_csv, stain_filter):
         return None
     df = pd.read_csv(stain_csv)
     matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
-    available = {
-        os.path.splitext(f)[0]
-        for f in os.listdir(features_path)
-        if f.endswith(".npy") or f.endswith(".h5")
-    }
+    available = set(discover_bags(features_path))
     return sorted(matching & available)
 
 
@@ -248,18 +267,12 @@ def build_dataset(
     for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
         filtered = get_filtered_bag_names(fp, sc, stain_filter)
         if filtered is None:
-            available = sorted(
-                os.path.splitext(f)[0]
-                for f in os.listdir(fp)
-                if f.endswith(".npy") or f.endswith(".h5")
-            )
+            available = discover_bags(fp)
         else:
             available = filtered
 
         # Drop bags that have no label file — e.g. slides excluded from the cohort.
-        labelled = {
-            os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")
-        }
+        labelled = set(discover_bags(lp, extensions=(".npy",)))
         n_before = len(available)
         available = [n for n in available if n in labelled]
         if len(available) < n_before:

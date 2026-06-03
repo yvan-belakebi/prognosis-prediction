@@ -289,17 +289,35 @@ def make_collate_fn(base_collate, max_patches=None):
 # ---------------------------------------------------------------------------
 # Dataset helpers
 # ---------------------------------------------------------------------------
+
+def discover_bags(base_dir, extensions=(".npy", ".h5")):
+    """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
+
+    Flat   : base_dir/slide.h5          → 'slide'
+    Nested : base_dir/biopsy_nr/slide.h5 → 'biopsy_nr/slide'
+    """
+    bags = []
+    for entry in os.scandir(base_dir):
+        if entry.is_file():
+            stem, ext = os.path.splitext(entry.name)
+            if ext in extensions:
+                bags.append(stem)
+        elif entry.is_dir():
+            for sub in os.scandir(entry.path):
+                if sub.is_file():
+                    stem, ext = os.path.splitext(sub.name)
+                    if ext in extensions:
+                        bags.append(f"{entry.name}/{stem}")
+    return sorted(bags)
+
+
 def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     """Return sorted bag names matching stain_filter, or None for no filtering."""
     if stain_csv is None or stain_csv.lower() == "none":
         return None
     df = pd.read_csv(stain_csv)
     matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
-    available = {
-        os.path.splitext(f)[0]
-        for f in os.listdir(features_path)
-        if f.endswith(".npy") or f.endswith(".h5")
-    }
+    available = set(discover_bags(features_path))
     return sorted(matching & available)
 
 
@@ -352,18 +370,12 @@ def build_dataset(
     for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
         filtered = get_filtered_bag_names(fp, sc, stain_filter)
         if filtered is None:
-            available = sorted(
-                os.path.splitext(f)[0]
-                for f in os.listdir(fp)
-                if f.endswith(".npy") or f.endswith(".h5")
-            )
+            available = discover_bags(fp)
         else:
             available = filtered
 
         # Drop bags that have no label file — e.g. slides without a CKD grade.
-        labelled = {
-            os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")
-        }
+        labelled = set(discover_bags(lp, extensions=(".npy",)))
         n_before = len(available)
         available = [n for n in available if n in labelled]
         if len(available) < n_before:
@@ -921,16 +933,8 @@ def main():
     pretrain_dataset = None
     pretrain_sampler = None
     if do_pretrain:
-        pretrain_names = sorted(
-            os.path.splitext(f)[0]
-            for f in os.listdir(args.pretrain_features_path)
-            if f.endswith(".npy") or f.endswith(".h5")
-        )
-        pretrain_labelled = {
-            os.path.splitext(f)[0]
-            for f in os.listdir(args.pretrain_labels_path)
-            if f.endswith(".npy")
-        }
+        pretrain_names = discover_bags(args.pretrain_features_path)
+        pretrain_labelled = set(discover_bags(args.pretrain_labels_path, extensions=(".npy",)))
         pretrain_names = [n for n in pretrain_names if n in pretrain_labelled]
         pretrain_dataset = ProcessedMILDataset(
             features_path=args.pretrain_features_path,

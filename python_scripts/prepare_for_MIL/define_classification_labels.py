@@ -28,9 +28,13 @@ Run from the project root:
 import math
 import os
 import re
+import sys
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(__file__))
+from define_labels import biopsy_to_dirname  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # CKD stage → integer mapping
@@ -106,7 +110,9 @@ IgA_followup = pd.read_csv("followup_data/IgA_cohort_full_data.csv")
 IgA_followup.rename(columns={"Biopsy_nr": "Biopsy Number"}, inplace=True)
 
 df = pd.merge(IgA_slides, IgA_followup, on="Biopsy Number", how="inner")
-df["file_name"] = df["File Location"].apply(extract_file_name)
+df["slide_stem"]    = df["File Location"].apply(extract_file_name)
+df["biopsy_dirname"] = df["Biopsy Number"].apply(biopsy_to_dirname)
+df["file_name"]     = df["biopsy_dirname"] + "/" + df["slide_stem"]
 
 # ---------------------------------------------------------------------------
 # Map CKD stages to integers
@@ -159,9 +165,10 @@ os.makedirs(VAL_DIR, exist_ok=True)
 
 for _, row in df.iterrows():
     label_array = np.array(int(row["ckd_label"]))
-    np.save(os.path.join(TRAIN_DIR, f"{row['file_name']}.npy"), label_array)
-    if row["split"] == "val":
-        np.save(os.path.join(VAL_DIR, f"{row['file_name']}.npy"), label_array)
+    for base_dir in ([TRAIN_DIR] + ([VAL_DIR] if row["split"] == "val" else [])):
+        path = os.path.join(base_dir, f"{row['file_name']}.npy")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.save(path, label_array)
 
 # ---------------------------------------------------------------------------
 # Summary statistics

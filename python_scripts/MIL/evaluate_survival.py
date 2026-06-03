@@ -35,7 +35,10 @@ from torch.utils.data import DataLoader, ConcatDataset
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.abspath(os.path.join(_script_dir, "..", ".."))
 _torchmil_root = os.path.join(_project_root, "torchmil")
-if os.path.isdir(os.path.join(_torchmil_root, "torchmil")) and _torchmil_root not in sys.path:
+if (
+    os.path.isdir(os.path.join(_torchmil_root, "torchmil"))
+    and _torchmil_root not in sys.path
+):
     sys.path.insert(0, _torchmil_root)
 
 from torchmil.datasets import ProcessedMILDataset
@@ -44,10 +47,31 @@ from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
-
 # ---------------------------------------------------------------------------
 # Dataset loading (val-only)
 # ---------------------------------------------------------------------------
+
+
+def discover_bags(base_dir, extensions=(".npy", ".h5")):
+    """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
+
+    Flat   : base_dir/slide.h5          → 'slide'
+    Nested : base_dir/biopsy_nr/slide.h5 → 'biopsy_nr/slide'
+    """
+    bags = []
+    for entry in os.scandir(base_dir):
+        if entry.is_file():
+            stem, ext = os.path.splitext(entry.name)
+            if ext in extensions:
+                bags.append(stem)
+        elif entry.is_dir():
+            for sub in os.scandir(entry.path):
+                if sub.is_file():
+                    stem, ext = os.path.splitext(sub.name)
+                    if ext in extensions:
+                        bags.append(f"{entry.name}/{stem}")
+    return sorted(bags)
+
 
 def load_val_names(val_csv):
     if val_csv is None:
@@ -59,33 +83,40 @@ def load_val_names(val_csv):
     return set(col)
 
 
-def build_val_dataset(features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv):
+def build_val_dataset(
+    features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv
+):
     val_names = load_val_names(val_csv)
     if val_names is None:
         raise ValueError("--val_csv is required for evaluation.")
 
     datasets = []
     for fp, lp, cp in zip(features_paths, labels_paths, coords_paths):
-        labelled = {os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")}
-        available = sorted(
-            os.path.splitext(f)[0]
-            for f in os.listdir(fp)
-            if f.endswith(".npy") or f.endswith(".h5")
-        )
+        labelled = set(discover_bags(lp, extensions=(".npy",)))
+        available = discover_bags(fp)
         names_here = [n for n in available if n in val_names and n in labelled]
         if names_here:
-            datasets.append(ProcessedMILDataset(
-                features_path=fp, labels_path=lp, coords_path=cp,
-                bag_keys=bag_keys, dist_thr=dist_thr, bag_names=names_here,
-            ))
+            datasets.append(
+                ProcessedMILDataset(
+                    features_path=fp,
+                    labels_path=lp,
+                    coords_path=cp,
+                    bag_keys=bag_keys,
+                    dist_thr=dist_thr,
+                    bag_names=names_here,
+                )
+            )
     if not datasets:
-        raise RuntimeError("No validation bags found — check --val_csv and directory paths.")
+        raise RuntimeError(
+            "No validation bags found — check --val_csv and directory paths."
+        )
     return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
 
 
 # ---------------------------------------------------------------------------
 # Model forward
 # ---------------------------------------------------------------------------
+
 
 def _forward(model, batch, model_type):
     if model_type == "abmil":
@@ -100,12 +131,14 @@ def _forward(model, batch, model_type):
 # Inference
 # ---------------------------------------------------------------------------
 
+
 def get_risk_scores(model, loader, device, model_type):
     """Return (risk_scores, times, events) as float arrays, one entry per slide."""
     model.eval()
     risks, times, events = [], [], []
-    with torch.no_grad():
-        for batch in loader:
+    # inference_mode disables autograd bookkeeping entirely — lower memory than no_grad
+    with torch.inference_mode():
+        for i, batch in enumerate(loader):
             batch = batch.to(device)
             risk = _forward(model, batch, model_type).cpu().numpy()
             t = batch["Y"][:, 0].cpu().numpy()
@@ -113,6 +146,11 @@ def get_risk_scores(model, loader, device, model_type):
             risks.extend(risk.tolist())
             times.extend(t.tolist())
             events.extend(e.tolist())
+            del batch  # release GPU tensors immediately
+            if device.type == "cuda" and i % 20 == 0:
+                torch.cuda.empty_cache()  # defragment periodically
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     return np.array(risks), np.array(times), np.array(events)
 
 
@@ -120,29 +158,45 @@ def get_risk_scores(model, loader, device, model_type):
 # Statistics
 # ---------------------------------------------------------------------------
 
-def concordance_index(risks, times, events):
-    """Harrell's C-index: fraction of admissible pairs where higher risk → shorter time."""
-    concordant = discordant = tied_risk = 0
-    for i in range(len(times)):
-        for j in range(i + 1, len(times)):
-            if times[i] == times[j]:
-                continue
-            # The observed event must occur at the shorter time
-            if times[i] < times[j]:
-                if events[i] == 0:
-                    continue  # censored at shorter time: uninformative
-                ri, rj = risks[i], risks[j]
-            else:
-                if events[j] == 0:
-                    continue
-                ri, rj = risks[j], risks[i]  # shorter = j
-            if ri > rj:
-                concordant += 1
-            elif ri < rj:
-                discordant += 1
-            else:
-                tied_risk += 1
-    total = concordant + discordant + tied_risk
+
+def concordance_index(risks, times, events, block=2000):
+    """Harrell's C-index, block-vectorised with numpy.
+
+    Processes `block` rows at a time so peak RAM stays at O(block × n) rather
+    than O(n²).  For n=500 (typical val set) this uses ~2 MB; for n=5000 it
+    uses ~200 MB.  Falls back gracefully to the full upper-triangle when n ≤ block.
+    """
+    n = len(risks)
+    concordant = discordant = tied = 0
+
+    for start in range(0, n, block):
+        end = min(start + block, n)
+        # (end-start, 1) vs (1, n) broadcasting
+        ri = risks[start:end, None]
+        rj = risks[None, :]
+        ti = times[start:end, None]
+        tj = times[None, :]
+        ei = events[start:end, None]
+        ej = events[None, :]
+
+        # Only count each pair once (upper triangle: global col > global row)
+        row_idx = np.arange(start, end)[:, None]
+        col_idx = np.arange(n)[None, :]
+        upper = col_idx > row_idx
+
+        # Case A: row has shorter observed time and event
+        mask_A = upper & (ti < tj) & (ei == 1)
+        concordant += int(np.sum(mask_A & (ri > rj)))
+        discordant += int(np.sum(mask_A & (ri < rj)))
+        tied += int(np.sum(mask_A & (ri == rj)))
+
+        # Case B: col has shorter observed time and event
+        mask_B = upper & (tj < ti) & (ej == 1)
+        concordant += int(np.sum(mask_B & (rj > ri)))
+        discordant += int(np.sum(mask_B & (rj < ri)))
+        tied += int(np.sum(mask_B & (rj == ri)))
+
+    total = concordant + discordant + tied
     return concordant / total if total > 0 else 0.5
 
 
@@ -180,8 +234,7 @@ def kaplan_meier(times, events):
             ci_lo.append(max(0.0, S - 1.96 * se))
             ci_hi.append(min(1.0, S + 1.96 * se))
         i = j
-    return (np.array(t_plot), np.array(s_plot),
-            np.array(ci_lo), np.array(ci_hi))
+    return (np.array(t_plot), np.array(s_plot), np.array(ci_lo), np.array(ci_hi))
 
 
 def log_rank_pvalue(times_a, events_a, times_b, events_b):
@@ -243,8 +296,9 @@ def _survival_at_time(t_km, s_km, t_query):
     return s_km[max(0, idx)]
 
 
-def plot_km_curves(risks, times, events, n_groups, output_dir, time_unit="days",
-                   at_risk_table=True):
+def plot_km_curves(
+    risks, times, events, n_groups, output_dir, time_unit="days", at_risk_table=True
+):
     """KM curves for n_groups equal-size risk strata.
 
     How to read the plot
@@ -275,10 +329,16 @@ def plot_km_curves(risks, times, events, n_groups, output_dir, time_unit="days",
     # Layout: main plot + at-risk table rows
     n_table_rows = n_groups if at_risk_table else 0
     fig_h = 5 + 0.35 * n_table_rows
-    fig, axes = plt.subplots(
-        2, 1, figsize=(9, fig_h),
-        gridspec_kw={"height_ratios": [5, 0.35 * n_table_rows + 0.01]},
-    ) if at_risk_table else (plt.subplots(1, 1, figsize=(9, 5)), [None])
+    fig, axes = (
+        plt.subplots(
+            2,
+            1,
+            figsize=(9, fig_h),
+            gridspec_kw={"height_ratios": [5, 0.35 * n_table_rows + 0.01]},
+        )
+        if at_risk_table
+        else (plt.subplots(1, 1, figsize=(9, 5)), [None])
+    )
     ax = axes[0] if at_risk_table else axes
 
     # Choose representative time points for the at-risk table
@@ -290,7 +350,7 @@ def plot_km_curves(risks, times, events, n_groups, output_dir, time_unit="days",
         t_g, e_g = times[mask], events[mask]
         t_km, s_km, ci_lo, ci_hi = kaplan_meier(t_g, e_g)
 
-        label = (GROUP_LABELS[g] if g < len(GROUP_LABELS) else f"Group {g}")
+        label = GROUP_LABELS[g] if g < len(GROUP_LABELS) else f"Group {g}"
         label += f"  (n={mask.sum()}, events={int(e_g.sum())})"
         color = GROUP_COLORS[g % len(GROUP_COLORS)]
 
@@ -300,25 +360,38 @@ def plot_km_curves(risks, times, events, n_groups, output_dir, time_unit="days",
         t_fill = np.append(t_km, t_max)
         lo_fill = np.append(ci_lo, ci_lo[-1])
         hi_fill = np.append(ci_hi, ci_hi[-1])
-        ax.fill_between(t_fill, lo_fill, hi_fill,
-                        step="post", color=color, alpha=0.12)
+        ax.fill_between(t_fill, lo_fill, hi_fill, step="post", color=color, alpha=0.12)
 
         # Censoring tick marks
         censor_times = t_g[e_g == 0]
         censor_s = [_survival_at_time(t_km, s_km, tc) for tc in censor_times]
-        ax.scatter(censor_times, censor_s, marker="|", color=color,
-                   s=40, linewidths=1.2, zorder=3)
+        ax.scatter(
+            censor_times,
+            censor_s,
+            marker="|",
+            color=color,
+            s=40,
+            linewidths=1.2,
+            zorder=3,
+        )
 
     # Log-rank p-value (lowest vs highest group)
     mask_lo = group == 0
     mask_hi = group == (n_groups - 1)
-    p = log_rank_pvalue(times[mask_lo], events[mask_lo],
-                        times[mask_hi], events[mask_hi])
+    p = log_rank_pvalue(
+        times[mask_lo], events[mask_lo], times[mask_hi], events[mask_hi]
+    )
     p_str = f"p = {p:.2e}" if p < 0.001 else f"p = {p:.3f}"
-    ax.text(0.97, 0.97,
-            f"Log-rank  low vs high\n{p_str}",
-            transform=ax.transAxes, ha="right", va="top", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.85))
+    ax.text(
+        0.97,
+        0.97,
+        f"Log-rank  low vs high\n{p_str}",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.85),
+    )
 
     ax.set_ylabel("Survival probability")
     ax.set_ylim(-0.02, 1.05)
@@ -336,23 +409,45 @@ def plot_km_curves(risks, times, events, n_groups, output_dir, time_unit="days",
         ax_t.axis("off")
         ax_t.set_xlabel(f"Time ({time_unit})", labelpad=4)
 
-        for g in range(n_groups - 1, -1, -1):   # top row = group 0
+        for g in range(n_groups - 1, -1, -1):  # top row = group 0
             mask = group == g
             t_g = times[mask]
             row_y = n_groups - 1 - g
             color = GROUP_COLORS[g % len(GROUP_COLORS)]
             label_short = GROUP_LABELS[g] if g < len(GROUP_LABELS) else f"Group {g}"
-            ax_t.text(-0.01, row_y, label_short, transform=ax_t.get_yaxis_transform(),
-                      ha="right", va="center", fontsize=7, color=color)
+            ax_t.text(
+                -0.01,
+                row_y,
+                label_short,
+                transform=ax_t.get_yaxis_transform(),
+                ha="right",
+                va="center",
+                fontsize=7,
+                color=color,
+            )
             for tt in table_times:
                 n_at_risk = int(np.sum(t_g >= tt))
-                ax_t.text(tt, row_y, str(n_at_risk), ha="center", va="center",
-                          fontsize=7, color=color)
+                ax_t.text(
+                    tt,
+                    row_y,
+                    str(n_at_risk),
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color=color,
+                )
 
         # Column headers
         for tt in table_times:
-            ax_t.text(tt, n_groups - 0.1,
-                      f"{tt:.0f}", ha="center", va="bottom", fontsize=7, color="gray")
+            ax_t.text(
+                tt,
+                n_groups - 0.1,
+                f"{tt:.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color="gray",
+            )
 
         fig.text(0.01, 0.02, "Number at risk", fontsize=7, color="gray", va="bottom")
 
@@ -368,7 +463,7 @@ def plot_risk_distribution(risks, events, output_dir):
     fig, ax = plt.subplots(figsize=(7, 4))
     bins = np.linspace(risks.min(), risks.max(), 30)
     ax.hist(risks[events == 0], bins=bins, alpha=0.6, label="Censored", color="#2196F3")
-    ax.hist(risks[events == 1], bins=bins, alpha=0.6, label="Event",    color="#F44336")
+    ax.hist(risks[events == 1], bins=bins, alpha=0.6, label="Event", color="#F44336")
     ax.set_xlabel("Predicted risk score")
     ax.set_ylabel("Count")
     ax.legend()
@@ -385,40 +480,71 @@ def plot_risk_distribution(risks, events, output_dir):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate a trained MIL survival model: KM curves, C-index."
     )
-    parser.add_argument("--model_type", default="abmil",
-                        choices=["abmil", "deepgraphsurv", "patchgcn"])
-    parser.add_argument("--checkpoint", required=True,
-                        help="Path to saved model weights (.pth).")
+    parser.add_argument(
+        "--model_type", default="abmil", choices=["abmil", "deepgraphsurv", "patchgcn"]
+    )
+    parser.add_argument(
+        "--checkpoint", required=True, help="Path to saved model weights (.pth)."
+    )
     parser.add_argument("--features_paths", nargs="+", required=True)
-    parser.add_argument("--labels_paths",   nargs="+", required=True)
-    parser.add_argument("--coords_paths",   nargs="+", default=None,
-                        help="Required for deepgraphsurv / patchgcn.")
-    parser.add_argument("--val_csv", required=True,
-                        help="CSV listing validation slide basenames.")
+    parser.add_argument("--labels_paths", nargs="+", required=True)
+    parser.add_argument(
+        "--coords_paths",
+        nargs="+",
+        default=None,
+        help="Required for deepgraphsurv / patchgcn.",
+    )
+    parser.add_argument(
+        "--val_csv", required=True, help="CSV listing validation slide basenames."
+    )
     parser.add_argument("--output_dir", default="results/survival_eval")
-    parser.add_argument("--n_groups", type=int, default=3,
-                        help="Number of risk strata for KM plot (default: 3).")
-    parser.add_argument("--time_unit", default="days",
-                        help="Label for the time axis (default: days).")
-    parser.add_argument("--no_at_risk_table", action="store_true",
-                        help="Omit the number-at-risk table below the KM plot.")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument(
+        "--n_groups",
+        type=int,
+        default=3,
+        help="Number of risk strata for KM plot (default: 3).",
+    )
+    parser.add_argument(
+        "--time_unit", default="days", help="Label for the time axis (default: days)."
+    )
+    parser.add_argument(
+        "--no_at_risk_table",
+        action="store_true",
+        help="Omit the number-at-risk table below the KM plot.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Inference batch size. Default 1 minimises peak GPU memory.",
+    )
     parser.add_argument("--dist_thr", type=float, default=1.5)
-    parser.add_argument("--max_patches", type=int, default=None,
-                        help="Patch subsample limit for graph models.")
+    parser.add_argument(
+        "--max_patches",
+        type=int,
+        default=40000,
+        help="Patch subsample limit for graph models.",
+    )
+    parser.add_argument(
+        "--cpu_inference",
+        action="store_true",
+        help="Run inference on CPU even when a GPU is present. "
+        "Useful when GPU memory is insufficient for large slides.",
+    )
     # Model architecture args (must match training)
-    parser.add_argument("--att_dim",    type=int,   default=128)
-    parser.add_argument("--hidden_dim", type=int,   default=None)
+    parser.add_argument("--att_dim", type=int, default=128)
+    parser.add_argument("--hidden_dim", type=int, default=None)
     parser.add_argument("--n_layers_rep", type=int, default=1)
     parser.add_argument("--n_layers_att", type=int, default=1)
-    parser.add_argument("--K",          type=int,   default=5)
+    parser.add_argument("--K", type=int, default=5)
     parser.add_argument("--n_gcn_layers", type=int, default=4)
-    parser.add_argument("--mlp_depth",  type=int,   default=1)
-    parser.add_argument("--dropout",    type=float, default=0.0)
+    parser.add_argument("--mlp_depth", type=int, default=1)
+    parser.add_argument("--dropout", type=float, default=0.0)
     args = parser.parse_args()
 
     is_graph = args.model_type in ("deepgraphsurv", "patchgcn")
@@ -430,38 +556,76 @@ def main():
         parser.error(f"--coords_paths is required for {args.model_type}.")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.cpu_inference:
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # --- Dataset -------------------------------------------------------------
     val_dataset = build_val_dataset(
-        args.features_paths, args.labels_paths, coords_paths,
-        bag_keys, args.dist_thr, args.val_csv,
+        args.features_paths,
+        args.labels_paths,
+        coords_paths,
+        bag_keys,
+        args.dist_thr,
+        args.val_csv,
     )
     print(f"Val bags: {len(val_dataset)}")
 
-    # Patch subsampling wrapper (same as training)
-    if args.max_patches is not None:
-        from classification_MIL import _subsample_adj  # reuse if available
-        def _collate_sub(bags):
-            sub = []
+    # Self-contained patch subsampling (mirrors training scripts, no cross-import)
+    base_collate = partial(collate_fn, sparse=not is_graph)
+
+    def _make_collate(max_patches):
+        if max_patches is None:
+            return base_collate
+
+        def _sub(bags):
+            out = []
             for bag in bags:
                 n_p = bag["X"].shape[0]
-                if n_p > args.max_patches:
-                    idx = torch.randperm(n_p)[:args.max_patches]
-                    bag = {k: (v[idx] if k in ("X", "coords") and isinstance(v, torch.Tensor)
-                               else (_subsample_adj(v, idx) if k == "adj" and isinstance(v, torch.Tensor)
-                                     else v))
-                           for k, v in bag.items()}
-                sub.append(bag)
-            return base_collate(sub)
-        base_collate = partial(collate_fn, sparse=not is_graph)
-        _collate = _collate_sub
-    else:
-        _collate = partial(collate_fn, sparse=not is_graph)
+                if n_p > max_patches:
+                    idx = torch.randperm(n_p)[:max_patches]
+                    new_bag = {}
+                    for k, v in bag.items():
+                        if k in ("X", "coords") and isinstance(v, torch.Tensor):
+                            new_bag[k] = v[idx]
+                        elif k == "adj" and isinstance(v, torch.Tensor):
+                            if v.is_sparse:
+                                v = v.coalesce()
+                                row, col, vals = (
+                                    v.indices()[0],
+                                    v.indices()[1],
+                                    v.values(),
+                                )
+                                m = torch.full((v.size(0),), -1, dtype=torch.long)
+                                m[idx] = torch.arange(len(idx))
+                                keep = (m[row] >= 0) & (m[col] >= 0)
+                                new_bag[k] = torch.sparse_coo_tensor(
+                                    torch.stack([m[row[keep]], m[col[keep]]]),
+                                    vals[keep],
+                                    (len(idx), len(idx)),
+                                )
+                            else:
+                                new_bag[k] = v[idx][:, idx]
+                        else:
+                            new_bag[k] = v
+                    bag = new_bag
+                out.append(bag)
+            return base_collate(out)
 
-    loader = DataLoader(val_dataset, batch_size=args.batch_size,
-                        shuffle=False, collate_fn=_collate)
+        return _sub
+
+    _collate = _make_collate(args.max_patches)
+
+    # num_workers=0: avoids spawning RAM-heavy worker processes for a one-shot eval
+    loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=_collate,
+        num_workers=0,
+    )
 
     # --- Model ---------------------------------------------------------------
     feat_dim = int(val_dataset[0]["X"].shape[-1])
@@ -469,24 +633,39 @@ def main():
         model = abmil_module.ABMIL(att_dim=args.att_dim)
     elif args.model_type == "deepgraphsurv":
         model = dgs_module.DeepGraphSurv(
-            in_shape=(feat_dim,), att_dim=args.att_dim, hidden_dim=args.hidden_dim,
-            n_layers_rep=args.n_layers_rep, n_layers_att=args.n_layers_att,
-            K=args.K, dropout=args.dropout, compute_lambda_max=False,
+            in_shape=(feat_dim,),
+            att_dim=args.att_dim,
+            hidden_dim=args.hidden_dim,
+            n_layers_rep=args.n_layers_rep,
+            n_layers_att=args.n_layers_att,
+            K=args.K,
+            dropout=args.dropout,
+            compute_lambda_max=False,
         )
     else:
         model = patch_gcn_module.PatchGCN(
-            in_shape=(feat_dim,), n_gcn_layers=args.n_gcn_layers,
-            mlp_depth=args.mlp_depth, hidden_dim=args.hidden_dim,
-            att_dim=args.att_dim, dropout=args.dropout,
+            in_shape=(feat_dim,),
+            n_gcn_layers=args.n_gcn_layers,
+            mlp_depth=args.mlp_depth,
+            hidden_dim=args.hidden_dim,
+            att_dim=args.att_dim,
+            dropout=args.dropout,
         )
 
     state = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state)
     model = model.to(device)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     # --- Inference -----------------------------------------------------------
     risks, times, events = get_risk_scores(model, loader, device, args.model_type)
+    # Release the model from GPU as soon as inference is done
+    model.cpu()
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     print(f"Slides evaluated: {len(risks)}  |  events: {int(events.sum())}")
 
     c_index = concordance_index(risks, times, events)
@@ -494,15 +673,21 @@ def main():
 
     # --- Save risk scores CSV ------------------------------------------------
     csv_path = os.path.join(args.output_dir, "risk_scores.csv")
-    pd.DataFrame({"risk": risks, "time": times, "event": events}).to_csv(csv_path, index=False)
+    pd.DataFrame({"risk": risks, "time": times, "event": events}).to_csv(
+        csv_path, index=False
+    )
     print(f"Risk scores saved to {csv_path}")
 
     # --- Plots ---------------------------------------------------------------
-    plot_km_curves(risks, times, events,
-                   n_groups=args.n_groups,
-                   output_dir=args.output_dir,
-                   time_unit=args.time_unit,
-                   at_risk_table=not args.no_at_risk_table)
+    plot_km_curves(
+        risks,
+        times,
+        events,
+        n_groups=args.n_groups,
+        output_dir=args.output_dir,
+        time_unit=args.time_unit,
+        at_risk_table=not args.no_at_risk_table,
+    )
     plot_risk_distribution(risks, events, args.output_dir)
 
 

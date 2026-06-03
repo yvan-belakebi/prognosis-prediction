@@ -70,12 +70,19 @@ def detect_mode(df: pd.DataFrame, mode_hint: str | None) -> str:
 # Per-row savers (write a single .npy file, return True on success)
 # ---------------------------------------------------------------------------
 
+def _npy_path(output_dir: str, file_name: str) -> str:
+    """Return the full .npy path and ensure its parent directory exists."""
+    path = os.path.join(output_dir, f"{file_name}.npy")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
 def _save_one_survival(row, output_dir: str) -> bool:
     if pd.isna(row["time"]) or pd.isna(row["event"]):
         print(f"  Warning: skipping '{row['file_name']}' — NaN in time or event.")
         return False
     arr = np.array([float(row["time"]), float(row["event"])], dtype=np.float64)
-    np.save(os.path.join(output_dir, f"{row['file_name']}.npy"), arr)
+    np.save(_npy_path(output_dir, row["file_name"]), arr)
     return True
 
 
@@ -83,10 +90,7 @@ def _save_one_classification(row, output_dir: str) -> bool:
     if pd.isna(row["ckd_label"]):
         print(f"  Warning: skipping '{row['file_name']}' — NaN in ckd_label.")
         return False
-    np.save(
-        os.path.join(output_dir, f"{row['file_name']}.npy"),
-        np.array(int(row["ckd_label"])),
-    )
+    np.save(_npy_path(output_dir, row["file_name"]), np.array(int(row["ckd_label"])))
     return True
 
 
@@ -97,7 +101,7 @@ def _make_regression_saver(label_col: str):
             print(f"  Warning: skipping '{row['file_name']}' — NaN in {label_col}.")
             return False
         np.save(
-            os.path.join(output_dir, f"{row['file_name']}.npy"),
+            _npy_path(output_dir, row["file_name"]),
             np.array(float(row[label_col]), dtype=np.float64),
         )
         return True

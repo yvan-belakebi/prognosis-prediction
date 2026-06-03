@@ -70,6 +70,20 @@ def extract_file_name(file_location):
     return os.path.splitext(basename.split("?")[0].split("#")[0].strip())[0]
 
 
+def biopsy_to_dirname(biopsy_nr):
+    """Convert a normalised biopsy number to a filesystem-safe directory name.
+
+    The normalised form produced by transform_label uses '/' as a separator
+    (e.g. '34/12').  This function replaces that separator with '-' so it can
+    be used safely as a directory component on all platforms.
+
+    Examples: '34/12' → '34-12',  '1/23' → '1-23'
+    """
+    if pd.isna(biopsy_nr) or str(biopsy_nr).strip() in ("", "nan", "None"):
+        return "unknown"
+    return str(biopsy_nr).replace("/", "-").strip()
+
+
 def select_val_patients(df, patient_col, time_col, frac, n_bins, random_state):
     """Return patient IDs for the validation set, stratified by time quantile.
 
@@ -124,19 +138,24 @@ def load_iga_cohort(iga_slides_csv, iga_followup_csv):
     df = pd.merge(slides, followup, on="Biopsy Number", how="inner")
     df["time"] = df.apply(_follow_up_years, axis=1) * 365.25  # years → days
     df["event"] = (df["RRT_or_death"] == "Yes").astype(int)
-    df["file_name"] = df["File Location"].apply(extract_file_name)
+    df["slide_stem"]    = df["File Location"].apply(extract_file_name)
+    df["biopsy_dirname"] = df["Biopsy Number"].apply(biopsy_to_dirname)
+    df["file_name"]     = df["biopsy_dirname"] + "/" + df["slide_stem"]
     df["source"] = "IgA"
     return df
 
 
 def _parse_registry_time_event(df):
-    """Add time (days) and event columns to a registry-format DataFrame in-place."""
+    """Add time (days), event, file_name, and biopsy_dirname columns to registry data."""
     df["time"] = (
         df["time_to_event"].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
     )
     df["event"] = df["Event"].notna().astype(int)
+    df["slide_stem"]    = df["ANON_name"].astype(str)
+    df["biopsy_dirname"] = df["biop_number"].astype(str).apply(transform_label).apply(biopsy_to_dirname)
+    df["file_name"]     = df["biopsy_dirname"] + "/" + df["slide_stem"]
     df.rename(
-        columns={"ANON_name": "file_name", "ID_diagnosis": "patient", "Stain": "stain"},
+        columns={"ID_diagnosis": "patient", "Stain": "stain"},
         inplace=True,
     )
     return df
