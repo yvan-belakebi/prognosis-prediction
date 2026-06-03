@@ -35,6 +35,7 @@ from torch.utils.data import DataLoader, ConcatDataset, Subset
 
 try:
     import matplotlib.pyplot as plt
+
     _HAS_MATPLOTLIB = True
 except ImportError:
     _HAS_MATPLOTLIB = False
@@ -45,7 +46,10 @@ except ImportError:
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.abspath(os.path.join(_script_dir, "..", ".."))
 _torchmil_root = os.path.join(_project_root, "torchmil")
-if os.path.isdir(os.path.join(_torchmil_root, "torchmil")) and _torchmil_root not in sys.path:
+if (
+    os.path.isdir(os.path.join(_torchmil_root, "torchmil"))
+    and _torchmil_root not in sys.path
+):
     sys.path.insert(0, _torchmil_root)
 
 from torchmil.datasets import ProcessedMILDataset
@@ -61,6 +65,7 @@ _GRAPH_MODELS = {"patchgcn"}
 # ---------------------------------------------------------------------------
 # Forward / label helpers
 # ---------------------------------------------------------------------------
+
 
 def _forward(model, batch, model_type: str) -> torch.Tensor:
     """Return predictions of shape (batch_size,)."""
@@ -83,8 +88,10 @@ def _labels(batch, device) -> torch.Tensor:
 # Train / validation loops
 # ---------------------------------------------------------------------------
 
-def train_epoch(model, loader, optimizer, criterion, device, model_type,
-                accumulation_steps=1):
+
+def train_epoch(
+    model, loader, optimizer, criterion, device, model_type, accumulation_steps=1
+):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
@@ -100,7 +107,9 @@ def train_epoch(model, loader, optimizer, criterion, device, model_type,
     return total_loss / len(loader)
 
 
-def val_epoch(model, loader, criterion, device, model_type) -> tuple[float, float, float]:
+def val_epoch(
+    model, loader, criterion, device, model_type
+) -> tuple[float, float, float]:
     """Returns (avg_loss, MAE, RMSE)."""
     model.eval()
     total_loss = 0.0
@@ -113,9 +122,9 @@ def val_epoch(model, loader, criterion, device, model_type) -> tuple[float, floa
             total_loss += criterion(preds, lbls).item()
             all_preds.append(preds.cpu())
             all_labels.append(lbls.cpu())
-    all_preds  = torch.cat(all_preds)
+    all_preds = torch.cat(all_preds)
     all_labels = torch.cat(all_labels)
-    mae  = (all_preds - all_labels).abs().mean().item()
+    mae = (all_preds - all_labels).abs().mean().item()
     rmse = ((all_preds - all_labels) ** 2).mean().sqrt().item()
     return total_loss / len(loader), mae, rmse
 
@@ -123,6 +132,7 @@ def val_epoch(model, loader, criterion, device, model_type) -> tuple[float, floa
 # ---------------------------------------------------------------------------
 # Collate helpers (patch subsampling — same as classification_MIL.py)
 # ---------------------------------------------------------------------------
+
 
 def _subsample_adj(adj, idx):
     if not adj.is_sparse:
@@ -136,7 +146,8 @@ def _subsample_adj(adj, idx):
     keep = (old2new[row] >= 0) & (old2new[col] >= 0)
     return torch.sparse_coo_tensor(
         torch.stack([old2new[row[keep]], old2new[col[keep]]]),
-        vals[keep], (n_new, n_new),
+        vals[keep],
+        (n_new, n_new),
     )
 
 
@@ -169,11 +180,12 @@ def make_collate_fn(base_collate, max_patches=None):
 # Dataset helpers
 # ---------------------------------------------------------------------------
 
+
 def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     if stain_csv is None or stain_csv.lower() == "none":
         return None
     df = pd.read_csv(stain_csv)
-    matching = set(df.loc[df["Stain"] == stain_filter, "file_name"].astype(str))
+    matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
     available = {
         os.path.splitext(f)[0]
         for f in os.listdir(features_path)
@@ -194,14 +206,22 @@ def load_val_names(val_csv):
 
 def scan_labels(labels_path: str, bag_names: list) -> np.ndarray:
     """Read float regression labels from .npy files."""
-    return np.array([
-        float(np.load(os.path.join(labels_path, f"{n}.npy")))
-        for n in bag_names
-    ], dtype=np.float32)
+    return np.array(
+        [float(np.load(os.path.join(labels_path, f"{n}.npy"))) for n in bag_names],
+        dtype=np.float32,
+    )
 
 
-def build_dataset(features_paths, labels_paths, coords_paths, bag_keys, dist_thr,
-                  val_names=None, stain_csvs=None, stain_filter=None):
+def build_dataset(
+    features_paths,
+    labels_paths,
+    coords_paths,
+    bag_keys,
+    dist_thr,
+    val_names=None,
+    stain_csvs=None,
+    stain_filter=None,
+):
     """Returns (train_ds, val_ds, train_labels, val_labels)."""
     stain_csvs = stain_csvs or [None] * len(features_paths)
     train_datasets, val_datasets = [], []
@@ -218,30 +238,54 @@ def build_dataset(features_paths, labels_paths, coords_paths, bag_keys, dist_thr
         else:
             available = filtered
 
-        labelled = {os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")}
+        labelled = {
+            os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")
+        }
         n_before = len(available)
         available = [n for n in available if n in labelled]
         if len(available) < n_before:
-            print(f"  Skipped {n_before - len(available)} bags with no label file in {lp}")
+            print(
+                f"  Skipped {n_before - len(available)} bags with no label file in {lp}"
+            )
 
-        train_names = [n for n in available if n not in val_names] if val_names else available
+        train_names = (
+            [n for n in available if n not in val_names] if val_names else available
+        )
         val_names_here = [n for n in available if n in val_names] if val_names else []
 
-        train_datasets.append(ProcessedMILDataset(
-            features_path=fp, labels_path=lp, coords_path=cp,
-            bag_keys=bag_keys, dist_thr=dist_thr, bag_names=train_names,
-        ))
+        train_datasets.append(
+            ProcessedMILDataset(
+                features_path=fp,
+                labels_path=lp,
+                coords_path=cp,
+                bag_keys=bag_keys,
+                dist_thr=dist_thr,
+                bag_names=train_names,
+            )
+        )
         train_labels_parts.append(scan_labels(lp, train_names))
 
         if val_names_here:
-            val_datasets.append(ProcessedMILDataset(
-                features_path=fp, labels_path=lp, coords_path=cp,
-                bag_keys=bag_keys, dist_thr=dist_thr, bag_names=val_names_here,
-            ))
+            val_datasets.append(
+                ProcessedMILDataset(
+                    features_path=fp,
+                    labels_path=lp,
+                    coords_path=cp,
+                    bag_keys=bag_keys,
+                    dist_thr=dist_thr,
+                    bag_names=val_names_here,
+                )
+            )
             val_labels_parts.append(scan_labels(lp, val_names_here))
 
-    train_ds = train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
-    train_labels = np.concatenate(train_labels_parts) if train_labels_parts else np.array([], dtype=np.float32)
+    train_ds = (
+        train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
+    )
+    train_labels = (
+        np.concatenate(train_labels_parts)
+        if train_labels_parts
+        else np.array([], dtype=np.float32)
+    )
 
     if not val_datasets:
         return train_ds, None, train_labels, None
@@ -253,24 +297,29 @@ def build_dataset(features_paths, labels_paths, coords_paths, bag_keys, dist_thr
 # Loss logger
 # ---------------------------------------------------------------------------
 
+
 class LossLogger:
     COLUMNS = ["epoch", "phase", "train_loss", "val_loss", "val_mae", "val_rmse"]
 
     def __init__(self, log_dir: str):
         os.makedirs(log_dir, exist_ok=True)
-        self.csv_path  = os.path.join(log_dir, "loss_log.csv")
+        self.csv_path = os.path.join(log_dir, "loss_log.csv")
         self.plot_path = os.path.join(log_dir, "loss_curves.png")
         with open(self.csv_path, "w", newline="") as f:
             csv.writer(f).writerow(self.COLUMNS)
 
     def log(self, epoch, phase, train_loss, val_loss=None, val_mae=None, val_rmse=None):
         with open(self.csv_path, "a", newline="") as f:
-            csv.writer(f).writerow([
-                epoch, phase, f"{train_loss:.6f}",
-                "" if val_loss  is None else f"{val_loss:.6f}",
-                "" if val_mae   is None else f"{val_mae:.4f}",
-                "" if val_rmse  is None else f"{val_rmse:.4f}",
-            ])
+            csv.writer(f).writerow(
+                [
+                    epoch,
+                    phase,
+                    f"{train_loss:.6f}",
+                    "" if val_loss is None else f"{val_loss:.6f}",
+                    "" if val_mae is None else f"{val_mae:.4f}",
+                    "" if val_rmse is None else f"{val_rmse:.4f}",
+                ]
+            )
 
     def save_plot(self, pretrain_epochs=0):
         if not _HAS_MATPLOTLIB:
@@ -283,23 +332,36 @@ class LossLogger:
         ax_loss, ax_mae = axes
         for ax in axes:
             if pretrain_epochs > 0:
-                ax.axvspan(0.5, pretrain_epochs + 0.5, alpha=0.08, color="gray",
-                           label="pretrain")
+                ax.axvspan(
+                    0.5,
+                    pretrain_epochs + 0.5,
+                    alpha=0.08,
+                    color="gray",
+                    label="pretrain",
+                )
             ax.set_xlabel("Epoch")
             ax.grid(True, linestyle=":", alpha=0.6)
 
         ax_loss.plot(df["epoch"], df["train_loss"], label="train loss")
         val_rows = df["val_loss"].notna()
         if val_rows.any():
-            ax_loss.plot(df.loc[val_rows, "epoch"], df.loc[val_rows, "val_loss"],
-                         linestyle="--", label="val loss")
+            ax_loss.plot(
+                df.loc[val_rows, "epoch"],
+                df.loc[val_rows, "val_loss"],
+                linestyle="--",
+                label="val loss",
+            )
         ax_loss.set_ylabel("Loss")
         ax_loss.legend()
 
         mae_rows = df["val_mae"].notna()
         if mae_rows.any():
-            ax_mae.plot(df.loc[mae_rows, "epoch"], df.loc[mae_rows, "val_mae"],
-                        color="tab:orange", label="val MAE")
+            ax_mae.plot(
+                df.loc[mae_rows, "epoch"],
+                df.loc[mae_rows, "val_mae"],
+                color="tab:orange",
+                label="val MAE",
+            )
         ax_mae.set_ylabel("MAE")
         ax_mae.legend()
 
@@ -313,7 +375,10 @@ class LossLogger:
 # Result scatter plot
 # ---------------------------------------------------------------------------
 
-def plot_regression_results(model, loader, device, model_type, log_dir, label_name="eGFR"):
+
+def plot_regression_results(
+    model, loader, device, model_type, log_dir, label_name="eGFR"
+):
     """Scatter plot of predicted vs actual values on the validation set."""
     if not _HAS_MATPLOTLIB:
         print("matplotlib not available — skipping scatter plot.")
@@ -324,13 +389,13 @@ def plot_regression_results(model, loader, device, model_type, log_dir, label_na
         for batch in loader:
             batch = batch.to(device)
             preds = _forward(model, batch, model_type).cpu().tolist()
-            lbls  = _labels(batch, device).cpu().tolist()
+            lbls = _labels(batch, device).cpu().tolist()
             all_preds.extend(preds)
             all_labels.extend(lbls)
 
-    preds  = np.array(all_preds)
+    preds = np.array(all_preds)
     labels = np.array(all_labels)
-    mae  = np.abs(preds - labels).mean()
+    mae = np.abs(preds - labels).mean()
     rmse = np.sqrt(((preds - labels) ** 2).mean())
     # R²
     ss_res = ((labels - preds) ** 2).sum()
@@ -344,10 +409,15 @@ def plot_regression_results(model, loader, device, model_type, log_dir, label_na
     ax.set_xlabel(f"Actual {label_name}")
     ax.set_ylabel(f"Predicted {label_name}")
     ax.set_title(f"Validation — Predicted vs Actual {label_name}")
-    ax.text(0.05, 0.95,
-            f"MAE  = {mae:.2f}\nRMSE = {rmse:.2f}\nR²   = {r2:.3f}",
-            transform=ax.transAxes, va="top", fontsize=10,
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.85))
+    ax.text(
+        0.05,
+        0.95,
+        f"MAE  = {mae:.2f}\nRMSE = {rmse:.2f}\nR²   = {r2:.3f}",
+        transform=ax.transAxes,
+        va="top",
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.85),
+    )
     ax.legend(loc="lower right")
     ax.grid(True, linestyle=":", alpha=0.4)
     fig.tight_layout()
@@ -361,25 +431,37 @@ def plot_regression_results(model, loader, device, model_type, log_dir, label_na
 # Model factory
 # ---------------------------------------------------------------------------
 
+
 def build_model(model_type, feat_dim, args) -> nn.Module:
     if model_type == "abmil":
-        model = abmil_module.ABMIL(in_shape=(feat_dim,), att_dim=args.att_dim,
-                                   gated=args.gated)
+        model = abmil_module.ABMIL(
+            in_shape=(feat_dim,), att_dim=args.att_dim, gated=args.gated
+        )
     elif model_type == "dsmil":
-        model = dsmil_module.DSMIL(in_shape=(feat_dim,), att_dim=args.att_dim,
-                                   nonlinear_q=args.nonlinear_q,
-                                   nonlinear_v=args.nonlinear_v,
-                                   dropout=args.dropout)
+        model = dsmil_module.DSMIL(
+            in_shape=(feat_dim,),
+            att_dim=args.att_dim,
+            nonlinear_q=args.nonlinear_q,
+            nonlinear_v=args.nonlinear_v,
+            dropout=args.dropout,
+        )
     elif model_type == "transmil":
-        model = transmil_module.TransMIL(in_shape=(feat_dim,), att_dim=args.att_dim,
-                                         n_layers=args.n_layers, n_heads=args.n_heads,
-                                         dropout=args.dropout)
+        model = transmil_module.TransMIL(
+            in_shape=(feat_dim,),
+            att_dim=args.att_dim,
+            n_layers=args.n_layers,
+            n_heads=args.n_heads,
+            dropout=args.dropout,
+        )
     else:  # patchgcn
-        model = patch_gcn_module.PatchGCN(in_shape=(feat_dim,), att_dim=args.att_dim,
-                                          n_gcn_layers=args.n_gcn_layers,
-                                          mlp_depth=args.mlp_depth,
-                                          hidden_dim=args.hidden_dim,
-                                          dropout=args.dropout)
+        model = patch_gcn_module.PatchGCN(
+            in_shape=(feat_dim,),
+            att_dim=args.att_dim,
+            n_gcn_layers=args.n_gcn_layers,
+            mlp_depth=args.mlp_depth,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
+        )
     # Replace classifier head with single-output (regression)
     model.classifier = nn.LazyLinear(1)
     return model
@@ -389,59 +471,70 @@ def build_model(model_type, feat_dim, args) -> nn.Module:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train MIL models for WSI regression.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--model_type", default="abmil",
-                        choices=["abmil", "dsmil", "transmil", "patchgcn"])
-    parser.add_argument("--label_name", default="eGFR",
-                        help="Human-readable name of the regression target (for plots).")
+    parser.add_argument(
+        "--model_type",
+        default="abmil",
+        choices=["abmil", "dsmil", "transmil", "patchgcn"],
+    )
+    parser.add_argument(
+        "--label_name",
+        default="eGFR",
+        help="Human-readable name of the regression target (for plots).",
+    )
 
     # Loss
-    parser.add_argument("--loss", default="mse", choices=["mse", "mae"],
-                        help="Training loss: MSE (default) or MAE.")
+    parser.add_argument(
+        "--loss",
+        default="mse",
+        choices=["mse", "mae"],
+        help="Training loss: MSE (default) or MAE.",
+    )
 
     # Pretrain
     parser.add_argument("--pretrain_features_path", default=None)
-    parser.add_argument("--pretrain_labels_path",   default=None)
-    parser.add_argument("--pretrain_coords_path",   default=None)
+    parser.add_argument("--pretrain_labels_path", default=None)
+    parser.add_argument("--pretrain_coords_path", default=None)
     parser.add_argument("--pretrain_epochs", type=int, default=0)
 
     # Data
     parser.add_argument("--features_paths", nargs="+", required=True)
-    parser.add_argument("--labels_paths",   nargs="+", required=True)
-    parser.add_argument("--coords_paths",   nargs="+", default=None)
+    parser.add_argument("--labels_paths", nargs="+", required=True)
+    parser.add_argument("--coords_paths", nargs="+", default=None)
     parser.add_argument("--val_csv", default=None)
     parser.add_argument("--stain_filter", default=None)
-    parser.add_argument("--stain_csvs",   nargs="+", default=None)
+    parser.add_argument("--stain_csvs", nargs="+", default=None)
 
     # Output
-    parser.add_argument("--checkpoint_dir",  default="checkpoints")
+    parser.add_argument("--checkpoint_dir", default="checkpoints")
     parser.add_argument("--checkpoint_name", default=None)
-    parser.add_argument("--log_dir",         default=None)
+    parser.add_argument("--log_dir", default=None)
 
     # Training
-    parser.add_argument("--epochs",    type=int,   default=50)
-    parser.add_argument("--batch_size", type=int,  default=16)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--accumulation_steps", type=int, default=1)
-    parser.add_argument("--lr",        type=float, default=1e-3)
-    parser.add_argument("--save_every", type=int,  default=10)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--max_patches", type=int, default=None)
 
     # Model architecture
-    parser.add_argument("--att_dim",   type=int,   default=128)
-    parser.add_argument("--hidden_dim", type=int,  default=None)
-    parser.add_argument("--dropout",   type=float, default=0.0)
-    parser.add_argument("--dist_thr",  type=float, default=1.5)
-    parser.add_argument("--gated",     action="store_true")
+    parser.add_argument("--att_dim", type=int, default=128)
+    parser.add_argument("--hidden_dim", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--dist_thr", type=float, default=1.5)
+    parser.add_argument("--gated", action="store_true")
     parser.add_argument("--nonlinear_q", action="store_true")
     parser.add_argument("--nonlinear_v", action="store_true")
-    parser.add_argument("--n_layers",  type=int,   default=2)
-    parser.add_argument("--n_heads",   type=int,   default=4)
+    parser.add_argument("--n_layers", type=int, default=2)
+    parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--n_gcn_layers", type=int, default=4)
-    parser.add_argument("--mlp_depth", type=int,   default=1)
+    parser.add_argument("--mlp_depth", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -452,7 +545,9 @@ def main():
 
     do_pretrain = args.pretrain_features_path is not None
     if do_pretrain and args.pretrain_labels_path is None:
-        parser.error("--pretrain_labels_path is required with --pretrain_features_path.")
+        parser.error(
+            "--pretrain_labels_path is required with --pretrain_features_path."
+        )
     if do_pretrain and args.pretrain_epochs <= 0:
         parser.error("--pretrain_epochs must be > 0 with --pretrain_features_path.")
 
@@ -474,17 +569,24 @@ def main():
     # Build datasets
     val_names = load_val_names(args.val_csv)
     train_dataset, val_dataset, train_labels, val_labels = build_dataset(
-        args.features_paths, args.labels_paths,
+        args.features_paths,
+        args.labels_paths,
         _none_list(args.coords_paths, n_train),
-        bag_keys, args.dist_thr,
+        bag_keys,
+        args.dist_thr,
         val_names=val_names,
-        stain_csvs=args.stain_csvs, stain_filter=args.stain_filter,
+        stain_csvs=args.stain_csvs,
+        stain_filter=args.stain_filter,
     )
 
-    print(f"Train bags: {len(train_dataset)}"
-          + (f" | Val bags: {len(val_dataset)}" if val_dataset else ""))
+    print(
+        f"Train bags: {len(train_dataset)}"
+        + (f" | Val bags: {len(val_dataset)}" if val_dataset else "")
+    )
     if train_labels is not None and len(train_labels):
-        print(f"Train {args.label_name}: {train_labels.mean():.1f} ± {train_labels.std():.1f}")
+        print(
+            f"Train {args.label_name}: {train_labels.mean():.1f} ± {train_labels.std():.1f}"
+        )
 
     pretrain_dataset = None
     if do_pretrain:
@@ -495,14 +597,17 @@ def main():
         )
         pretrain_labelled = {
             os.path.splitext(f)[0]
-            for f in os.listdir(args.pretrain_labels_path) if f.endswith(".npy")
+            for f in os.listdir(args.pretrain_labels_path)
+            if f.endswith(".npy")
         }
         pretrain_names = [n for n in pretrain_names if n in pretrain_labelled]
         pretrain_dataset = ProcessedMILDataset(
             features_path=args.pretrain_features_path,
             labels_path=args.pretrain_labels_path,
             coords_path=args.pretrain_coords_path,
-            bag_keys=bag_keys, dist_thr=args.dist_thr, bag_names=pretrain_names,
+            bag_keys=bag_keys,
+            dist_thr=args.dist_thr,
+            bag_names=pretrain_names,
         )
         print(f"Pretrain bags: {len(pretrain_dataset)}")
 
@@ -512,12 +617,13 @@ def main():
     )
 
     def _make_loader(ds, shuffle):
-        return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle,
-                          collate_fn=_collate)
+        return DataLoader(
+            ds, batch_size=args.batch_size, shuffle=shuffle, collate_fn=_collate
+        )
 
-    val_loader      = _make_loader(val_dataset, False) if val_dataset else None
+    val_loader = _make_loader(val_dataset, False) if val_dataset else None
     pretrain_loader = _make_loader(pretrain_dataset, True) if pretrain_dataset else None
-    train_loader    = _make_loader(train_dataset, True)
+    train_loader = _make_loader(train_dataset, True)
 
     # Model
     ref = pretrain_dataset if pretrain_dataset is not None else train_dataset
@@ -537,34 +643,57 @@ def main():
     if do_pretrain:
         print(f"\n--- Pretrain: {args.pretrain_epochs} epochs ---")
         for epoch in range(1, args.pretrain_epochs + 1):
-            tl = train_epoch(model, pretrain_loader, optimizer, criterion, device,
-                             args.model_type, args.accumulation_steps)
+            tl = train_epoch(
+                model,
+                pretrain_loader,
+                optimizer,
+                criterion,
+                device,
+                args.model_type,
+                args.accumulation_steps,
+            )
             logger.log(epoch, "pretrain", tl)
             print(f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] loss={tl:.4f}")
             if args.save_every > 0 and epoch % args.save_every == 0:
-                torch.save(model.state_dict(),
-                           os.path.join(args.checkpoint_dir,
-                                        f"{args.model_type}_pretrain_epoch{epoch}.pth"))
+                torch.save(
+                    model.state_dict(),
+                    os.path.join(
+                        args.checkpoint_dir,
+                        f"{args.model_type}_pretrain_epoch{epoch}.pth",
+                    ),
+                )
 
     # Phase 2: finetune
     print(f"\n--- Finetune: {finetune_epochs} epochs ---")
     for epoch in range(1, finetune_epochs + 1):
         ge = epoch + args.pretrain_epochs
-        tl = train_epoch(model, train_loader, optimizer, criterion, device,
-                         args.model_type, args.accumulation_steps)
+        tl = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            device,
+            args.model_type,
+            args.accumulation_steps,
+        )
         if val_loader is not None:
-            vl, mae, rmse = val_epoch(model, val_loader, criterion, device, args.model_type)
+            vl, mae, rmse = val_epoch(
+                model, val_loader, criterion, device, args.model_type
+            )
             logger.log(ge, "finetune", tl, vl, mae, rmse)
-            print(f"[{ge:>3d}/{args.epochs}] loss={tl:.4f}  val_loss={vl:.4f}"
-                  f"  MAE={mae:.2f}  RMSE={rmse:.2f}")
+            print(
+                f"[{ge:>3d}/{args.epochs}] loss={tl:.4f}  val_loss={vl:.4f}"
+                f"  MAE={mae:.2f}  RMSE={rmse:.2f}"
+            )
         else:
             logger.log(ge, "finetune", tl)
             print(f"[{ge:>3d}/{args.epochs}] loss={tl:.4f}")
 
         if args.save_every > 0 and ge % args.save_every == 0:
-            torch.save(model.state_dict(),
-                       os.path.join(args.checkpoint_dir,
-                                    f"{args.model_type}_epoch{ge}.pth"))
+            torch.save(
+                model.state_dict(),
+                os.path.join(args.checkpoint_dir, f"{args.model_type}_epoch{ge}.pth"),
+            )
 
     torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, checkpoint_name))
     print(f"Model saved to {os.path.join(args.checkpoint_dir, checkpoint_name)}")
@@ -572,8 +701,14 @@ def main():
     logger.save_plot(pretrain_epochs=args.pretrain_epochs)
 
     if val_loader is not None:
-        plot_regression_results(model, val_loader, device, args.model_type,
-                                log_dir, label_name=args.label_name)
+        plot_regression_results(
+            model,
+            val_loader,
+            device,
+            args.model_type,
+            log_dir,
+            label_name=args.label_name,
+        )
 
 
 if __name__ == "__main__":

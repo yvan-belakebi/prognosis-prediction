@@ -18,6 +18,9 @@ Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
         --stain_csvs followup_data/labels_combined.csv none \\
         --epochs 50
 
+python python_scripts/MIL/MIL.py --model_type deepgraphsurv --pretrain_features_path WSI/non_IgA/UNI2-h_feats --pretrain_labels_path WSI/non_IgA/labels --pretrain_coords_path WSI/non_IgA/coords --pretrain_epochs 10 --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats --labels_paths WSI/IgA/labels WSI/IgA_registry/labels --coords_paths WSI/IgA/coords WSI/IgA_registry/coords --val_csv followup_data/survival_validation_files.csv --stain_filter "PAS" --stain_csvs followup_data/labels_combined.csv followup_data/labels_combined.csv --checkpoint_dir checkpoints_10_epochs_pretraining/ --log_dir results/losses_10_pretraining/ --dropout 0.1 --save_every 5
+
+
 Usage (single-repo, no pretraining):
     python MIL.py --model_type abmil \\
         --features_paths WSI/IgA/UNI2-h_feats \\
@@ -141,8 +144,8 @@ def _subsample_adj(adj, idx):
     if not adj.is_sparse:
         return adj[idx][:, idx]
     adj = adj.coalesce()
-    row, col = adj.indices()   # (2, nnz)
-    vals = adj.values()        # (nnz,)
+    row, col = adj.indices()  # (2, nnz)
+    vals = adj.values()  # (nnz,)
     n_new = len(idx)
     # Map old patch indices → new position (-1 means not selected)
     old2new = torch.full((adj.size(0),), -1, dtype=torch.long)
@@ -199,7 +202,7 @@ def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     if stain_csv is None or stain_csv.lower() == "none":
         return None
     df = pd.read_csv(stain_csv)
-    matching = set(df.loc[df["Stain"] == stain_filter, "file_name"].astype(str))
+    matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
     available = {
         os.path.splitext(f)[0]
         for f in os.listdir(features_path)
@@ -255,9 +258,7 @@ def build_dataset(
 
         # Drop bags that have no label file — e.g. slides excluded from the cohort.
         labelled = {
-            os.path.splitext(f)[0]
-            for f in os.listdir(lp)
-            if f.endswith(".npy")
+            os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")
         }
         n_before = len(available)
         available = [n for n in available if n in labelled]
@@ -620,7 +621,9 @@ def main():
 
     # Subsample patches before adj is built to avoid OOM on large slides.
     _collate = make_collate_fn(
-        partial(collate_fn, sparse=(args.model_type not in ("deepgraphsurv", "patchgcn"))),
+        partial(
+            collate_fn, sparse=(args.model_type not in ("deepgraphsurv", "patchgcn"))
+        ),
         max_patches=args.max_patches,
     )
 

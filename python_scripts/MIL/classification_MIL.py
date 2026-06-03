@@ -142,8 +142,12 @@ def val_epoch(model, loader, criterion, device, model_type: str) -> tuple[float,
 
 
 def plot_confusion_matrix(
-    model, loader, device, model_type: str,
-    n_classes: int, log_dir: str,
+    model,
+    loader,
+    device,
+    model_type: str,
+    n_classes: int,
+    log_dir: str,
     class_names: list[str] | None = None,
 ):
     """Run a final pass over the validation set and save a confusion-matrix PNG.
@@ -162,7 +166,7 @@ def plot_confusion_matrix(
         for batch in loader:
             batch = batch.to(device)
             preds = _forward(model, batch, model_type).argmax(dim=-1).cpu().tolist()
-            lbls  = _labels(batch, device).cpu().tolist()
+            lbls = _labels(batch, device).cpu().tolist()
             all_preds.extend(preds)
             all_labels.extend(lbls)
 
@@ -176,29 +180,44 @@ def plot_confusion_matrix(
     row_sums = cm_norm.sum(axis=1, keepdims=True).clip(min=1)
     cm_norm = cm_norm / row_sums
 
-    names = class_names if class_names is not None else [str(i) for i in range(n_classes)]
+    names = (
+        class_names if class_names is not None else [str(i) for i in range(n_classes)]
+    )
     ticks = range(n_classes)
 
     fig, axes = plt.subplots(1, 2, figsize=(5 * n_classes / 3 * 2, 5 * n_classes / 3))
 
     for ax, data, title, fmt in [
-        (axes[0], cm,      "Counts",           "d"),
+        (axes[0], cm, "Counts", "d"),
         (axes[1], cm_norm, "Normalised (recall)", ".2f"),
     ]:
-        im = ax.imshow(data, interpolation="nearest", cmap="Blues",
-                       vmin=0, vmax=(1 if fmt == ".2f" else None))
+        im = ax.imshow(
+            data,
+            interpolation="nearest",
+            cmap="Blues",
+            vmin=0,
+            vmax=(1 if fmt == ".2f" else None),
+        )
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        ax.set_xticks(ticks); ax.set_xticklabels(names, rotation=45, ha="right")
-        ax.set_yticks(ticks); ax.set_yticklabels(names)
-        ax.set_xlabel("Predicted"); ax.set_ylabel("True")
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(names, rotation=45, ha="right")
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(names)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
         ax.set_title(title)
         thresh = data.max() / 2
         for i in range(n_classes):
             for j in range(n_classes):
-                ax.text(j, i, format(data[i, j], fmt),
-                        ha="center", va="center",
-                        color="white" if data[i, j] > thresh else "black",
-                        fontsize=8)
+                ax.text(
+                    j,
+                    i,
+                    format(data[i, j], fmt),
+                    ha="center",
+                    va="center",
+                    color="white" if data[i, j] > thresh else "black",
+                    fontsize=8,
+                )
 
     fig.suptitle("Confusion Matrix — Validation Set")
     fig.tight_layout()
@@ -221,8 +240,8 @@ def _subsample_adj(adj, idx):
     if not adj.is_sparse:
         return adj[idx][:, idx]
     adj = adj.coalesce()
-    row, col = adj.indices()   # (2, nnz)
-    vals = adj.values()        # (nnz,)
+    row, col = adj.indices()  # (2, nnz)
+    vals = adj.values()  # (nnz,)
     n_new = len(idx)
     # Map old patch indices → new position (-1 means not selected)
     old2new = torch.full((adj.size(0),), -1, dtype=torch.long)
@@ -275,7 +294,7 @@ def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     if stain_csv is None or stain_csv.lower() == "none":
         return None
     df = pd.read_csv(stain_csv)
-    matching = set(df.loc[df["Stain"] == stain_filter, "file_name"].astype(str))
+    matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
     available = {
         os.path.splitext(f)[0]
         for f in os.listdir(features_path)
@@ -343,9 +362,7 @@ def build_dataset(
 
         # Drop bags that have no label file — e.g. slides without a CKD grade.
         labelled = {
-            os.path.splitext(f)[0]
-            for f in os.listdir(lp)
-            if f.endswith(".npy")
+            os.path.splitext(f)[0] for f in os.listdir(lp) if f.endswith(".npy")
         }
         n_before = len(available)
         available = [n for n in available if n in labelled]
@@ -389,7 +406,11 @@ def build_dataset(
     train_ds = (
         train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
     )
-    train_labels = np.concatenate(train_labels_parts) if train_labels_parts else np.array([], dtype=np.int64)
+    train_labels = (
+        np.concatenate(train_labels_parts)
+        if train_labels_parts
+        else np.array([], dtype=np.int64)
+    )
 
     if not val_datasets:
         return train_ds, None, train_labels, None
@@ -401,6 +422,7 @@ def build_dataset(
 # ---------------------------------------------------------------------------
 # Balanced sampling
 # ---------------------------------------------------------------------------
+
 
 class BalancedEpochSampler:
     """Each epoch, draw the same number of samples from every class.
@@ -421,9 +443,13 @@ class BalancedEpochSampler:
         print("Train class distribution (original):")
         for c in range(n_classes):
             n = counts.get(c, 0)
-            print(f"  class {c}: {n:>5d} samples  {'← min (cap)' if n == self.min_count else ''}")
-        print(f"Samples per class per epoch: {self.min_count}  "
-              f"(total per epoch: {self.min_count * len(self.class_indices)})")
+            print(
+                f"  class {c}: {n:>5d} samples  {'← min (cap)' if n == self.min_count else ''}"
+            )
+        print(
+            f"Samples per class per epoch: {self.min_count}  "
+            f"(total per epoch: {self.min_count * len(self.class_indices)})"
+        )
 
     def get_epoch_indices(self) -> list:
         indices = []
@@ -458,8 +484,10 @@ def make_balanced_val_subset(val_dataset, val_labels: np.ndarray, n_classes: int
     for c, idxs in class_indices.items():
         kept = idxs if len(idxs) <= cap else random.sample(idxs, cap)
         selected.extend(kept)
-        print(f"  class {c}: {len(idxs):>4d} → {len(kept):>4d}"
-              + ("  (capped)" if len(idxs) > cap else ""))
+        print(
+            f"  class {c}: {len(idxs):>4d} → {len(kept):>4d}"
+            + ("  (capped)" if len(idxs) > cap else "")
+        )
 
     return Subset(val_dataset, sorted(selected))
 
@@ -937,7 +965,9 @@ def main():
             dataset, batch_size=args.batch_size, shuffle=shuffle, collate_fn=_collate
         )
 
-    val_loader = _make_loader(val_dataset, shuffle=False) if val_dataset is not None else None
+    val_loader = (
+        _make_loader(val_dataset, shuffle=False) if val_dataset is not None else None
+    )
 
     # --- Model ---------------------------------------------------------------
     ref_dataset = pretrain_dataset if pretrain_dataset is not None else train_dataset
@@ -960,7 +990,8 @@ def main():
         print(f"\n--- Pretrain phase: {args.pretrain_epochs} epochs on non-IgA ---")
         for epoch in range(1, args.pretrain_epochs + 1):
             epoch_loader = _make_loader(
-                Subset(pretrain_dataset, pretrain_sampler.get_epoch_indices()), shuffle=True
+                Subset(pretrain_dataset, pretrain_sampler.get_epoch_indices()),
+                shuffle=True,
             )
             train_loss = train_epoch(
                 model,
@@ -1035,7 +1066,10 @@ def main():
 
     if val_loader is not None:
         plot_confusion_matrix(
-            model, val_loader, device, args.model_type,
+            model,
+            val_loader,
+            device,
+            args.model_type,
             n_classes=args.n_classes,
             log_dir=log_dir,
             class_names=args.class_names,
