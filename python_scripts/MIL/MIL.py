@@ -195,6 +195,7 @@ def make_collate_fn(base_collate, max_patches=None):
 # Dataset helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_bag_names(dataset):
     """Extract ordered bag names from a ProcessedMILDataset or ConcatDataset."""
     if isinstance(dataset, ConcatDataset):
@@ -665,12 +666,15 @@ def main():
 
     pretrain_dataset = None
     if do_pretrain:
-        pretrain_dataset = ProcessedMILDataset(
-            features_path=args.pretrain_features_path,
-            labels_path=args.pretrain_labels_path,
-            coords_path=args.pretrain_coords_path,
-            bag_keys=bag_keys,
-            dist_thr=args.dist_thr,
+        pretrain_dataset, _ = build_dataset(
+            [args.pretrain_features_path],
+            [args.pretrain_labels_path],
+            [args.pretrain_coords_path] if args.pretrain_coords_path is not None else [None],
+            bag_keys,
+            args.dist_thr,
+            val_names=None,
+            stain_csvs=[None],
+            stain_filter=None,
         )
 
     val_info = f" | Val bags: {len(val_dataset)}" if val_dataset is not None else ""
@@ -702,7 +706,9 @@ def main():
         else None
     )
     if pretrain_dataset is not None:
-        _pretrain_sampler = BiopsySampler(pretrain_dataset) if args.biopsy_sampling else None
+        _pretrain_sampler = (
+            BiopsySampler(pretrain_dataset) if args.biopsy_sampling else None
+        )
         pretrain_loader = DataLoader(
             pretrain_dataset,
             batch_size=args.batch_size,

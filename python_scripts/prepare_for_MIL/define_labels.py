@@ -48,14 +48,17 @@ except Exception:
 
 
 def transform_label(label):
-    """Normalise biopsy-number format to 'number/year' (e.g. 'B2312' → '12/23')."""
+    """Normalise biopsy-number format to 'number/year' (e.g. 'B2312' → '12/23').
+
+    The leading prefix can be one or two letters of any case (e.g. 'B', 'AB').
+    """
     if pd.isna(label):
         return label
     label = str(label).strip().replace("\xa0", " ")
-    m = re.match(r"^B(\d{2})\s+(\d+)$", label)
+    m = re.match(r"^[A-Za-z]{1,2}(\d{2})\s+(\d+)$", label)
     if m:
         return f"{m.group(2).lstrip('0')}/{m.group(1)}"
-    m = re.match(r"^B(\d{2})(\d+)$", label)
+    m = re.match(r"^[A-Za-z]{1,2}(\d{2})(\d+)$", label)
     if m:
         return f"{m.group(2).lstrip('0')}/{m.group(1)}"
     return label

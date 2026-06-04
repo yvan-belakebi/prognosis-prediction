@@ -51,10 +51,10 @@ def transform_label(label):
     if pd.isna(label):
         return label
     label = str(label).strip().replace("\xa0", " ")
-    match = re.match(r"^B(\d{2})\s+(\d+)$", label)
+    match = re.match(r"^[A-Za-z]{1,2}(\d{2})\s+(\d+)$", label)
     if match:
         return f"{match.group(2).lstrip('0')}/{match.group(1)}"
-    match = re.match(r"^B(\d{2})(\d+)$", label)
+    match = re.match(r"^[A-Za-z]{1,2}(\d{2})(\d+)$", label)
     if match:
         return f"{match.group(2).lstrip('0')}/{match.group(1)}"
     return label
