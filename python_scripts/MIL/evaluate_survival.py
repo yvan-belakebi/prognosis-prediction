@@ -47,40 +47,11 @@ from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
+from mil_utils import discover_bags, load_val_names, make_collate_fn, get_bag_names
+
 # ---------------------------------------------------------------------------
 # Dataset loading (val-only)
 # ---------------------------------------------------------------------------
-
-
-def discover_bags(base_dir, extensions=(".npy", ".h5")):
-    """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
-
-    Flat   : base_dir/slide.h5          → 'slide'
-    Nested : base_dir/biopsy_nr/slide.h5 → 'biopsy_nr/slide'
-    """
-    bags = []
-    for entry in os.scandir(base_dir):
-        if entry.is_file():
-            stem, ext = os.path.splitext(entry.name)
-            if ext in extensions:
-                bags.append(stem)
-        elif entry.is_dir():
-            for sub in os.scandir(entry.path):
-                if sub.is_file():
-                    stem, ext = os.path.splitext(sub.name)
-                    if ext in extensions:
-                        bags.append(f"{entry.name}/{stem}")
-    return sorted(bags)
-
-
-def load_val_names(val_csv):
-    if val_csv is None:
-        return None
-    raw = pd.read_csv(val_csv, header=None, dtype=str)
-    col = raw.iloc[:, 0].str.strip()
-    if col.iloc[0].lower() == "file_name":
-        col = col.iloc[1:]
-    return set(col)
 
 
 def build_val_dataset(
@@ -111,16 +82,6 @@ def build_val_dataset(
             "No validation bags found — check --val_csv and directory paths."
         )
     return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
-
-
-def get_val_bag_names(dataset):
-    """Extract ordered bag names from a ProcessedMILDataset or ConcatDataset."""
-    if isinstance(dataset, ConcatDataset):
-        names = []
-        for d in dataset.datasets:
-            names.extend(get_val_bag_names(d))
-        return names
-    return list(dataset.bag_names)
 
 
 def aggregate_by_biopsy(risks, times, events, bag_names):
@@ -609,50 +570,8 @@ def main():
     )
     print(f"Val bags: {len(val_dataset)}")
 
-    # Self-contained patch subsampling (mirrors training scripts, no cross-import)
     base_collate = partial(collate_fn, sparse=not is_graph)
-
-    def _make_collate(max_patches):
-        if max_patches is None:
-            return base_collate
-
-        def _sub(bags):
-            out = []
-            for bag in bags:
-                n_p = bag["X"].shape[0]
-                if n_p > max_patches:
-                    idx = torch.randperm(n_p)[:max_patches]
-                    new_bag = {}
-                    for k, v in bag.items():
-                        if k in ("X", "coords") and isinstance(v, torch.Tensor):
-                            new_bag[k] = v[idx]
-                        elif k == "adj" and isinstance(v, torch.Tensor):
-                            if v.is_sparse:
-                                v = v.coalesce()
-                                row, col, vals = (
-                                    v.indices()[0],
-                                    v.indices()[1],
-                                    v.values(),
-                                )
-                                m = torch.full((v.size(0),), -1, dtype=torch.long)
-                                m[idx] = torch.arange(len(idx))
-                                keep = (m[row] >= 0) & (m[col] >= 0)
-                                new_bag[k] = torch.sparse_coo_tensor(
-                                    torch.stack([m[row[keep]], m[col[keep]]]),
-                                    vals[keep],
-                                    (len(idx), len(idx)),
-                                )
-                            else:
-                                new_bag[k] = v[idx][:, idx]
-                        else:
-                            new_bag[k] = v
-                    bag = new_bag
-                out.append(bag)
-            return base_collate(out)
-
-        return _sub
-
-    _collate = _make_collate(args.max_patches)
+    _collate = make_collate_fn(base_collate, args.max_patches)
 
     # num_workers=0: avoids spawning RAM-heavy worker processes for a one-shot eval
     loader = DataLoader(
@@ -696,7 +615,7 @@ def main():
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     # --- Inference -----------------------------------------------------------
-    bag_names = get_val_bag_names(val_dataset)
+    bag_names = get_bag_names(val_dataset)
     risks, times, events = get_risk_scores(model, loader, device, args.model_type)
     # Release the model from GPU as soon as inference is done
     model.cpu()

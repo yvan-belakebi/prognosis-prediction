@@ -72,6 +72,13 @@ from torchmil.models import dsmil as dsmil_module
 from torchmil.models import transmil as transmil_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
+from mil_utils import (
+    discover_bags,
+    get_filtered_bag_names,
+    load_val_names,
+    make_collate_fn,
+)
+
 _GRAPH_MODELS = {"patchgcn"}
 
 
@@ -228,113 +235,8 @@ def plot_confusion_matrix(
 
 
 # ---------------------------------------------------------------------------
-# Collate helpers
-# ---------------------------------------------------------------------------
-def _subsample_adj(adj, idx):
-    """Subsample a 2D sparse or dense adjacency matrix to the given indices.
-
-    For sparse COO tensors the nonzero entries are filtered without ever
-    materialising the full dense matrix, so memory stays proportional to nnz
-    rather than n_patches².
-    """
-    if not adj.is_sparse:
-        return adj[idx][:, idx]
-    adj = adj.coalesce()
-    row, col = adj.indices()  # (2, nnz)
-    vals = adj.values()  # (nnz,)
-    n_new = len(idx)
-    # Map old patch indices → new position (-1 means not selected)
-    old2new = torch.full((adj.size(0),), -1, dtype=torch.long)
-    old2new[idx] = torch.arange(n_new)
-    keep = (old2new[row] >= 0) & (old2new[col] >= 0)
-    return torch.sparse_coo_tensor(
-        torch.stack([old2new[row[keep]], old2new[col[keep]]]),
-        vals[keep],
-        (n_new, n_new),
-    )
-
-
-def make_collate_fn(base_collate, max_patches=None):
-    """Wrap base_collate with random patch subsampling applied per bag.
-
-    ProcessedMILDataset pre-computes adj in __getitem__, so both adj and
-    the patch-level tensors (X, coords) must be subsampled here — before
-    collate_fn stacks and pads them — to keep the batched adj matrix at
-    (batch_size, max_patches, max_patches).
-    """
-    if max_patches is None:
-        return base_collate
-
-    def _collate_and_subsample(bags):
-        subsampled = []
-        for bag in bags:
-            n = bag["X"].shape[0]
-            if n > max_patches:
-                idx = torch.randperm(n)[:max_patches]
-                new_bag = {}
-                for k, v in bag.items():
-                    if k in ("X", "coords") and isinstance(v, torch.Tensor):
-                        new_bag[k] = v[idx]
-                    elif k == "adj" and isinstance(v, torch.Tensor):
-                        new_bag[k] = _subsample_adj(v, idx)
-                    else:
-                        new_bag[k] = v
-                bag = new_bag
-            subsampled.append(bag)
-        return base_collate(subsampled)
-
-    return _collate_and_subsample
-
-
-# ---------------------------------------------------------------------------
 # Dataset helpers
 # ---------------------------------------------------------------------------
-
-def discover_bags(base_dir, extensions=(".npy", ".h5")):
-    """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
-
-    Flat   : base_dir/slide.h5          → 'slide'
-    Nested : base_dir/biopsy_nr/slide.h5 → 'biopsy_nr/slide'
-    """
-    bags = []
-    for entry in os.scandir(base_dir):
-        if entry.is_file():
-            stem, ext = os.path.splitext(entry.name)
-            if ext in extensions:
-                bags.append(stem)
-        elif entry.is_dir():
-            for sub in os.scandir(entry.path):
-                if sub.is_file():
-                    stem, ext = os.path.splitext(sub.name)
-                    if ext in extensions:
-                        bags.append(f"{entry.name}/{stem}")
-    return sorted(bags)
-
-
-def get_filtered_bag_names(features_path, stain_csv, stain_filter):
-    """Return sorted bag names matching stain_filter, or None for no filtering."""
-    if stain_csv is None or stain_csv.lower() == "none":
-        return None
-    df = pd.read_csv(stain_csv)
-    matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
-    available = set(discover_bags(features_path))
-    return sorted(matching & available)
-
-
-def load_val_names(val_csv):
-    """Load slide basenames from a CSV into a set.
-
-    Accepts a CSV with a 'file_name' column (header row) or a headerless
-    single-column file. Returns None when val_csv is None.
-    """
-    if val_csv is None:
-        return None
-    raw = pd.read_csv(val_csv, header=None, dtype=str)
-    col = raw.iloc[:, 0].str.strip()
-    if col.iloc[0].lower() == "file_name":
-        col = col.iloc[1:]
-    return set(col)
-
 
 def scan_labels(labels_path: str, bag_names: list) -> np.ndarray:
     """Read the classification label from each .npy file in labels_path."""
