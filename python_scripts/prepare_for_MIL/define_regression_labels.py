@@ -8,7 +8,7 @@ Two cohorts are processed in parallel, mirroring define_labels.py:
              output dir:    WSI/IgA/labels_regression/
 
   Registry — source column: eGFR            (followup_data/registry_anonymized.csv)
-             output dir:    WSI/registry_IgA/labels_regression/
+             output dir:    WSI/IgA_registry/labels_regression/
 
 .npy files contain a scalar float64 (the eGFR value).
 
@@ -75,10 +75,9 @@ def _write_cohort(df, label_col, patient_col, output_dir, val_patients, split_kw
 
     os.makedirs(output_dir, exist_ok=True)
     for _, row in df.iterrows():
-        np.save(
-            os.path.join(output_dir, f"{row['file_name']}.npy"),
-            np.array(float(row[label_col]), dtype=np.float64),
-        )
+        path = os.path.join(output_dir, f"{row['file_name']}.npy")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.save(path, np.array(float(row[label_col]), dtype=np.float64))
     return df
 
 

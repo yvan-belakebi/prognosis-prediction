@@ -22,10 +22,10 @@ routed to different directories depending on the source value.
 
 Run from the project root:
 
-  # Survival, PAS only, split by source into IgA and registry_IgA
+  # Survival, PAS only, split by source into IgA and IgA_registry
   python python_scripts/prepare_for_MIL/create_label_npy_files.py \\
       --csv followup_data/labels_pas.csv \\
-      --source_dirs IgA=WSI/IgA/labels registry=WSI/registry_IgA/labels \\
+      --source_dirs IgA=WSI/IgA/labels registry=WSI/IgA_registry/labels \\
       --stain_filter PAS
 
   # Classification labels (single source)
