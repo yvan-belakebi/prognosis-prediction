@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 
 try:
     import matplotlib.pyplot as plt
@@ -60,9 +60,9 @@ from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
     discover_bags,
-    get_filtered_bag_names,
     load_val_names,
     make_collate_fn,
+    build_dataset,
     BiopsySampler,
 )
 
@@ -147,81 +147,6 @@ def scan_labels(labels_path: str, bag_names: list) -> np.ndarray:
         [float(np.load(os.path.join(labels_path, f"{n}.npy"))) for n in bag_names],
         dtype=np.float32,
     )
-
-
-def build_dataset(
-    features_paths,
-    labels_paths,
-    coords_paths,
-    bag_keys,
-    dist_thr,
-    val_names=None,
-    stain_csvs=None,
-    stain_filter=None,
-):
-    """Returns (train_ds, val_ds, train_labels, val_labels)."""
-    stain_csvs = stain_csvs or [None] * len(features_paths)
-    train_datasets, val_datasets = [], []
-    train_labels_parts, val_labels_parts = [], []
-
-    for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
-        filtered = get_filtered_bag_names(fp, sc, stain_filter)
-        if filtered is None:
-            available = discover_bags(fp)
-        else:
-            available = filtered
-
-        labelled = set(discover_bags(lp, extensions=(".npy",)))
-        n_before = len(available)
-        available = [n for n in available if n in labelled]
-        if len(available) < n_before:
-            print(
-                f"  Skipped {n_before - len(available)} bags with no label file in {lp}"
-            )
-
-        train_names = (
-            [n for n in available if n not in val_names] if val_names else available
-        )
-        val_names_here = [n for n in available if n in val_names] if val_names else []
-
-        train_datasets.append(
-            ProcessedMILDataset(
-                features_path=fp,
-                labels_path=lp,
-                coords_path=cp,
-                bag_keys=bag_keys,
-                dist_thr=dist_thr,
-                bag_names=train_names,
-            )
-        )
-        train_labels_parts.append(scan_labels(lp, train_names))
-
-        if val_names_here:
-            val_datasets.append(
-                ProcessedMILDataset(
-                    features_path=fp,
-                    labels_path=lp,
-                    coords_path=cp,
-                    bag_keys=bag_keys,
-                    dist_thr=dist_thr,
-                    bag_names=val_names_here,
-                )
-            )
-            val_labels_parts.append(scan_labels(lp, val_names_here))
-
-    train_ds = (
-        train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
-    )
-    train_labels = (
-        np.concatenate(train_labels_parts)
-        if train_labels_parts
-        else np.array([], dtype=np.float32)
-    )
-
-    if not val_datasets:
-        return train_ds, None, train_labels, None
-    val_ds = val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets)
-    return train_ds, val_ds, train_labels, np.concatenate(val_labels_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +453,7 @@ def main():
         val_names=val_names,
         stain_csvs=args.stain_csvs,
         stain_filter=args.stain_filter,
+        scan_labels_fn=scan_labels,
     )
 
     print(

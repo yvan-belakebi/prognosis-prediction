@@ -39,7 +39,7 @@ from functools import partial
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 
 try:
     import matplotlib.pyplot as plt
@@ -60,17 +60,15 @@ if (
 ):
     sys.path.insert(0, _torchmil_root)
 
-from torchmil.datasets import ProcessedMILDataset
 from torchmil.data import collate_fn
 from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
-    discover_bags,
-    get_filtered_bag_names,
     load_val_names,
     make_collate_fn,
+    build_dataset,
     BiopsySampler,
 )
 
@@ -137,79 +135,6 @@ def val_epoch(model, loader, device, model_type: str) -> float:
             loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
             total_loss += loss.item()
     return total_loss / len(loader)
-
-
-def build_dataset(
-    features_paths,
-    labels_paths,
-    coords_paths,
-    bag_keys,
-    dist_thr,
-    val_names=None,
-    stain_csvs=None,
-    stain_filter=None,
-):
-    """Build train and (optionally) val datasets from lists of paths.
-
-    When val_names is provided, each repository is split: bags whose basename
-    appears in val_names go to val, the rest go to train.
-    Returns (train_dataset, val_dataset); val_dataset is None when val_names is None.
-    """
-    stain_csvs = stain_csvs if stain_csvs is not None else [None] * len(features_paths)
-    train_datasets, val_datasets = [], []
-
-    for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
-        filtered = get_filtered_bag_names(fp, sc, stain_filter)
-        if filtered is None:
-            available = discover_bags(fp)
-        else:
-            available = filtered
-
-        # Drop bags that have no label file — e.g. slides excluded from the cohort.
-        labelled = set(discover_bags(lp, extensions=(".npy",)))
-        n_before = len(available)
-        available = [n for n in available if n in labelled]
-        if len(available) < n_before:
-            print(
-                f"  Skipped {n_before - len(available)} bags with no label file in {lp}"
-            )
-
-        if val_names is not None:
-            train_names = [n for n in available if n not in val_names]
-            val_names_here = [n for n in available if n in val_names]
-        else:
-            train_names = available
-            val_names_here = []
-
-        train_datasets.append(
-            ProcessedMILDataset(
-                features_path=fp,
-                labels_path=lp,
-                coords_path=cp,
-                bag_keys=bag_keys,
-                dist_thr=dist_thr,
-                bag_names=train_names,
-            )
-        )
-        if val_names_here:
-            val_datasets.append(
-                ProcessedMILDataset(
-                    features_path=fp,
-                    labels_path=lp,
-                    coords_path=cp,
-                    bag_keys=bag_keys,
-                    dist_thr=dist_thr,
-                    bag_names=val_names_here,
-                )
-            )
-
-    train_ds = (
-        train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
-    )
-    if not val_datasets:
-        return train_ds, None
-    val_ds = val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets)
-    return train_ds, val_ds
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +434,7 @@ def main():
 
     # --- Build datasets -------------------------------------------------------
     val_names = load_val_names(args.val_csv)
-    train_dataset, val_dataset = build_dataset(
+    train_dataset, val_dataset, _, _ = build_dataset(
         args.features_paths,
         args.labels_paths,
         _none_list(args.coords_paths, n_train),
@@ -522,7 +447,7 @@ def main():
 
     pretrain_dataset = None
     if do_pretrain:
-        pretrain_dataset, _ = build_dataset(
+        pretrain_dataset, _, _, _ = build_dataset(
             [args.pretrain_features_path],
             [args.pretrain_labels_path],
             [args.pretrain_coords_path] if args.pretrain_coords_path is not None else [None],

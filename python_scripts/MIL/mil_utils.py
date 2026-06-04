@@ -2,16 +2,33 @@
 mil_utils.py — Shared utilities for MIL training and evaluation scripts.
 
 Provides bag-discovery, stain filtering, val-split loading, patch subsampling,
-and biopsy-level sampling — used by MIL.py, classification_MIL.py,
-regression_MIL.py, and evaluate_survival.py.
+biopsy-level sampling, and dataset construction — used by MIL.py,
+classification_MIL.py, regression_MIL.py, and evaluate_survival.py.
 """
 
 import os
 import random
+import sys
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import ConcatDataset
+
+# ---------------------------------------------------------------------------
+# Resolve local torchmil package (same logic as in the training scripts so
+# that this module can be imported standalone without sys.path pre-seeding).
+# ---------------------------------------------------------------------------
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.abspath(os.path.join(_script_dir, "..", ".."))
+_torchmil_root = os.path.join(_project_root, "torchmil")
+if (
+    os.path.isdir(os.path.join(_torchmil_root, "torchmil"))
+    and _torchmil_root not in sys.path
+):
+    sys.path.insert(0, _torchmil_root)
+
+from torchmil.datasets import ProcessedMILDataset  # noqa: E402
 
 
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
@@ -154,3 +171,92 @@ class BiopsySampler(torch.utils.data.Sampler):
 
     def __len__(self):
         return len(self._groups)
+
+
+def build_dataset(
+    features_paths,
+    labels_paths,
+    coords_paths,
+    bag_keys,
+    dist_thr,
+    val_names=None,
+    stain_csvs=None,
+    stain_filter=None,
+    scan_labels_fn=None,
+):
+    """Build train and (optionally) val datasets from lists of feature/label paths.
+
+    Parameters
+    ----------
+    scan_labels_fn : callable(labels_path, bag_names) -> np.ndarray, optional
+        When provided, called on each train and val partition to collect scalar
+        labels (e.g. class integers or regression targets) for use by samplers
+        or metrics.  Pass ``None`` for survival training where labels live inside
+        the .npy bags themselves and no separate array is needed.
+
+    Returns
+    -------
+    (train_ds, val_ds, train_labels, val_labels)
+        val_ds is None when val_names is None.
+        train_labels and val_labels are None when scan_labels_fn is None.
+    """
+    stain_csvs = stain_csvs if stain_csvs is not None else [None] * len(features_paths)
+    train_datasets, val_datasets = [], []
+    train_labels_parts, val_labels_parts = [], []
+
+    for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
+        filtered = get_filtered_bag_names(fp, sc, stain_filter)
+        available = filtered if filtered is not None else discover_bags(fp)
+
+        labelled = set(discover_bags(lp, extensions=(".npy",)))
+        n_before = len(available)
+        available = [n for n in available if n in labelled]
+        if len(available) < n_before:
+            print(f"  Skipped {n_before - len(available)} bags with no label file in {lp}")
+
+        if val_names is not None:
+            train_names = [n for n in available if n not in val_names]
+            val_names_here = [n for n in available if n in val_names]
+        else:
+            train_names = available
+            val_names_here = []
+
+        train_datasets.append(
+            ProcessedMILDataset(
+                features_path=fp,
+                labels_path=lp,
+                coords_path=cp,
+                bag_keys=bag_keys,
+                dist_thr=dist_thr,
+                bag_names=train_names,
+            )
+        )
+        if scan_labels_fn is not None:
+            train_labels_parts.append(scan_labels_fn(lp, train_names))
+
+        if val_names_here:
+            val_datasets.append(
+                ProcessedMILDataset(
+                    features_path=fp,
+                    labels_path=lp,
+                    coords_path=cp,
+                    bag_keys=bag_keys,
+                    dist_thr=dist_thr,
+                    bag_names=val_names_here,
+                )
+            )
+            if scan_labels_fn is not None:
+                val_labels_parts.append(scan_labels_fn(lp, val_names_here))
+
+    train_ds = (
+        train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
+    )
+    val_ds = (
+        (val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets))
+        if val_datasets
+        else None
+    )
+    train_labels = np.concatenate(train_labels_parts) if train_labels_parts else None
+    val_labels = np.concatenate(val_labels_parts) if val_labels_parts else None
+
+    return train_ds, val_ds, train_labels, val_labels
