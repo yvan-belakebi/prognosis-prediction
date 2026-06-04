@@ -181,6 +181,41 @@ def make_collate_fn(base_collate, max_patches=None):
 # ---------------------------------------------------------------------------
 
 
+def _get_bag_names(dataset):
+    """Extract ordered bag names from a ProcessedMILDataset or ConcatDataset."""
+    if isinstance(dataset, ConcatDataset):
+        names = []
+        for d in dataset.datasets:
+            names.extend(_get_bag_names(d))
+        return names
+    return list(dataset.bag_names)
+
+
+class BiopsySampler(torch.utils.data.Sampler):
+    """Sample exactly one slide per biopsy per epoch.
+
+    Slides are grouped by the biopsy directory prefix (the part before '/'
+    in the bag name). At each epoch, one slide is chosen at random from each
+    biopsy group, so biopsies with multiple slides do not inflate the loss.
+    """
+
+    def __init__(self, dataset):
+        bag_names = _get_bag_names(dataset)
+        groups = {}
+        for i, name in enumerate(bag_names):
+            biopsy_id = name.rsplit("/", 1)[0] if "/" in name else name
+            groups.setdefault(biopsy_id, []).append(i)
+        self._groups = list(groups.values())
+
+    def __iter__(self):
+        indices = [random.choice(g) for g in self._groups]
+        random.shuffle(indices)
+        return iter(indices)
+
+    def __len__(self):
+        return len(self._groups)
+
+
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
     """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
 
@@ -533,6 +568,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--max_patches", type=int, default=None)
+    parser.add_argument(
+        "--biopsy_sampling",
+        action="store_true",
+        help="Sample one slide per biopsy per epoch to avoid inflated loss from repeated biopsies.",
+    )
 
     # Model architecture
     parser.add_argument("--att_dim", type=int, default=128)
@@ -619,14 +659,26 @@ def main():
         max_patches=args.max_patches,
     )
 
-    def _make_loader(ds, shuffle):
+    def _make_loader(ds, shuffle, sampler=None):
         return DataLoader(
-            ds, batch_size=args.batch_size, shuffle=shuffle, collate_fn=_collate
+            ds,
+            batch_size=args.batch_size,
+            shuffle=(shuffle if sampler is None else False),
+            sampler=sampler,
+            collate_fn=_collate,
         )
 
     val_loader = _make_loader(val_dataset, False) if val_dataset else None
-    pretrain_loader = _make_loader(pretrain_dataset, True) if pretrain_dataset else None
-    train_loader = _make_loader(train_dataset, True)
+    if args.biopsy_sampling:
+        pretrain_loader = (
+            _make_loader(pretrain_dataset, True, BiopsySampler(pretrain_dataset))
+            if pretrain_dataset
+            else None
+        )
+        train_loader = _make_loader(train_dataset, True, BiopsySampler(train_dataset))
+    else:
+        pretrain_loader = _make_loader(pretrain_dataset, True) if pretrain_dataset else None
+        train_loader = _make_loader(train_dataset, True)
 
     # Model
     ref = pretrain_dataset if pretrain_dataset is not None else train_dataset

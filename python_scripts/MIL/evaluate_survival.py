@@ -113,6 +113,42 @@ def build_val_dataset(
     return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
 
 
+def get_val_bag_names(dataset):
+    """Extract ordered bag names from a ProcessedMILDataset or ConcatDataset."""
+    if isinstance(dataset, ConcatDataset):
+        names = []
+        for d in dataset.datasets:
+            names.extend(get_val_bag_names(d))
+        return names
+    return list(dataset.bag_names)
+
+
+def aggregate_by_biopsy(risks, times, events, bag_names):
+    """Average per-slide risk scores within each biopsy.
+
+    Groups slides by the biopsy directory prefix (the part before '/' in the
+    bag name). For flat names (no '/'), each slide is its own biopsy group.
+
+    Returns (agg_risks, agg_times, agg_events, biopsy_ids).
+    """
+    biopsy_risks = {}
+    biopsy_times = {}
+    biopsy_events = {}
+
+    for name, risk, time, event in zip(bag_names, risks, times, events):
+        biopsy_id = name.rsplit("/", 1)[0] if "/" in name else name
+        biopsy_risks.setdefault(biopsy_id, []).append(risk)
+        biopsy_times[biopsy_id] = time
+        biopsy_events[biopsy_id] = event
+
+    biopsy_ids = sorted(biopsy_risks)
+    agg_risks = np.array([np.mean(biopsy_risks[b]) for b in biopsy_ids])
+    agg_times = np.array([biopsy_times[b] for b in biopsy_ids])
+    agg_events = np.array([biopsy_events[b] for b in biopsy_ids])
+
+    return agg_risks, agg_times, agg_events, biopsy_ids
+
+
 # ---------------------------------------------------------------------------
 # Model forward
 # ---------------------------------------------------------------------------
@@ -660,6 +696,7 @@ def main():
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     # --- Inference -----------------------------------------------------------
+    bag_names = get_val_bag_names(val_dataset)
     risks, times, events = get_risk_scores(model, loader, device, args.model_type)
     # Release the model from GPU as soon as inference is done
     model.cpu()
@@ -668,15 +705,33 @@ def main():
         torch.cuda.empty_cache()
     print(f"Slides evaluated: {len(risks)}  |  events: {int(events.sum())}")
 
+    # Per-slide scores (always saved for debugging / downstream analysis)
+    slide_csv = os.path.join(args.output_dir, "risk_scores_per_slide.csv")
+    pd.DataFrame({"bag_name": bag_names, "risk": risks, "time": times, "event": events}).to_csv(
+        slide_csv, index=False
+    )
+    print(f"Per-slide risk scores → {slide_csv}")
+
+    # Aggregate to one score per biopsy when bag names carry a biopsy prefix
+    if any("/" in n for n in bag_names):
+        risks, times, events, biopsy_ids = aggregate_by_biopsy(risks, times, events, bag_names)
+        print(
+            f"Biopsy aggregation: {len(bag_names)} slides → {len(biopsy_ids)} biopsies"
+            f"  |  events after aggregation: {int(events.sum())}"
+        )
+        csv_path = os.path.join(args.output_dir, "risk_scores.csv")
+        pd.DataFrame({"biopsy": biopsy_ids, "risk": risks, "time": times, "event": events}).to_csv(
+            csv_path, index=False
+        )
+    else:
+        csv_path = os.path.join(args.output_dir, "risk_scores.csv")
+        pd.DataFrame({"bag_name": bag_names, "risk": risks, "time": times, "event": events}).to_csv(
+            csv_path, index=False
+        )
+    print(f"Biopsy risk scores → {csv_path}")
+
     c_index = concordance_index(risks, times, events)
     print(f"C-index: {c_index:.4f}")
-
-    # --- Save risk scores CSV ------------------------------------------------
-    csv_path = os.path.join(args.output_dir, "risk_scores.csv")
-    pd.DataFrame({"risk": risks, "time": times, "event": events}).to_csv(
-        csv_path, index=False
-    )
-    print(f"Risk scores saved to {csv_path}")
 
     # --- Plots ---------------------------------------------------------------
     plot_km_curves(

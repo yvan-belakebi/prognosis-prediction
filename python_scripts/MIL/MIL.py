@@ -32,6 +32,7 @@ Labels (.npy, shape (2,)): [time_to_first_event, censoring_indicator]
 
 import csv
 import os
+import random
 import sys
 import argparse
 from functools import partial
@@ -193,6 +194,42 @@ def make_collate_fn(base_collate, max_patches=None):
 # ---------------------------------------------------------------------------
 # Dataset helpers
 # ---------------------------------------------------------------------------
+
+def _get_bag_names(dataset):
+    """Extract ordered bag names from a ProcessedMILDataset or ConcatDataset."""
+    if isinstance(dataset, ConcatDataset):
+        names = []
+        for d in dataset.datasets:
+            names.extend(_get_bag_names(d))
+        return names
+    return list(dataset.bag_names)
+
+
+class BiopsySampler(torch.utils.data.Sampler):
+    """Sample exactly one slide per biopsy per epoch.
+
+    Slides are grouped by the biopsy directory prefix (the part before '/'
+    in the bag name). At each epoch, one slide is chosen at random from each
+    biopsy group, eliminating repeated survival labels in the Cox risk set
+    for biopsies with multiple slides.
+    """
+
+    def __init__(self, dataset):
+        bag_names = _get_bag_names(dataset)
+        groups = {}
+        for i, name in enumerate(bag_names):
+            biopsy_id = name.rsplit("/", 1)[0] if "/" in name else name
+            groups.setdefault(biopsy_id, []).append(i)
+        self._groups = list(groups.values())
+
+    def __iter__(self):
+        indices = [random.choice(g) for g in self._groups]
+        random.shuffle(indices)
+        return iter(indices)
+
+    def __len__(self):
+        return len(self._groups)
+
 
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
     """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
@@ -544,6 +581,15 @@ def main():
         default=10,
         help="Save a checkpoint every N epochs (0 = only final).",
     )
+    parser.add_argument(
+        "--biopsy_sampling",
+        action="store_true",
+        help=(
+            "Sample one slide per biopsy per epoch. "
+            "Removes repeated survival labels from the Cox risk set for biopsies "
+            "with multiple slides."
+        ),
+    )
 
     args = parser.parse_args()
     torch.cuda.empty_cache()
@@ -640,8 +686,13 @@ def main():
         max_patches=args.max_patches,
     )
 
+    _train_sampler = BiopsySampler(train_dataset) if args.biopsy_sampling else None
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=_collate
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=(_train_sampler is None),
+        sampler=_train_sampler,
+        collate_fn=_collate,
     )
     val_loader = (
         DataLoader(
@@ -650,16 +701,17 @@ def main():
         if val_dataset is not None
         else None
     )
-    pretrain_loader = (
-        DataLoader(
+    if pretrain_dataset is not None:
+        _pretrain_sampler = BiopsySampler(pretrain_dataset) if args.biopsy_sampling else None
+        pretrain_loader = DataLoader(
             pretrain_dataset,
             batch_size=args.batch_size,
-            shuffle=True,
+            shuffle=(_pretrain_sampler is None),
+            sampler=_pretrain_sampler,
             collate_fn=_collate,
         )
-        if pretrain_dataset is not None
-        else None
-    )
+    else:
+        pretrain_loader = None
 
     # --- Model ---------------------------------------------------------------
     if args.model_type == "abmil":
