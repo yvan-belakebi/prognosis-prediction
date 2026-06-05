@@ -173,6 +173,63 @@ class BiopsySampler(torch.utils.data.Sampler):
         return len(self._groups)
 
 
+def _allocate_max_biopsies(train_names_per_ds, max_biopsies):
+    """Distribute a biopsy budget equally across datasets, redistributing surplus.
+
+    Each dataset gets an equal share of max_biopsies. If a dataset has fewer
+    biopsies than its share, all of them are kept and the leftover budget is
+    redistributed to the remaining datasets. All bags belonging to a selected
+    biopsy are included (no bag-level subsampling within a biopsy).
+
+    Returns a list of bag-name lists, one per input dataset.
+    """
+    biopsy_groups: list[dict] = []
+    for names in train_names_per_ds:
+        groups: dict = {}
+        for n in names:
+            biopsy_id = n.rsplit("/", 1)[0] if "/" in n else n
+            groups.setdefault(biopsy_id, []).append(n)
+        biopsy_groups.append(groups)
+
+    n_avail = [len(g) for g in biopsy_groups]
+    selected_counts: list = [None] * len(train_names_per_ds)
+    budget = max_biopsies
+    undecided = list(range(len(train_names_per_ds)))
+
+    while undecided:
+        target = budget // len(undecided)
+        if target == 0:
+            for i in undecided:
+                selected_counts[i] = 0
+            break
+        newly_saturated = [i for i in undecided if n_avail[i] <= target]
+        if not newly_saturated:
+            # All remaining datasets exceed the target — assign equally and stop.
+            for i in undecided:
+                selected_counts[i] = target
+            break
+        for i in newly_saturated:
+            selected_counts[i] = n_avail[i]
+            budget -= n_avail[i]
+        undecided = [i for i in undecided if i not in newly_saturated]
+
+    result = []
+    for groups, count in zip(biopsy_groups, selected_counts):
+        all_biopsies = list(groups.keys())
+        if count is None or count >= len(all_biopsies):
+            chosen = all_biopsies
+        elif count == 0:
+            chosen = []
+        else:
+            chosen = random.sample(all_biopsies, count)
+        bags: list = []
+        for b in chosen:
+            bags.extend(groups[b])
+        result.append(bags)
+
+    return result
+
+
 def build_dataset(
     features_paths,
     labels_paths,
@@ -183,6 +240,7 @@ def build_dataset(
     stain_csvs=None,
     stain_filter=None,
     scan_labels_fn=None,
+    max_biopsies=None,
 ):
     """Build train and (optionally) val datasets from lists of feature/label paths.
 
@@ -193,6 +251,11 @@ def build_dataset(
         labels (e.g. class integers or regression targets) for use by samplers
         or metrics.  Pass ``None`` for survival training where labels live inside
         the .npy bags themselves and no separate array is needed.
+    max_biopsies : int, optional
+        Cap on the total number of training biopsies across all datasets.
+        The budget is split equally; if one dataset has fewer biopsies than its
+        share, all of them are kept and the surplus is redistributed to the
+        others.  Has no effect on the validation set.
 
     Returns
     -------
@@ -203,6 +266,10 @@ def build_dataset(
     stain_csvs = stain_csvs if stain_csvs is not None else [None] * len(features_paths)
     train_datasets, val_datasets = [], []
     train_labels_parts, val_labels_parts = [], []
+
+    # --- Pass 1: collect and filter bag names per dataset --------------------
+    all_train_names: list = []
+    all_val_names_here: list = []
 
     for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
         filtered = get_filtered_bag_names(fp, sc, stain_filter)
@@ -221,6 +288,28 @@ def build_dataset(
             train_names = available
             val_names_here = []
 
+        all_train_names.append(train_names)
+        all_val_names_here.append(val_names_here)
+
+    # --- Optional biopsy-level subsampling of the training set ---------------
+    if max_biopsies is not None:
+        def _count_biopsies(names):
+            return len({(n.rsplit("/", 1)[0] if "/" in n else n) for n in names})
+
+        before = [_count_biopsies(names) for names in all_train_names]
+        all_train_names = _allocate_max_biopsies(all_train_names, max_biopsies)
+        for fp, nb, names in zip(features_paths, before, all_train_names):
+            na = _count_biopsies(names)
+            print(f"  [{fp}] max_biopsies: {na}/{nb} biopsies selected ({len(names)} bags)")
+        print(
+            f"  Total: {sum(_count_biopsies(n) for n in all_train_names)}/"
+            f"{sum(before)} biopsies selected"
+        )
+
+    # --- Pass 2: build ProcessedMILDataset objects ---------------------------
+    for fp, lp, cp, train_names, val_names_here in zip(
+        features_paths, labels_paths, coords_paths, all_train_names, all_val_names_here
+    ):
         train_datasets.append(
             ProcessedMILDataset(
                 features_path=fp,

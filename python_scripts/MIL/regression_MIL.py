@@ -383,6 +383,17 @@ def main():
         action="store_true",
         help="Sample one slide per biopsy per epoch to avoid inflated loss from repeated biopsies.",
     )
+    parser.add_argument(
+        "--max_biopsies",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of training biopsies across all datasets combined. "
+            "The budget is split equally across datasets; if one has fewer biopsies "
+            "than its share, all of them are kept and the surplus is redistributed "
+            "to the others. Has no effect on the validation set."
+        ),
+    )
 
     # Model architecture
     parser.add_argument("--att_dim", type=int, default=128)
@@ -454,6 +465,7 @@ def main():
         stain_csvs=args.stain_csvs,
         stain_filter=args.stain_filter,
         scan_labels_fn=scan_labels,
+        max_biopsies=args.max_biopsies,
     )
 
     print(
