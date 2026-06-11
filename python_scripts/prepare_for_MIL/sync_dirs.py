@@ -1,7 +1,9 @@
 """
-sync_dirs.py — Remove files from dir B that have no matching name in dir A.
+sync_dirs.py — Remove files/folders from dir B that have no matching name in dir A.
 
-Only filenames (without extension) are compared, so A/foo.h5 keeps B/foo.npy.
+For files, only the stem (name without extension) is compared, so A/foo.h5
+keeps B/foo.npy. For folders, the folder name is compared as-is, and matches
+against either folder names or file stems in A (so A/foo.h5 also keeps B/foo/).
 Use --dry_run to preview deletions before committing.
 
 Usage:
@@ -11,11 +13,17 @@ Usage:
 
 import argparse
 import os
+import shutil
+
+
+def entry_name(path, name):
+    """Comparison name: stem for files, folder name as-is for directories."""
+    return name if os.path.isdir(path) else os.path.splitext(name)[0]
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Delete files in dir_b whose stem is absent from dir_a."
+        description="Delete files/folders in dir_b whose name is absent from dir_a."
     )
     parser.add_argument("--dir_a", required=True, help="Reference directory.")
     parser.add_argument("--dir_b", required=True, help="Directory to clean up.")
@@ -24,21 +32,29 @@ def main():
     )
     args = parser.parse_args()
 
-    stems_a = {os.path.splitext(f)[0] for f in os.listdir(args.dir_a)}
-    files_b = [f for f in os.listdir(args.dir_b) if os.path.isfile(os.path.join(args.dir_b, f))]
+    names_a = {
+        entry_name(os.path.join(args.dir_a, e), e) for e in os.listdir(args.dir_a)
+    }
 
-    to_delete = [f for f in files_b if os.path.splitext(f)[0] not in stems_a]
+    to_delete = []
+    for e in os.listdir(args.dir_b):
+        path = os.path.join(args.dir_b, e)
+        if entry_name(path, e) not in names_a:
+            to_delete.append((e, path, os.path.isdir(path)))
 
     if not to_delete:
         print("Nothing to delete.")
         return
 
-    print(f"{'[DRY RUN] ' if args.dry_run else ''}Files to delete from {args.dir_b}: {len(to_delete)}")
-    for f in sorted(to_delete):
-        path = os.path.join(args.dir_b, f)
-        print(f"  {'(would delete)' if args.dry_run else 'deleting'} {f}")
+    print(f"{'[DRY RUN] ' if args.dry_run else ''}Entries to delete from {args.dir_b}: {len(to_delete)}")
+    for e, path, is_dir in sorted(to_delete):
+        kind = "folder" if is_dir else "file"
+        print(f"  {'(would delete)' if args.dry_run else 'deleting'} {kind} {e}")
         if not args.dry_run:
-            os.remove(path)
+            if is_dir:
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
 
 
 if __name__ == "__main__":
