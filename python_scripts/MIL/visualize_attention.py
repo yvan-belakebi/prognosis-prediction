@@ -71,9 +71,9 @@ from torchmil.models import transmil as transmil_module
 from torchmil.utils import add_self_loops, build_adj, normalize_adj
 from torchmil.visualize.vis_wsi import draw_heatmap_wsi
 
-# Red (high attention) → Green (low attention), matching vis_wsi defaults
-_HIGH_COLOR = np.array([0.839, 0.153, 0.157])
-_LOW_COLOR = np.array([0.173, 0.627, 0.173])
+# Deep blue (high attention) → Pink (low attention)
+_HIGH_COLOR = np.array([0.039, 0.118, 0.588])
+_LOW_COLOR = np.array([1.0, 0.588, 0.706])
 
 
 # ---------------------------------------------------------------------------

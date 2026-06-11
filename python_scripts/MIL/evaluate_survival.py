@@ -653,16 +653,33 @@ def main():
     print(f"C-index: {c_index:.4f}")
 
     # --- Plots ---------------------------------------------------------------
+    # Restrict figures to samples with follow-up time > 730 days. The C-index
+    # above is still computed on the full set; only the plots use this filter.
+    keep = times > 730
+    n_dropped = int((~keep).sum())
+    if n_dropped:
+        print(
+            f"Filtering figures to time > 730: keeping {int(keep.sum())} / {len(times)} "
+            f"({n_dropped} excluded)"
+        )
+    risks_plot = risks[keep]
+    times_plot = times[keep]
+    events_plot = events[keep]
+
+    if len(risks_plot) == 0:
+        print("No samples remain after time > 730 filter — skipping figures.")
+        return
+
     plot_km_curves(
-        risks,
-        times,
-        events,
+        risks_plot,
+        times_plot,
+        events_plot,
         n_groups=args.n_groups,
         output_dir=args.output_dir,
         time_unit=args.time_unit,
         at_risk_table=not args.no_at_risk_table,
     )
-    plot_risk_distribution(risks, events, args.output_dir)
+    plot_risk_distribution(risks_plot, events_plot, args.output_dir)
 
 
 if __name__ == "__main__":
