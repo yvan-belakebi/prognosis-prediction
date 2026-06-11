@@ -24,3 +24,8 @@
 *.safetensors
 # Ignore shell scripts
 *.sh
+# Miscellaneous 
+*.zip
+*.svg
+*.docx
+*.pdf
