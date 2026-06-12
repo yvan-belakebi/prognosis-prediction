@@ -22,6 +22,7 @@
 *.json 
 # Ignore feature extractor files
 *.safetensors
+*.h5
 # Ignore shell scripts
 *.sh
 # Miscellaneous 
@@ -29,3 +30,6 @@
 *.svg
 *.docx
 *.pdf
+# Ignore imported code
+torchmil/
+CLAM-master/
