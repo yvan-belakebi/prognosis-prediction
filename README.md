@@ -17,7 +17,7 @@ The studied events are:
 The foundation models tested for feature extraction are: Virchow2, UNI2-h, Hibou-L, Hibou-B, H-optimus-1.
 
 
-torchMIL, CLAM and torchstain should be downloaded and included in the python_scripts folder.
+torchMIL, CLAM, StainStyleSampler and torchstain should be downloaded and included in the python_scripts folder.
 
 
 Example run:
