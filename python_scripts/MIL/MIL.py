@@ -250,7 +250,16 @@ def main():
         "--coords_paths",
         nargs="+",
         default=None,
-        help="Training coords folder(s) (deepgraphsurv / patchgcn only).",
+        help="Training coords folder(s) (deepgraphsurv / patchgcn only). "
+             "When --file_ext .h5 and omitted, defaults to --features_paths "
+             "(coords are read from the same .h5 file as features).",
+    )
+    parser.add_argument(
+        "--file_ext",
+        default=".h5",
+        choices=[".h5", ".npy"],
+        help="File extension for feature and coordinate bags (default: .h5). "
+             "Use .npy for the legacy pipeline.",
     )
     parser.add_argument(
         "--val_csv",
@@ -409,15 +418,22 @@ def main():
 
     if args.model_type in ("deepgraphsurv", "patchgcn"):
         if args.coords_paths is None:
-            parser.error(f"--coords_paths is required for {args.model_type}.")
+            if args.file_ext == ".h5":
+                # Coords are embedded in the features .h5; reuse the same directories.
+                args.coords_paths = args.features_paths
+            else:
+                parser.error(f"--coords_paths is required for {args.model_type}.")
         if len(args.coords_paths) != n_train:
             parser.error(
                 "--coords_paths must have the same number of entries as --features_paths."
             )
         if do_pretrain and args.pretrain_coords_path is None:
-            parser.error(
-                f"--pretrain_coords_path is required for {args.model_type} pretraining."
-            )
+            if args.file_ext == ".h5":
+                args.pretrain_coords_path = args.pretrain_features_path
+            else:
+                parser.error(
+                    f"--pretrain_coords_path is required for {args.model_type} pretraining."
+                )
 
     if args.stain_csvs is not None:
         if args.stain_filter is None:
@@ -455,6 +471,7 @@ def main():
         stain_csvs=args.stain_csvs,
         stain_filter=args.stain_filter,
         max_biopsies=args.max_biopsies,
+        file_ext=args.file_ext,
     )
 
     pretrain_dataset = None
@@ -468,6 +485,7 @@ def main():
             val_names=None,
             stain_csvs=[None],
             stain_filter=None,
+            file_ext=args.file_ext,
         )
 
     val_info = f" | Val bags: {len(val_dataset)}" if val_dataset is not None else ""

@@ -528,7 +528,15 @@ def main():
         "--coords_paths",
         nargs="+",
         default=None,
-        help="Training coords folder(s) (patchgcn only).",
+        help="Training coords folder(s) (patchgcn only). "
+             "When --file_ext .h5 and omitted, defaults to --features_paths.",
+    )
+    parser.add_argument(
+        "--file_ext",
+        default=".h5",
+        choices=[".h5", ".npy"],
+        help="File extension for feature and coordinate bags (default: .h5). "
+             "Use .npy for the legacy pipeline.",
     )
     parser.add_argument(
         "--val_csv",
@@ -703,13 +711,19 @@ def main():
 
     if args.model_type == "patchgcn":
         if args.coords_paths is None:
-            parser.error("--coords_paths is required for patchgcn.")
+            if args.file_ext == ".h5":
+                args.coords_paths = args.features_paths
+            else:
+                parser.error("--coords_paths is required for patchgcn.")
         if len(args.coords_paths) != n_train:
             parser.error(
                 "--coords_paths must have the same number of entries as --features_paths."
             )
         if do_pretrain and args.pretrain_coords_path is None:
-            parser.error("--pretrain_coords_path is required for patchgcn pretraining.")
+            if args.file_ext == ".h5":
+                args.pretrain_coords_path = args.pretrain_features_path
+            else:
+                parser.error("--pretrain_coords_path is required for patchgcn pretraining.")
 
     if args.stain_csvs is not None:
         if args.stain_filter is None:
@@ -744,6 +758,7 @@ def main():
         stain_csvs=args.stain_csvs,
         stain_filter=args.stain_filter,
         scan_labels_fn=scan_labels,
+        file_ext=args.file_ext,
     )
 
     # Build pretrain dataset + scan its labels for balanced sampling
@@ -760,6 +775,8 @@ def main():
             bag_keys=bag_keys,
             dist_thr=args.dist_thr,
             bag_names=pretrain_names,
+            file_ext=args.file_ext,
+            label_ext=".npy",
         )
         pretrain_labels_arr = scan_labels(args.pretrain_labels_path, pretrain_names)
         print("\nPretrain dataset:")

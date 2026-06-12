@@ -361,7 +361,20 @@ def main():
     # Data
     parser.add_argument("--features_paths", nargs="+", required=True)
     parser.add_argument("--labels_paths", nargs="+", required=True)
-    parser.add_argument("--coords_paths", nargs="+", default=None)
+    parser.add_argument(
+        "--coords_paths",
+        nargs="+",
+        default=None,
+        help="Coord folder(s) for patchgcn. When --file_ext .h5 and omitted, "
+             "defaults to --features_paths.",
+    )
+    parser.add_argument(
+        "--file_ext",
+        default=".h5",
+        choices=[".h5", ".npy"],
+        help="File extension for feature and coordinate bags (default: .h5). "
+             "Use .npy for the legacy pipeline.",
+    )
     parser.add_argument("--val_csv", default=None)
     parser.add_argument("--stain_filter", default=None)
     parser.add_argument("--stain_csvs", nargs="+", default=None)
@@ -427,13 +440,19 @@ def main():
     bag_keys = ["X", "Y", "adj", "coords"] if is_graph else ["X", "Y"]
     if is_graph:
         if args.coords_paths is None:
-            parser.error(f"--coords_paths is required for {args.model_type}.")
+            if args.file_ext == ".h5":
+                args.coords_paths = args.features_paths
+            else:
+                parser.error(f"--coords_paths is required for {args.model_type}.")
         if len(args.coords_paths) != n_train:
             parser.error(
                 "--coords_paths must have the same number of entries as --features_paths."
             )
         if do_pretrain and args.pretrain_coords_path is None:
-            parser.error(f"--pretrain_coords_path is required for {args.model_type} pretraining.")
+            if args.file_ext == ".h5":
+                args.pretrain_coords_path = args.pretrain_features_path
+            else:
+                parser.error(f"--pretrain_coords_path is required for {args.model_type} pretraining.")
 
     if args.stain_csvs is not None:
         if args.stain_filter is None:
@@ -466,6 +485,7 @@ def main():
         stain_filter=args.stain_filter,
         scan_labels_fn=scan_labels,
         max_biopsies=args.max_biopsies,
+        file_ext=args.file_ext,
     )
 
     print(
@@ -489,6 +509,8 @@ def main():
             bag_keys=bag_keys,
             dist_thr=args.dist_thr,
             bag_names=pretrain_names,
+            file_ext=args.file_ext,
+            label_ext=".npy",
         )
         print(f"Pretrain bags: {len(pretrain_dataset)}")
 

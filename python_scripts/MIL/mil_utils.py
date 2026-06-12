@@ -241,6 +241,7 @@ def build_dataset(
     stain_filter=None,
     scan_labels_fn=None,
     max_biopsies=None,
+    file_ext=".h5",
 ):
     """Build train and (optionally) val datasets from lists of feature/label paths.
 
@@ -318,6 +319,8 @@ def build_dataset(
                 bag_keys=bag_keys,
                 dist_thr=dist_thr,
                 bag_names=train_names,
+                file_ext=file_ext,
+                label_ext=".npy",
             )
         )
         if scan_labels_fn is not None:
@@ -332,6 +335,8 @@ def build_dataset(
                     bag_keys=bag_keys,
                     dist_thr=dist_thr,
                     bag_names=val_names_here,
+                    file_ext=file_ext,
+                    label_ext=".npy",
                 )
             )
             if scan_labels_fn is not None:
