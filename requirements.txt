@@ -18,3 +18,5 @@ torch
 torchvision
 # For machine learning utilities
 scikit-learn
+matplotlib
+h5py
