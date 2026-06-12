@@ -55,7 +55,8 @@ from mil_utils import discover_bags, load_val_names, make_collate_fn, get_bag_na
 
 
 def build_val_dataset(
-    features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv
+    features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv,
+    file_ext=".h5",
 ):
     val_names = load_val_names(val_csv)
     if val_names is None:
@@ -75,6 +76,8 @@ def build_val_dataset(
                     bag_keys=bag_keys,
                     dist_thr=dist_thr,
                     bag_names=names_here,
+                    file_ext=file_ext,
+                    label_ext=".npy",
                 )
             )
     if not datasets:
@@ -494,7 +497,14 @@ def main():
         "--coords_paths",
         nargs="+",
         default=None,
-        help="Required for deepgraphsurv / patchgcn.",
+        help="Required for deepgraphsurv / patchgcn. "
+             "When --file_ext .h5 and omitted, defaults to --features_paths.",
+    )
+    parser.add_argument(
+        "--file_ext",
+        default=".h5",
+        choices=[".h5", ".npy"],
+        help="File extension for feature bags (default: .h5). Use .npy for the legacy pipeline.",
     )
     parser.add_argument(
         "--val_csv", required=True, help="CSV listing validation slide basenames."
@@ -548,9 +558,12 @@ def main():
     bag_keys = ["X", "Y", "adj", "coords"] if is_graph else ["X", "Y"]
 
     n = len(args.features_paths)
-    coords_paths = args.coords_paths if args.coords_paths is not None else [None] * n
     if is_graph and args.coords_paths is None:
-        parser.error(f"--coords_paths is required for {args.model_type}.")
+        if args.file_ext == ".h5":
+            args.coords_paths = args.features_paths
+        else:
+            parser.error(f"--coords_paths is required for {args.model_type}.")
+    coords_paths = args.coords_paths if args.coords_paths is not None else [None] * n
 
     os.makedirs(args.output_dir, exist_ok=True)
     if args.cpu_inference:
@@ -567,6 +580,7 @@ def main():
         bag_keys,
         args.dist_thr,
         args.val_csv,
+        file_ext=args.file_ext,
     )
     print(f"Val bags: {len(val_dataset)}")
 
