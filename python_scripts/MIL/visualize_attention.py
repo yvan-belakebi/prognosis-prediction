@@ -122,7 +122,10 @@ def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
         biopsy_dir = os.path.join(base_path, bag_name)
         if os.path.isdir(biopsy_dir):
             for entry in sorted(os.scandir(biopsy_dir), key=lambda e: e.name):
-                if entry.is_file() and os.path.splitext(entry.name)[1] in (".h5", ".npy"):
+                if entry.is_file() and os.path.splitext(entry.name)[1] in (
+                    ".h5",
+                    ".npy",
+                ):
                     slide_stem = os.path.splitext(entry.name)[0]
                     resolved = f"{bag_name}/{slide_stem}"
                     return entry.path, resolved
@@ -308,7 +311,7 @@ def build_model(model_type: str, task: str, feat_dim: int, args) -> nn.Module:
         model.classifier = nn.LazyLinear(1)
 
     # Materialise any LazyLinear layers before loading the checkpoint
-    dummy_x    = torch.zeros(1, 1, feat_dim)
+    dummy_x = torch.zeros(1, 1, feat_dim)
     dummy_mask = torch.ones(1, 1, dtype=torch.uint8)
     with torch.no_grad():
         if model_type == "deepgraphsurv":
@@ -383,14 +386,18 @@ def run_inference(
     dist_thr: float = 1.5,
 ):
     """Return (risk_score: float, att_weights: ndarray of shape (N,))."""
-    X_t    = torch.tensor(X, dtype=torch.float32).unsqueeze(0).to(device)  # (1,N,D)
-    mask_t = torch.ones(1, X.shape[0], dtype=torch.uint8).to(device)        # (1,N)
+    X_t = torch.tensor(X, dtype=torch.float32).unsqueeze(0).to(device)  # (1,N,D)
+    mask_t = torch.ones(1, X.shape[0], dtype=torch.uint8).to(device)  # (1,N)
 
     model.eval()
     with torch.no_grad():
         if model_type == "deepgraphsurv":
             if coords is None:
-                raise ValueError("--coords_paths is required for deepgraphsurv.")
+                raise ValueError(
+                    "deepgraphsurv requires patch coordinates.  "
+                    "Ensure the features .h5 contains an embedded 'coords' key "
+                    "(produced by compute_feats_clam.py), or supply --coords_paths."
+                )
             adj = _build_adj(coords, dist_thr).to(device)  # (1, N, N)
             pred, att = model(X_t, adj, mask_t, return_att=True)
             att_np = att.squeeze(0).cpu().numpy()  # (N,)
@@ -466,15 +473,15 @@ def make_attention_canvas(
     row_array, col_array = _coords_to_grid(coords, coords_in_pixels, patch_size)
 
     n_coords = len(row_array)
-    n_att    = len(att_weights)
+    n_att = len(att_weights)
 
     if n_coords != n_att:
         # Colour only the patches we have attention weights for; the rest stay grey.
         # This is a best-effort fallback — spatial positions may not be correctly
         # assigned when the features file is a filtered subset of the coords file.
         n_use = min(n_coords, n_att)
-        row_array  = row_array[:n_use]
-        col_array  = col_array[:n_use]
+        row_array = row_array[:n_use]
+        col_array = col_array[:n_use]
         att_weights = att_weights[:n_use]
 
     H = (row_array.max() + 1) * display_cell_size
@@ -611,16 +618,16 @@ def main():
         nargs="+",
         required=True,
         help="One or more directories with bag feature files (.h5 or .npy). "
-             "Biopsies are looked up in each directory in order.",
+        "Biopsies are looked up in each directory in order.",
     )
     parser.add_argument(
         "--coords_paths",
         nargs="+",
         default=None,
         help="One or more directories with patch coordinate files (.h5 or .npy), "
-             "in the same order as --features_paths.  "
-             "Optional when features are CLAM-style .h5 files that already contain "
-             "an embedded 'coords' key (produced by compute_feats_clam.py).",
+        "in the same order as --features_paths.  "
+        "Optional when features are CLAM-style .h5 files that already contain "
+        "an embedded 'coords' key (produced by compute_feats_clam.py).",
     )
     parser.add_argument(
         "--output_dir",
@@ -664,23 +671,33 @@ def main():
     )
     # DeepGraphSurv-specific
     parser.add_argument(
-        "--hidden_dim", type=int, default=None,
+        "--hidden_dim",
+        type=int,
+        default=None,
         help="Hidden GCN dimension (DeepGraphSurv; default: feat_dim).",
     )
     parser.add_argument(
-        "--n_layers_rep", type=int, default=1,
+        "--n_layers_rep",
+        type=int,
+        default=1,
         help="Representation GCN layers (DeepGraphSurv).",
     )
     parser.add_argument(
-        "--n_layers_att", type=int, default=1,
+        "--n_layers_att",
+        type=int,
+        default=1,
         help="Attention GCN layers (DeepGraphSurv).",
     )
     parser.add_argument(
-        "--K", type=int, default=5,
+        "--K",
+        type=int,
+        default=5,
         help="Chebyshev polynomial order (DeepGraphSurv).",
     )
     parser.add_argument(
-        "--dist_thr", type=float, default=1.5,
+        "--dist_thr",
+        type=float,
+        default=1.5,
         help="Adjacency distance threshold (DeepGraphSurv).",
     )
 
@@ -713,7 +730,7 @@ def main():
     parser.add_argument(
         "--patch_size",
         type=int,
-        default=256,
+        default=224,
         help="Extraction patch size in pixels; only used when "
         "--coords_in_pixels is set.",
     )
@@ -794,8 +811,12 @@ def main():
             continue
 
         risk, att = run_inference(
-            model, args.model_type, X, device,
-            coords=coords, dist_thr=args.dist_thr,
+            model,
+            args.model_type,
+            X,
+            device,
+            coords=coords,
+            dist_thr=args.dist_thr,
         )
         print(
             f"  patches={len(X)}  risk={risk:.4f}  "
