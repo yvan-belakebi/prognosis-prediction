@@ -15,3 +15,27 @@ The studied events are:
 ### Feature extraction
 
 The foundation models tested for feature extraction are: Virchow2, UNI2-h, Hibou-L, Hibou-B, H-optimus-1.
+
+
+torchMIL, CLAM and torchstain should be downloaded and included in the python_scripts folder.
+
+
+Example run:
+# Tiling
+python python_scripts/prepare_for_MIL/run_clam_tiling.py --wsi_dir data/raw_wsi --output_dir WSI/IgA_CLAM --step_size 112 --stitch store_false
+
+# Stain normalization
+torchStain reinhard
+to be implemented + find one reference slide per stain.
+
+# Feature extraction
+python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA_CLAM/patches --wsi_dir data/raw_wsi --output_dir WSI/IgA_CLAM/UNI2-h_feats --backbone UNI2-h --batch_size 256
+
+# MIL
+python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA_CLAM/UNI2-h_feats --labels_paths WSI/IgA_CLAM/labels_regression --checkpoint_dir checkpoints_regression_transmil_CLAM --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
+
+# Attention map
+python python_scripts/MIL/visualize_attention.py --features_paths WSI/IgA_CLAM/UNI2-h_feats --checkpoint checkpoints_regression_transmil_CLAM/transmil_regression.pth --model_type transmil --task regression --label_csv followup_data/labels_IgA_CLAM.csv
+
+# Survival curve
+python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints_CLAM/deepgraphsurv_model.pth --features_paths WSI/IgA_CLAM/UNI2-h_feats --labels_paths WSI/IgA_CLAM/labels --val_csv followup_data/survival_validation_20pct_both.csv --dropout 0.1
