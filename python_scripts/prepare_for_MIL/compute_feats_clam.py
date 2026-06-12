@@ -1,0 +1,345 @@
+"""
+compute_feats_clam.py — Extract patch features from CLAM-tiled WSIs.
+
+Reads coordinate .h5 files produced by run_clam_tiling.py, opens the raw WSI
+with OpenSlide, and extracts patches on-the-fly.  Features + coordinates are
+stored together in one .h5 per slide (keys: 'features', 'coords'), which is the
+format expected by ProcessedMILDataset with file_ext='.h5'.
+
+Output layout:
+    WSI/{dataset}/{backbone}_feats/{biopsy_nr}/{slide_id}.h5
+        h5['features']  shape (N, D)   float32
+        h5['coords']    shape (N, 2)   int32   pixel coords at patch_level 0
+
+Input layouts supported:
+    patches_dir/{biopsy_nr}/{slide_id}.h5   (nested, one dir per biopsy)
+    patches_dir/{slide_id}.h5              (flat)
+
+The corresponding raw WSI is looked up under:
+    wsi_dir/{biopsy_nr}/{slide_id}.{slide_ext}   (nested)
+    wsi_dir/{slide_id}.{slide_ext}              (flat)
+
+Slides whose output .h5 already exists are skipped unless --no_auto_skip is set.
+
+Usage:
+    python python_scripts/prepare_for_MIL/compute_feats_clam.py \\
+        --patches_dir WSI/IgA/patches \\
+        --wsi_dir     data/raw_wsi/IgA \\
+        --output_dir  WSI/IgA/UNI2-h_feats \\
+        --backbone    UNI2-h \\
+        --batch_size  256 --num_workers 8
+
+Supported backbones:
+    UNI2-h       (1536-D, requires offline weights via load_feature_extractors_offline)
+    h-optimus-1  (1536-D)
+    Virchow2     (2560-D)
+"""
+
+import argparse
+import os
+import sys
+import time
+
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+# ---------------------------------------------------------------------------
+# Resolve sibling packages
+# ---------------------------------------------------------------------------
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_clam_dir = os.path.abspath(os.path.join(_script_dir, "..", "CLAM-master"))
+if _clam_dir not in sys.path:
+    sys.path.insert(0, _clam_dir)
+
+# CLAM's on-the-fly patch loader
+import openslide  # noqa: E402 (requires openslide-python)
+from dataset_modules.dataset_h5 import Whole_Slide_Bag_FP  # noqa: E402
+from utils.file_utils import save_hdf5  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Backbone loading
+# ---------------------------------------------------------------------------
+
+def load_backbone(backbone: str):
+    """Return (model, transform) for the requested backbone."""
+    if backbone == "UNI2-h":
+        from load_feature_extractors_offline import load_uni2h_feature_extractor
+        return load_uni2h_feature_extractor()
+    if backbone == "h-optimus-1":
+        from load_feature_extractor import load_hoptimus1_feature_extractor
+        return load_hoptimus1_feature_extractor()
+    if backbone == "Virchow2":
+        from load_feature_extractor import load_virchow2_feature_extractor
+        return load_virchow2_feature_extractor()
+    raise ValueError(
+        f"Unknown backbone '{backbone}'. "
+        "Choose from: UNI2-h, h-optimus-1, Virchow2."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slide discovery
+# ---------------------------------------------------------------------------
+
+def discover_coord_files(patches_dir: str) -> list[tuple[str, str, str]]:
+    """Return list of (h5_path, biopsy_nr, slide_id).
+
+    Supports flat (patches_dir/*.h5) and nested (patches_dir/{biopsy}/*.h5) layouts.
+    Nested dirs take priority (same rule as run_clam_tiling.py).
+    """
+    results = []
+    has_nested = False
+
+    for entry in sorted(os.scandir(patches_dir), key=lambda e: e.name):
+        if entry.is_dir():
+            for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
+                if sub.is_file() and sub.name.endswith(".h5"):
+                    slide_id = os.path.splitext(sub.name)[0]
+                    results.append((sub.path, entry.name, slide_id))
+                    has_nested = True
+
+    if not has_nested:
+        for entry in sorted(os.scandir(patches_dir), key=lambda e: e.name):
+            if entry.is_file() and entry.name.endswith(".h5"):
+                slide_id = os.path.splitext(entry.name)[0]
+                results.append((entry.path, "", slide_id))
+
+    return results
+
+
+def find_wsi(wsi_dir: str, biopsy_nr: str, slide_id: str, slide_ext: str) -> str | None:
+    """Locate the raw WSI file for a given slide."""
+    candidates = []
+    # Nested first
+    if biopsy_nr:
+        candidates.append(os.path.join(wsi_dir, biopsy_nr, slide_id + slide_ext))
+    # Flat fallback
+    candidates.append(os.path.join(wsi_dir, slide_id + slide_ext))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Per-slide feature extraction
+# ---------------------------------------------------------------------------
+
+def extract_slide_features(
+    h5_path: str,
+    wsi_path: str,
+    model: torch.nn.Module,
+    transform,
+    output_path: str,
+    batch_size: int,
+    num_workers: int,
+    device: torch.device,
+) -> int:
+    """Extract features for one slide and write to output_path.
+
+    Returns the number of patches processed.
+    """
+    try:
+        wsi = openslide.open_slide(wsi_path)
+    except Exception as exc:
+        raise RuntimeError(f"Cannot open WSI {wsi_path}: {exc}") from exc
+
+    try:
+        dataset = Whole_Slide_Bag_FP(
+            file_path=h5_path,
+            wsi=wsi,
+            img_transforms=transform,
+        )
+    except Exception as exc:
+        wsi.close()
+        raise RuntimeError(f"Cannot load coord file {h5_path}: {exc}") from exc
+
+    # OpenSlide objects contain ctypes pointers and cannot be pickled for
+    # multiprocessing workers on Windows — force single-process loading.
+    if sys.platform == "win32":
+        num_workers = 0
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+        drop_last=False,
+    )
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    mode = "w"
+    total_patches = 0
+    with torch.inference_mode():
+        for batch in loader:
+            imgs   = batch["img"].to(device, non_blocking=True)
+            coords = batch["coord"].numpy().astype(np.int32)  # (B, 2)
+
+            feats = model(imgs)
+            # Transformer models may output (B, seq, D) — flatten to (B*seq, D)
+            if feats.ndim == 3:
+                feats = feats.reshape(-1, feats.shape[-1])
+            feats_np = feats.cpu().numpy().astype(np.float32)
+
+            save_hdf5(output_path, {"features": feats_np, "coords": coords}, mode=mode)
+            mode = "a"
+            total_patches += len(feats_np)
+
+    wsi.close()
+    return total_patches
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract patch features from CLAM-tiled WSIs and save as .h5.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # --- I/O -----------------------------------------------------------------
+    parser.add_argument(
+        "--patches_dir",
+        required=True,
+        help="Directory of CLAM patch-coordinate .h5 files "
+             "(e.g. WSI/IgA/patches).",
+    )
+    parser.add_argument(
+        "--wsi_dir",
+        required=True,
+        help="Root directory of raw WSI files (e.g. data/raw_wsi/IgA).",
+    )
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        help="Output directory for feature .h5 files "
+             "(e.g. WSI/IgA/UNI2-h_feats).",
+    )
+    parser.add_argument(
+        "--slide_ext",
+        default=".svs",
+        help="WSI file extension.",
+    )
+    parser.add_argument(
+        "--no_auto_skip",
+        action="store_true",
+        help="Re-extract slides whose output .h5 already exists.",
+    )
+
+    # --- Model ---------------------------------------------------------------
+    parser.add_argument(
+        "--backbone",
+        default="UNI2-h",
+        choices=["UNI2-h", "h-optimus-1", "Virchow2"],
+        help="Feature extractor backbone.",
+    )
+
+    # --- Compute -------------------------------------------------------------
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=256,
+        help="Patch batch size for GPU inference.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=8,
+        help="DataLoader worker processes.",
+    )
+    parser.add_argument(
+        "--gpu_index",
+        type=int,
+        default=0,
+        help="CUDA device index.",
+    )
+
+    args = parser.parse_args()
+
+    slide_ext = args.slide_ext
+    if not slide_ext.startswith("."):
+        slide_ext = f".{slide_ext}"
+
+    device = torch.device(
+        f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
+    )
+    print(f"Device: {device}")
+
+    # --- Load model ----------------------------------------------------------
+    print(f"Loading backbone: {args.backbone} …")
+    model, transform = load_backbone(args.backbone)
+    model = model.eval().to(device)
+    print(f"Backbone ready.")
+
+    # --- Discover coord files ------------------------------------------------
+    print(f"Scanning {args.patches_dir} …")
+    coord_files = discover_coord_files(args.patches_dir)
+    if not coord_files:
+        print("No .h5 coord files found.")
+        return
+    print(f"Found {len(coord_files)} slides.")
+
+    # --- Process each slide --------------------------------------------------
+    counts = {"done": 0, "skipped": 0, "failed": 0}
+    t0 = time.time()
+
+    for i, (h5_path, biopsy_nr, slide_id) in enumerate(coord_files):
+        biopsy_tag = f"[{biopsy_nr}] " if biopsy_nr else ""
+        print(f"\n({i + 1}/{len(coord_files)}) {biopsy_tag}{slide_id}")
+
+        subdir = biopsy_nr if biopsy_nr else ""
+        output_path = os.path.join(args.output_dir, subdir, slide_id + ".h5")
+
+        if not args.no_auto_skip and os.path.isfile(output_path):
+            print("  → skipped (output exists)")
+            counts["skipped"] += 1
+            continue
+
+        wsi_path = find_wsi(args.wsi_dir, biopsy_nr, slide_id, slide_ext)
+        if wsi_path is None:
+            print(
+                f"  [WARN] Raw WSI not found for {slide_id} "
+                f"(looked in {args.wsi_dir}/{biopsy_nr}/ and {args.wsi_dir}/)"
+            )
+            counts["failed"] += 1
+            continue
+
+        try:
+            n_patches = extract_slide_features(
+                h5_path=h5_path,
+                wsi_path=wsi_path,
+                model=model,
+                transform=transform,
+                output_path=output_path,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                device=device,
+            )
+            print(f"  → done  ({n_patches} patches)  → {output_path}")
+            counts["done"] += 1
+        except Exception as exc:
+            print(f"  [ERROR] {exc}")
+            # Remove partial output to avoid corrupt files on restart
+            if os.path.isfile(output_path):
+                os.remove(output_path)
+            counts["failed"] += 1
+
+    elapsed = time.time() - t0
+    print(
+        f"\nDone in {elapsed:.0f}s.  "
+        f"Extracted: {counts['done']}  Skipped: {counts['skipped']}  Failed: {counts['failed']}"
+    )
+    print(f"Features → {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
