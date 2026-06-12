@@ -11,31 +11,29 @@ normalises the per-patch attention weights, and overlays them as a colour heatma
 (green = low, red = high) on a spatial canvas reconstructed from patch coordinates.
 
 Usage:
-    # Survival ABMIL, single dataset
+    # Survival ABMIL — coords auto-read from the features .h5 (no --coords_paths needed)
     python python_scripts/MIL/visualize_attention.py \\
         --label_csv      results/eval/risk_scores.csv \\
         --features_paths WSI/IgA/UNI2-h_feats \\
-        --coords_paths   WSI/IgA/coords \\
         --checkpoint     runs/abmil_survival/best_model.pth \\
-        --model_type     abmil --task survival
+        --model_type     abmil --task survival \\
+        --patch_size     256
 
-    # Regression DSMIL, two datasets, coords stored as pixel values at 256 px patch size
+    # Regression DSMIL, two datasets — coords embedded in features .h5
     python python_scripts/MIL/visualize_attention.py \\
         --label_csv      followup_data/labels.csv \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
-        --coords_paths   WSI/IgA/coords        WSI/IgA_registry/coords \\
         --checkpoint     runs/dsmil_reg/best_model.pth \\
         --model_type     dsmil --task regression \\
-        --coords_in_pixels --patch_size 256
+        --patch_size     256
 
-    # Survival DeepGraphSurv (coords required for adjacency)
+    # Survival DeepGraphSurv — coords auto-read from features .h5 for adjacency
     python python_scripts/MIL/visualize_attention.py \\
         --label_csv      results/eval/risk_scores.csv \\
         --features_paths WSI/IgA/UNI2-h_feats \\
-        --coords_paths   WSI/IgA/coords \\
         --checkpoint     runs/dgs_survival/best_model.pth \\
         --model_type     deepgraphsurv --task survival \\
-        --dist_thr 1.5 --n_layers_rep 1 --n_layers_att 1 --K 5
+        --patch_size     256 --dist_thr 1.5 --n_layers_rep 1 --n_layers_att 1 --K 5
 
 The --label_csv can be any CSV that has biopsy/bag_name/file_name/id, time, and event
 columns — including the risk_scores.csv produced by evaluate_survival.py.
@@ -147,10 +145,10 @@ def load_bag(bag_name: str, features_paths: list, coords_paths: list | None):
 
     Coord loading priority:
       1. "coords" key inside the features .h5 file — guaranteed to be aligned with
-         features because both were written by the same extractor for the same patches.
-      2. Separate coords file from coords_paths — may contain more patches than the
-         features file (patches_to_coords.py saves all tiles; the feature extractor
-         may have skipped some).  A warning is printed when counts differ.
+         features because compute_feats_clam.py writes both keys from the same
+         CLAM coordinate file.
+      2. Separate coords file from coords_paths — legacy fallback; prints a warning
+         when patch counts differ.
     """
     feat_file, resolved = _find_bag_file(features_paths, bag_name)
     if feat_file is None:
@@ -183,13 +181,10 @@ def load_bag(bag_name: str, features_paths: list, coords_paths: list | None):
             if n_feats != n_coords:
                 print(
                     f"  Warning: features has {n_feats} patches but coords has "
-                    f"{n_coords}.  patches_to_coords.py saves all tiles whereas the "
-                    f"feature extractor may have skipped some (background, tissue "
-                    f"filter).  The {abs(n_coords - n_feats)} extra coord positions "
-                    f"will not be coloured and spatial assignment of attention to the "
-                    f"remaining patches may be wrong.  The safest fix is to ensure "
-                    f"the feature .h5 files contain a 'coords' key for the extracted "
-                    f"patches only."
+                    f"{n_coords}.  Patch counts differ — spatial assignment of "
+                    f"attention weights may be wrong.  Consider using features "
+                    f".h5 files that contain an embedded 'coords' key (produced "
+                    f"by compute_feats_clam.py) to guarantee alignment."
                 )
 
     return X, coords
@@ -623,7 +618,9 @@ def main():
         nargs="+",
         default=None,
         help="One or more directories with patch coordinate files (.h5 or .npy), "
-             "in the same order as --features_paths.",
+             "in the same order as --features_paths.  "
+             "Optional when features are CLAM-style .h5 files that already contain "
+             "an embedded 'coords' key (produced by compute_feats_clam.py).",
     )
     parser.add_argument(
         "--output_dir",

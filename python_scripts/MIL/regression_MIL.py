@@ -8,7 +8,7 @@ Supported models:
     abmil     — Attention-Based MIL (Ilse et al., 2018)
     dsmil     — Dual-Stream MIL (Li et al., 2021)
     transmil  — Transformer MIL (Shao et al., 2021)
-    patchgcn  — Patch-based Graph CNN (Chen et al., 2021); requires --coords_paths
+    patchgcn  — Patch-based Graph CNN (Chen et al., 2021); coords auto-read from features .h5
 
 Training loss: MSE by default; switch to MAE with --loss mae.
 

@@ -18,7 +18,19 @@ Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
         --stain_csvs followup_data/labels_combined.csv none \\
         --epochs 50
 
-python python_scripts/MIL/MIL.py --model_type deepgraphsurv --pretrain_features_path WSI/non_IgA/UNI2-h_feats --pretrain_labels_path WSI/non_IgA/labels --pretrain_coords_path WSI/non_IgA/coords --pretrain_epochs 10 --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats --labels_paths WSI/IgA/labels WSI/IgA_registry/labels --coords_paths WSI/IgA/coords WSI/IgA_registry/coords --val_csv followup_data/survival_validation_files.csv --stain_filter "PAS" --stain_csvs followup_data/labels_combined.csv followup_data/labels_combined.csv --checkpoint_dir checkpoints_10_epochs_pretraining/ --log_dir results/losses_10_pretraining/ --dropout 0.1 --save_every 5 --batch_size 4
+Usage (DeepGraphSurv, two-phase — coords auto-read from features .h5, no --coords_paths needed):
+    python python_scripts/MIL/MIL.py --model_type deepgraphsurv \\
+        --pretrain_features_path WSI/non_IgA/UNI2-h_feats \\
+        --pretrain_labels_path   WSI/non_IgA/labels \\
+        --pretrain_epochs 10 \\
+        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
+        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
+        --val_csv followup_data/survival_validation_files.csv \\
+        --stain_filter PAS \\
+        --stain_csvs followup_data/labels_combined.csv followup_data/labels_combined.csv \\
+        --checkpoint_dir checkpoints_10_epochs_pretraining/ \\
+        --log_dir results/losses_10_pretraining/ \\
+        --dropout 0.1 --save_every 5 --batch_size 4
 
 
 Usage (single-repo, no pretraining):

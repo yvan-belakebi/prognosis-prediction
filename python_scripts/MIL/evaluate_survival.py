@@ -8,12 +8,21 @@ Produces:
 
 C-index and log-rank p-value are printed to stdout.
 
-Usage:
+Usage (ABMIL — no coords needed):
     python python_scripts/MIL/evaluate_survival.py \\
         --model_type abmil \\
         --checkpoint checkpoints/abmil_model.pth \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
+        --val_csv followup_data/survival_validation_files.csv \\
+        --output_dir results/survival_eval
+
+Usage (DeepGraphSurv — coords auto-read from the features .h5, no --coords_paths needed):
+    python python_scripts/MIL/evaluate_survival.py \\
+        --model_type deepgraphsurv \\
+        --checkpoint checkpoints/deepgraphsurv_model.pth \\
+        --features_paths WSI/IgA/UNI2-h_feats \\
+        --labels_paths   WSI/IgA/labels \\
         --val_csv followup_data/survival_validation_files.csv \\
         --output_dir results/survival_eval
 """
