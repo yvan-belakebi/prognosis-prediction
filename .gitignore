@@ -25,6 +25,8 @@
 *.h5
 # Ignore shell scripts
 *.sh
+# Ignore stain references
+stain_refs/
 # Miscellaneous 
 *.zip
 *.svg
