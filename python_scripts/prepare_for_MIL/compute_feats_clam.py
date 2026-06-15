@@ -194,6 +194,12 @@ def extract_slide_features(
 ) -> int:
     """Extract features for one slide and write to output_path.
 
+    Features are streamed to a sibling ``<output_path>.partial`` file and only
+    renamed onto the final ``output_path`` once the whole slide has been written.
+    The rename is atomic (``os.replace``), so an abrupt interruption can leave a
+    stray ``.partial`` file but never a truncated ``output_path`` — keeping the
+    auto-skip logic in ``main`` trustworthy.
+
     Returns the number of patches processed.
     """
     try:
@@ -201,56 +207,68 @@ def extract_slide_features(
     except Exception as exc:
         raise RuntimeError(f"Cannot open WSI {wsi_path}: {exc}") from exc
 
+    tmp_path = output_path + ".partial"
+    committed = False
     try:
-        dataset = Whole_Slide_Bag_FP(
-            file_path=h5_path,
-            wsi=wsi,
-            img_transforms=transform,
+        try:
+            dataset = Whole_Slide_Bag_FP(
+                file_path=h5_path,
+                wsi=wsi,
+                img_transforms=transform,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Cannot load coord file {h5_path}: {exc}") from exc
+
+        # OpenSlide objects contain ctypes pointers and cannot be pickled for
+        # multiprocessing workers on Windows — force single-process loading.
+        if sys.platform == "win32":
+            num_workers = 0
+
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            drop_last=False,
         )
-    except Exception as exc:
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        # Discard any leftover partial from a previous interrupted run.
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        mode = "w"
+        total_patches = 0
+        with torch.inference_mode():
+            for batch in tqdm(
+                loader,
+                desc=desc or "  patches",
+                unit="batch",
+                leave=False,
+            ):
+                imgs = batch["img"].to(device, non_blocking=True)
+                coords = batch["coord"].numpy().astype(np.int32)  # (B, 2)
+
+                feats = model(imgs)
+                # Transformer models may output (B, seq, D) — flatten to (B*seq, D)
+                if feats.ndim == 3:
+                    feats = feats.reshape(-1, feats.shape[-1])
+                feats_np = feats.cpu().numpy().astype(np.float32)
+
+                save_hdf5(tmp_path, {"features": feats_np, "coords": coords}, mode=mode)
+                mode = "a"
+                total_patches += len(feats_np)
+
+        # Atomically commit the fully-written file onto the final path.
+        os.replace(tmp_path, output_path)
+        committed = True
+        return total_patches
+    finally:
         wsi.close()
-        raise RuntimeError(f"Cannot load coord file {h5_path}: {exc}") from exc
-
-    # OpenSlide objects contain ctypes pointers and cannot be pickled for
-    # multiprocessing workers on Windows — force single-process loading.
-    if sys.platform == "win32":
-        num_workers = 0
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=False,
-    )
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    mode = "w"
-    total_patches = 0
-    with torch.inference_mode():
-        for batch in tqdm(
-            loader,
-            desc=desc or "  patches",
-            unit="batch",
-            leave=False,
-        ):
-            imgs = batch["img"].to(device, non_blocking=True)
-            coords = batch["coord"].numpy().astype(np.int32)  # (B, 2)
-
-            feats = model(imgs)
-            # Transformer models may output (B, seq, D) — flatten to (B*seq, D)
-            if feats.ndim == 3:
-                feats = feats.reshape(-1, feats.shape[-1])
-            feats_np = feats.cpu().numpy().astype(np.float32)
-
-            save_hdf5(output_path, {"features": feats_np, "coords": coords}, mode=mode)
-            mode = "a"
-            total_patches += len(feats_np)
-
-    wsi.close()
-    return total_patches
+        # Drop the partial file unless it was successfully committed.
+        if not committed and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +417,19 @@ def main():
         return
     print(f"Found {len(coord_files)} slides.")
 
+    # --- Sweep stale partials from previously interrupted runs ----------------
+    n_swept = 0
+    for root, _dirs, files in os.walk(args.output_dir):
+        for name in files:
+            if name.endswith(".h5.partial"):
+                try:
+                    os.remove(os.path.join(root, name))
+                    n_swept += 1
+                except OSError:
+                    pass
+    if n_swept:
+        print(f"Removed {n_swept} stale .partial file(s) from interrupted runs.")
+
     # --- Process each slide --------------------------------------------------
     counts = {"done": 0, "skipped": 0, "failed": 0}
     t0 = time.time()
@@ -456,11 +487,16 @@ def main():
             tqdm.write(f"  → done  ({n_patches} patches)  → {output_path}")
             counts["done"] += 1
         except Exception as exc:
+            # extract_slide_features commits atomically, so output_path is never
+            # left half-written; any partial is cleaned up there on the way out.
             tqdm.write(f"  [ERROR] {exc}")
-            # Remove partial output to avoid corrupt files on restart
-            if os.path.isfile(output_path):
-                os.remove(output_path)
             counts["failed"] += 1
+        except BaseException:
+            # Ctrl-C / SIGTERM-as-exception: the .partial file is removed by
+            # extract_slide_features' finally block; stop the run cleanly.
+            slide_bar.close()
+            tqdm.write("\n[INTERRUPTED] stopping — committed slides are intact.")
+            raise
 
     elapsed = time.time() - t0
     print(
