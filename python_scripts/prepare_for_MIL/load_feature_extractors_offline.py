@@ -57,15 +57,29 @@ def load_uni2h_feature_extractor():
 def load_virchow2_feature_extractor():
     virchow_dir = "./models/virchow2"
 
-    virchow_model = timm.create_model(
-        "vit_large_patch14_224", pretrained=False, num_classes=0
+    # Instantiate directly to avoid timm's pretrained-weights registry check.
+    # Virchow2 is a ViT-Huge/14 with SwiGLU MLP, SiLU activation and 4 reg tokens.
+    virchow_model = VisionTransformer(
+        img_size=224,
+        patch_size=14,
+        depth=32,
+        num_heads=16,
+        init_values=1e-5,
+        embed_dim=1280,
+        mlp_ratio=5.3375,
+        num_classes=0,
+        mlp_layer=timm.layers.SwiGLUPacked,
+        act_layer=torch.nn.SiLU,
+        reg_tokens=4,
+        dynamic_img_size=True,
     )
 
-    virchow_weights = torch.load(
-        os.path.join(virchow_dir, "pytorch_model.bin"), map_location="cpu"
-    )
+    weights_path = os.path.join(virchow_dir, "pytorch_model.bin")
+    if not os.path.exists(weights_path):
+        weights_path = os.path.join(virchow_dir, "model.safetensors")
+    virchow_weights = torch.load(weights_path, map_location="cpu")
 
-    virchow_model.load_state_dict(virchow_weights, strict=False)
+    virchow_model.load_state_dict(virchow_weights, strict=True)
     virchow_model.eval()
 
     # Virchow2 transform
@@ -74,7 +88,7 @@ def load_virchow2_feature_extractor():
             transforms.Resize(224),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ]
     )
     return virchow_model, transform_virchow
@@ -89,18 +103,20 @@ def load_hoptimus1_feature_extractor():
     hopt_dir = "./models/hoptimus1"
 
     hoptimus_model = timm.create_model(
-        "vit_large_patch14_224",
+        "vit_giant_patch14_reg4_dinov2",
         pretrained=False,
+        img_size=224,
         num_classes=0,
         init_values=1e-5,
         dynamic_img_size=False,
     )
 
-    hopt_weights = torch.load(
-        os.path.join(hopt_dir, "pytorch_model.bin"), map_location="cpu"
-    )
+    weights_path = os.path.join(hopt_dir, "pytorch_model.bin")
+    if not os.path.exists(weights_path):
+        weights_path = os.path.join(hopt_dir, "model.safetensors")
+    hopt_weights = torch.load(weights_path, map_location="cpu")
 
-    hoptimus_model.load_state_dict(hopt_weights, strict=False)
+    hoptimus_model.load_state_dict(hopt_weights, strict=True)
     hoptimus_model.eval()
 
     # H-optimus-1 transform
