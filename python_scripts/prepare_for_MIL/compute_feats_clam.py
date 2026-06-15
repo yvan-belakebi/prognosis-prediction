@@ -63,10 +63,10 @@ import openslide  # noqa: E402 (requires openslide-python)
 from dataset_modules.dataset_h5 import Whole_Slide_Bag_FP  # noqa: E402
 from utils.file_utils import save_hdf5  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Stain normalisation transform
 # ---------------------------------------------------------------------------
+
 
 class ReinhardNormTransform:
     """PIL Image → PIL Image Modified Reinhard stain normalizer.
@@ -79,6 +79,7 @@ class ReinhardNormTransform:
     def __init__(self, ref_path: str):
         from PIL import Image as _Image
         from torchstain.numpy.normalizers.reinhard import NumpyReinhardNormalizer
+
         self._Image = _Image
         ref = torch.load(ref_path, weights_only=True)
         self._normalizer = NumpyReinhardNormalizer(method="modified")
@@ -101,33 +102,38 @@ def _sanitize_stain_name(stain: str) -> str:
     Must match the identical function in fit_stain_reference.py.
     """
     import re
-    return re.sub(r'[^\w\-]+', '_', stain).strip('_')
+
+    return re.sub(r"[^\w\-]+", "_", stain).strip("_")
 
 
 # ---------------------------------------------------------------------------
 # Backbone loading
 # ---------------------------------------------------------------------------
 
+
 def load_backbone(backbone: str):
     """Return (model, transform) for the requested backbone."""
     if backbone == "UNI2-h":
         from load_feature_extractors_offline import load_uni2h_feature_extractor
+
         return load_uni2h_feature_extractor()
     if backbone == "h-optimus-1":
-        from load_feature_extractor import load_hoptimus1_feature_extractor
+        from load_feature_extractors_offline import load_hoptimus1_feature_extractor
+
         return load_hoptimus1_feature_extractor()
     if backbone == "Virchow2":
-        from load_feature_extractor import load_virchow2_feature_extractor
+        from load_feature_extractors_offline import load_virchow2_feature_extractor
+
         return load_virchow2_feature_extractor()
     raise ValueError(
-        f"Unknown backbone '{backbone}'. "
-        "Choose from: UNI2-h, h-optimus-1, Virchow2."
+        f"Unknown backbone '{backbone}'. " "Choose from: UNI2-h, h-optimus-1, Virchow2."
     )
 
 
 # ---------------------------------------------------------------------------
 # Slide discovery
 # ---------------------------------------------------------------------------
+
 
 def discover_coord_files(patches_dir: str) -> list[tuple[str, str, str]]:
     """Return list of (h5_path, biopsy_nr, slide_id).
@@ -174,6 +180,7 @@ def find_wsi(wsi_dir: str, biopsy_nr: str, slide_id: str, slide_ext: str) -> str
 # Per-slide feature extraction
 # ---------------------------------------------------------------------------
 
+
 def extract_slide_features(
     h5_path: str,
     wsi_path: str,
@@ -183,6 +190,7 @@ def extract_slide_features(
     batch_size: int,
     num_workers: int,
     device: torch.device,
+    desc: str = "",
 ) -> int:
     """Extract features for one slide and write to output_path.
 
@@ -222,8 +230,13 @@ def extract_slide_features(
     mode = "w"
     total_patches = 0
     with torch.inference_mode():
-        for batch in loader:
-            imgs   = batch["img"].to(device, non_blocking=True)
+        for batch in tqdm(
+            loader,
+            desc=desc or "  patches",
+            unit="batch",
+            leave=False,
+        ):
+            imgs = batch["img"].to(device, non_blocking=True)
             coords = batch["coord"].numpy().astype(np.int32)  # (B, 2)
 
             feats = model(imgs)
@@ -244,6 +257,7 @@ def extract_slide_features(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract patch features from CLAM-tiled WSIs and save as .h5.",
@@ -254,8 +268,7 @@ def main():
     parser.add_argument(
         "--patches_dir",
         required=True,
-        help="Directory of CLAM patch-coordinate .h5 files "
-             "(e.g. WSI/IgA/patches).",
+        help="Directory of CLAM patch-coordinate .h5 files " "(e.g. WSI/IgA/patches).",
     )
     parser.add_argument(
         "--wsi_dir",
@@ -265,8 +278,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         required=True,
-        help="Output directory for feature .h5 files "
-             "(e.g. WSI/IgA/UNI2-h_feats).",
+        help="Output directory for feature .h5 files " "(e.g. WSI/IgA/UNI2-h_feats).",
     )
     parser.add_argument(
         "--slide_ext",
@@ -347,28 +359,37 @@ def main():
     print(f"Backbone ready.")
 
     # --- Build per-stain transform cache ------------------------------------
-    stain_lookup = {}       # bag_name (biopsy_nr/slide_id or slide_id) → stain label
-    transform_cache = {}    # stain label → T.Compose with stain norm prepended
+    stain_lookup = {}  # bag_name (biopsy_nr/slide_id or slide_id) → stain label
+    transform_cache = {}  # stain label → T.Compose with stain norm prepended
 
     if args.labels_csv is not None:
         import pandas as pd
         from torchvision import transforms as T
+
         df_labels = pd.read_csv(args.labels_csv)
         stain_lookup = dict(
             zip(df_labels["file_name"].astype(str), df_labels["stain"].astype(str))
         )
         n_loaded = 0
         for stain in df_labels["stain"].dropna().unique():
-            ref_path = os.path.join(args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt")
+            ref_path = os.path.join(
+                args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt"
+            )
             if os.path.isfile(ref_path):
                 norm = ReinhardNormTransform(ref_path)
-                transform_cache[stain] = T.Compose([norm] + list(base_transform.transforms))
+                transform_cache[stain] = T.Compose(
+                    [norm] + list(base_transform.transforms)
+                )
                 n_loaded += 1
             else:
-                print(f"  [WARN] No reference for stain '{stain}' ({ref_path}) — "
-                      "normalisation skipped for affected slides.")
-        print(f"Stain normalisation: Modified Reinhard — "
-              f"{n_loaded}/{df_labels['stain'].nunique()} stains loaded.")
+                print(
+                    f"  [WARN] No reference for stain '{stain}' ({ref_path}) — "
+                    "normalisation skipped for affected slides."
+                )
+        print(
+            f"Stain normalisation: Modified Reinhard — "
+            f"{n_loaded}/{df_labels['stain'].nunique()} stains loaded."
+        )
 
     # --- Discover coord files ------------------------------------------------
     print(f"Scanning {args.patches_dir} …")
@@ -382,15 +403,17 @@ def main():
     counts = {"done": 0, "skipped": 0, "failed": 0}
     t0 = time.time()
 
-    for i, (h5_path, biopsy_nr, slide_id) in enumerate(coord_files):
+    slide_bar = tqdm(coord_files, desc="Slides", unit="slide")
+    for i, (h5_path, biopsy_nr, slide_id) in enumerate(slide_bar):
         biopsy_tag = f"[{biopsy_nr}] " if biopsy_nr else ""
-        print(f"\n({i + 1}/{len(coord_files)}) {biopsy_tag}{slide_id}")
+        slide_bar.set_postfix_str(f"{biopsy_tag}{slide_id}")
+        tqdm.write(f"\n({i + 1}/{len(coord_files)}) {biopsy_tag}{slide_id}")
 
         subdir = biopsy_nr if biopsy_nr else ""
         output_path = os.path.join(args.output_dir, subdir, slide_id + ".h5")
 
         if not args.no_auto_skip and os.path.isfile(output_path):
-            print("  → skipped (output exists)")
+            tqdm.write("  → skipped (output exists)")
             counts["skipped"] += 1
             continue
 
@@ -399,17 +422,19 @@ def main():
         if stain_lookup:
             stain = stain_lookup.get(lookup_key)
             if stain is None:
-                print(f"  [WARN] {lookup_key!r} not in labels CSV — normalisation skipped.")
+                tqdm.write(
+                    f"  [WARN] {lookup_key!r} not in labels CSV — normalisation skipped."
+                )
                 slide_transform = base_transform
             else:
                 slide_transform = transform_cache.get(stain, base_transform)
-                print(f"  stain: {stain}")
+                tqdm.write(f"  stain: {stain}")
         else:
             slide_transform = base_transform
 
         wsi_path = find_wsi(args.wsi_dir, biopsy_nr, slide_id, slide_ext)
         if wsi_path is None:
-            print(
+            tqdm.write(
                 f"  [WARN] Raw WSI not found for {slide_id} "
                 f"(looked in {args.wsi_dir}/{biopsy_nr}/ and {args.wsi_dir}/)"
             )
@@ -426,11 +451,12 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 device=device,
+                desc=f"  {slide_id}",
             )
-            print(f"  → done  ({n_patches} patches)  → {output_path}")
+            tqdm.write(f"  → done  ({n_patches} patches)  → {output_path}")
             counts["done"] += 1
         except Exception as exc:
-            print(f"  [ERROR] {exc}")
+            tqdm.write(f"  [ERROR] {exc}")
             # Remove partial output to avoid corrupt files on restart
             if os.path.isfile(output_path):
                 os.remove(output_path)
