@@ -37,12 +37,16 @@ Parameters
 """
 
 import argparse
-import math
 import os
 import re
+import sys
 
 import numpy as np
 import pandas as pd
+
+# Shared stratified train/val split helper.
+sys.path.insert(0, os.path.dirname(__file__))
+from val_split import select_val_patients, write_val_csvs  # noqa: E402
 
 try:
     from itables import init_notebook_mode
@@ -93,28 +97,6 @@ def biopsy_to_dirname(biopsy_nr):
     if pd.isna(biopsy_nr) or str(biopsy_nr).strip() in ("", "nan", "None"):
         return "unknown"
     return str(biopsy_nr).replace("/", "-").strip()
-
-
-def select_val_patients(df, patient_col, time_col, frac, n_bins, random_state):
-    """Return patient IDs for the validation set, stratified by time quantile.
-
-    Patients are binned into n_bins equal-frequency strata on time, then
-    ceil(frac) of patients is sampled from each stratum.  Stratification
-    preserves the event-time distribution across splits and guarantees every
-    slide from a given patient lands in the same set.
-    """
-    patient_df = df.groupby(patient_col)[time_col].first().reset_index()
-    patient_df["stratum"] = pd.qcut(
-        patient_df[time_col], q=n_bins, labels=False, duplicates="drop"
-    )
-
-    def _sample(g):
-        n = max(1, math.ceil(frac * len(g)))
-        return g.sample(n=n, random_state=random_state)
-
-    return (patient_df.groupby("stratum", group_keys=False).apply(_sample))[
-        patient_col
-    ].tolist()
 
 
 def write_npy_labels(df, output_dir):
@@ -382,24 +364,13 @@ def main():
         os.path.join(args.output_dir, "labels_combined.csv"), index=False
     )
 
-    # Per-source validation files (stem of --val_csv + _IgA / _registry)
-    val_stem, val_ext = os.path.splitext(args.val_csv)
-    iga_df[iga_df["split"] == "val"][["file_name"]].to_csv(
-        f"{val_stem}_IgA{val_ext}", index=False, header=False
+    # Validation slide lists (combined + per-source) — see val_split.write_val_csvs.
+    # Combined list is consumed by MIL.py --val_csv.
+    survival_val = write_val_csvs(
+        args.val_csv,
+        iga_df[iga_df["split"] == "val"][["file_name"]],
+        registry_df[registry_df["split"] == "val"][["file_name"]],
     )
-    registry_df[registry_df["split"] == "val"][["file_name"]].to_csv(
-        f"{val_stem}_registry{val_ext}", index=False, header=False
-    )
-
-    # Combined validation list — consumed by MIL.py --val_csv
-    survival_val = pd.concat(
-        [
-            iga_df[iga_df["split"] == "val"][["file_name"]],
-            registry_df[registry_df["split"] == "val"][["file_name"]],
-        ],
-        ignore_index=True,
-    )
-    survival_val.to_csv(args.val_csv, index=False)
 
     # ── Summary ───────────────────────────────────────────────────────────────
 
@@ -421,6 +392,7 @@ def main():
     print(f"  {args.iga_output_dir}/        ({n_iga_npy} .npy files)")
     print(f"  {args.registry_output_dir}/   ({n_reg_npy} .npy files)")
     print(f"  {args.non_iga_output_dir}/    ({n_non_iga_npy} .npy files, all train)")
+    val_stem, val_ext = os.path.splitext(args.val_csv)
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")
     print(f"  {val_stem}_registry{val_ext}")

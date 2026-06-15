@@ -25,7 +25,6 @@ Run from the project root:
 """
 
 import argparse
-import math
 import os
 import sys
 
@@ -33,34 +32,10 @@ import numpy as np
 import pandas as pd
 
 # Reuse cohort loaders from define_labels.py (avoids duplicating biopsy-number
-# normalisation helpers and the IgA merge logic).
+# normalisation helpers and the IgA merge logic) and the shared val-split helper.
 sys.path.insert(0, os.path.dirname(__file__))
 from define_labels import load_iga_cohort, load_registry_cohort, load_non_iga_cohort  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Validation-split helper
-# ---------------------------------------------------------------------------
-
-
-def select_val_patients(df, patient_col, value_col, frac, n_bins, random_state):
-    """Return patient IDs for the val set, stratified by value quantile.
-
-    Patients are binned into n_bins equal-frequency strata, then ceil(frac)
-    patients are sampled from each stratum.  Patient-level selection ensures
-    every slide from one patient lands in the same split.
-    """
-    patient_df = df.groupby(patient_col)[value_col].mean().reset_index()
-    patient_df["stratum"] = pd.qcut(
-        patient_df[value_col], q=n_bins, labels=False, duplicates="drop"
-    )
-
-    def _sample(g):
-        n = max(1, math.ceil(frac * len(g)))
-        return g.sample(n=n, random_state=random_state)
-
-    return (patient_df.groupby("stratum", group_keys=False).apply(_sample))[
-        patient_col
-    ].tolist()
+from val_split import select_val_patients, write_val_csvs  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +155,7 @@ def main():
     iga_df["source"] = "IgA"
 
     iga_val_patients = (
-        select_val_patients(iga_df, "patient", "eGFR", **split_kwargs)
+        select_val_patients(iga_df, "patient", "eGFR", agg="mean", **split_kwargs)
         if args.val_source in ("IgA", "both")
         else []
     )
@@ -213,7 +188,7 @@ def main():
     reg_df["source"] = "registry"
 
     reg_val_patients = (
-        select_val_patients(reg_df, "patient", "eGFR", **split_kwargs)
+        select_val_patients(reg_df, "patient", "eGFR", agg="mean", **split_kwargs)
         if args.val_source in ("registry", "both")
         else []
     )
@@ -273,16 +248,11 @@ def main():
     )
     combined.to_csv(args.summary_csv, index=False)
 
-    val_list = combined[combined["split"] == "val"][["file_name"]]
-    val_list.to_csv(args.val_csv, index=False)
-
-    # Per-source val files (same naming convention as define_labels.py)
-    val_stem, val_ext = os.path.splitext(args.val_csv)
-    iga_df[iga_df["split"] == "val"][["file_name"]].to_csv(
-        f"{val_stem}_IgA{val_ext}", index=False, header=False
-    )
-    reg_df[reg_df["split"] == "val"][["file_name"]].to_csv(
-        f"{val_stem}_registry{val_ext}", index=False, header=False
+    # Validation slide lists (combined + per-source) — see val_split.write_val_csvs.
+    val_list = write_val_csvs(
+        args.val_csv,
+        iga_df[iga_df["split"] == "val"][["file_name"]],
+        reg_df[reg_df["split"] == "val"][["file_name"]],
     )
 
     print(f"\nCombined val slides: {len(val_list)}")
@@ -294,6 +264,7 @@ def main():
     print(f"  {args.registry_output_dir}/   ({len(reg_df)} .npy files)")
     print(f"  {args.non_iga_output_dir}/    ({len(non_iga_df)} .npy files, all train)")
     print(f"  {args.summary_csv}")
+    val_stem, val_ext = os.path.splitext(args.val_csv)
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")
     print(f"  {val_stem}_registry{val_ext}")
