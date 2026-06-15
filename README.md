@@ -24,9 +24,11 @@ Example run:
 # Tiling
 python python_scripts/prepare_for_MIL/run_clam_tiling.py --wsi_dir data/raw_wsi --output_dir WSI/IgA_CLAM --step_size 112 --stitch store_false
 
-# Stain normalization
-torchStain reinhard
-to be implemented + find one reference slide per stain.
+# Labels definition
+python python_scripts/prepare_for_MIL/define_labels.py
+
+# Stain normalization (Reinhard)
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv followup_data/labels.csv --save_patches stain_refs/IgA/qc
 
 # Feature extraction
 python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA_CLAM/patches --wsi_dir data/raw_wsi --output_dir WSI/IgA_CLAM/UNI2-h_feats --backbone UNI2-h --batch_size 256
