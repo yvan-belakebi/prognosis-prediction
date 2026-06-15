@@ -54,10 +54,54 @@ _clam_dir = os.path.abspath(os.path.join(_script_dir, "..", "CLAM-master"))
 if _clam_dir not in sys.path:
     sys.path.insert(0, _clam_dir)
 
+_torchstain_dir = os.path.abspath(os.path.join(_script_dir, "..", "torchstain-main"))
+if _torchstain_dir not in sys.path:
+    sys.path.insert(0, _torchstain_dir)
+
 # CLAM's on-the-fly patch loader
 import openslide  # noqa: E402 (requires openslide-python)
 from dataset_modules.dataset_h5 import Whole_Slide_Bag_FP  # noqa: E402
 from utils.file_utils import save_hdf5  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Stain normalisation transform
+# ---------------------------------------------------------------------------
+
+class ReinhardNormTransform:
+    """PIL Image → PIL Image Modified Reinhard stain normalizer.
+
+    Loaded from a .pt reference file produced by fit_stain_reference.py.
+    On failure (e.g. degenerate patch with zero std) the original image is
+    returned unchanged so the rest of the pipeline is unaffected.
+    """
+
+    def __init__(self, ref_path: str):
+        from PIL import Image as _Image
+        from torchstain.numpy.normalizers.reinhard import NumpyReinhardNormalizer
+        self._Image = _Image
+        ref = torch.load(ref_path, weights_only=True)
+        self._normalizer = NumpyReinhardNormalizer(method="modified")
+        self._normalizer.target_means = ref["target_means"].numpy()
+        self._normalizer.target_stds = ref["target_stds"].numpy()
+
+    def __call__(self, img):
+        try:
+            arr = np.array(img)
+            arr = self._normalizer.normalize(arr)
+            return self._Image.fromarray(arr)
+        except Exception:
+            return img
+
+
+def _sanitize_stain_name(stain: str) -> str:
+    """Convert a stain name to a safe filename stem.
+
+    e.g. 'IgG - IgM - IgA' → 'IgG_-_IgM_-_IgA',  'PAS' → 'PAS'
+    Must match the identical function in fit_stain_reference.py.
+    """
+    import re
+    return re.sub(r'[^\w\-]+', '_', stain).strip('_')
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +287,25 @@ def main():
         help="Feature extractor backbone.",
     )
 
+    # --- Stain normalisation -------------------------------------------------
+    parser.add_argument(
+        "--labels_csv",
+        default=None,
+        help=(
+            "CSV with 'file_name' and 'stain' columns. "
+            "Required together with --stain_refs_dir to enable per-slide stain normalisation."
+        ),
+    )
+    parser.add_argument(
+        "--stain_refs_dir",
+        default=None,
+        help=(
+            "Directory of .pt reference files produced by fit_stain_reference.py, "
+            "one per stain (e.g. PAS.pt, IgG_-_IgM_-_IgA.pt). "
+            "Required together with --labels_csv."
+        ),
+    )
+
     # --- Compute -------------------------------------------------------------
     parser.add_argument(
         "--batch_size",
@@ -274,11 +337,38 @@ def main():
     )
     print(f"Device: {device}")
 
+    if (args.labels_csv is None) != (args.stain_refs_dir is None):
+        parser.error("--labels_csv and --stain_refs_dir must be provided together.")
+
     # --- Load model ----------------------------------------------------------
     print(f"Loading backbone: {args.backbone} …")
-    model, transform = load_backbone(args.backbone)
+    model, base_transform = load_backbone(args.backbone)
     model = model.eval().to(device)
     print(f"Backbone ready.")
+
+    # --- Build per-stain transform cache ------------------------------------
+    stain_lookup = {}       # bag_name (biopsy_nr/slide_id or slide_id) → stain label
+    transform_cache = {}    # stain label → T.Compose with stain norm prepended
+
+    if args.labels_csv is not None:
+        import pandas as pd
+        from torchvision import transforms as T
+        df_labels = pd.read_csv(args.labels_csv)
+        stain_lookup = dict(
+            zip(df_labels["file_name"].astype(str), df_labels["stain"].astype(str))
+        )
+        n_loaded = 0
+        for stain in df_labels["stain"].dropna().unique():
+            ref_path = os.path.join(args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt")
+            if os.path.isfile(ref_path):
+                norm = ReinhardNormTransform(ref_path)
+                transform_cache[stain] = T.Compose([norm] + list(base_transform.transforms))
+                n_loaded += 1
+            else:
+                print(f"  [WARN] No reference for stain '{stain}' ({ref_path}) — "
+                      "normalisation skipped for affected slides.")
+        print(f"Stain normalisation: Modified Reinhard — "
+              f"{n_loaded}/{df_labels['stain'].nunique()} stains loaded.")
 
     # --- Discover coord files ------------------------------------------------
     print(f"Scanning {args.patches_dir} …")
@@ -304,6 +394,19 @@ def main():
             counts["skipped"] += 1
             continue
 
+        # Per-slide stain normalisation
+        lookup_key = f"{biopsy_nr}/{slide_id}" if biopsy_nr else slide_id
+        if stain_lookup:
+            stain = stain_lookup.get(lookup_key)
+            if stain is None:
+                print(f"  [WARN] {lookup_key!r} not in labels CSV — normalisation skipped.")
+                slide_transform = base_transform
+            else:
+                slide_transform = transform_cache.get(stain, base_transform)
+                print(f"  stain: {stain}")
+        else:
+            slide_transform = base_transform
+
         wsi_path = find_wsi(args.wsi_dir, biopsy_nr, slide_id, slide_ext)
         if wsi_path is None:
             print(
@@ -318,7 +421,7 @@ def main():
                 h5_path=h5_path,
                 wsi_path=wsi_path,
                 model=model,
-                transform=transform,
+                transform=slide_transform,
                 output_path=output_path,
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
