@@ -2,7 +2,7 @@
 regression_MIL.py — Train and validate MIL models for WSI regression (e.g. eGFR).
 
 Labels: .npy files containing a single float64 scalar (produced by
-define_regression_labels.py or create_label_npy_files.py --mode regression).
+define_regression_labels.py).
 
 Supported models:
     abmil     — Attention-Based MIL (Ilse et al., 2018)
