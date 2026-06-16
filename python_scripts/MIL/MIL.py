@@ -274,6 +274,13 @@ def main():
              "Use .npy for the legacy pipeline.",
     )
     parser.add_argument(
+        "--label_ext",
+        default=".h5",
+        choices=[".h5", ".npy"],
+        help="File extension for label bags (default: .h5). "
+             "Use .npy for the legacy pipeline.",
+    )
+    parser.add_argument(
         "--val_csv",
         default=None,
         help=(
@@ -484,6 +491,7 @@ def main():
         stain_filter=args.stain_filter,
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
+        label_ext=args.label_ext,
     )
 
     pretrain_dataset = None
@@ -498,6 +506,7 @@ def main():
             stain_csvs=[None],
             stain_filter=None,
             file_ext=args.file_ext,
+            label_ext=args.label_ext,
         )
 
     val_info = f" | Val bags: {len(val_dataset)}" if val_dataset is not None else ""

@@ -1,5 +1,5 @@
 """
-define_regression_labels.py — Create per-slide .npy label files for eGFR regression,
+define_regression_labels.py — Create per-slide .h5 label files for eGFR regression,
 ready for use with regression_MIL.py.
 
 Two cohorts are processed in parallel, mirroring define_labels.py:
@@ -10,7 +10,8 @@ Two cohorts are processed in parallel, mirroring define_labels.py:
   Registry — source column: eGFR            (followup_data/registry_anonymized.csv)
              output dir:    WSI/IgA_registry/labels_regression/
 
-.npy files contain a scalar float64 (the eGFR value).
+.h5 files contain a shape (1,) float64 array (the eGFR value) under the
+'labels' dataset key.
 
 Validation split: stratified by eGFR quantile so the value distribution is
 preserved across train/val.  All slides from the same patient stay in the
@@ -28,6 +29,7 @@ import argparse
 import os
 import sys
 
+import h5py
 import numpy as np
 import pandas as pd
 
@@ -44,15 +46,24 @@ from val_split import select_val_patients, write_val_csvs  # noqa: E402
 
 
 def _write_cohort(df, label_col, patient_col, output_dir, val_patients, split_kwargs):
-    """Assign split, save .npy files, return the annotated DataFrame."""
+    """Assign split, save .h5 files, return the annotated DataFrame.
+
+    The label is stored as a shape (1,) array under the 'labels' dataset key
+    expected by ProcessedMILDataset / default_read_file.  A 1-element array
+    (rather than a 0-d scalar) is required because default_read_file reads
+    .h5 datasets with ``f["labels"][:]``, which fails on a scalar dataspace.
+    """
     df = df.dropna(subset=[label_col]).copy()
     df["split"] = df[patient_col].isin(val_patients).map({True: "val", False: "train"})
 
     os.makedirs(output_dir, exist_ok=True)
     for _, row in df.iterrows():
-        path = os.path.join(output_dir, f"{row['file_name']}.npy")
+        path = os.path.join(output_dir, f"{row['file_name']}.h5")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        np.save(path, np.array(float(row[label_col]), dtype=np.float64))
+        with h5py.File(path, "w") as f:
+            f.create_dataset(
+                "labels", data=np.array([float(row[label_col])], dtype=np.float64)
+            )
     return df
 
 
@@ -113,7 +124,7 @@ def main():
     parser.add_argument("--iga_output_dir",      default="WSI/IgA/labels_regression")
     parser.add_argument("--registry_output_dir", default="WSI/IgA_registry/labels_regression")
     parser.add_argument("--non_iga_output_dir",  default="WSI/non_IgA/labels_regression",
-                        help="Output dir for non-IgA .npy files (always train).")
+                        help="Output dir for non-IgA .h5 files (always train).")
 
     # Summary outputs
     parser.add_argument(
@@ -260,9 +271,9 @@ def main():
         f"  Combined eGFR: {combined['eGFR'].mean():.1f} ± {combined['eGFR'].std():.1f}"
     )
     print(f"\nOutputs:")
-    print(f"  {args.iga_output_dir}/        ({len(iga_df)} .npy files)")
-    print(f"  {args.registry_output_dir}/   ({len(reg_df)} .npy files)")
-    print(f"  {args.non_iga_output_dir}/    ({len(non_iga_df)} .npy files, all train)")
+    print(f"  {args.iga_output_dir}/        ({len(iga_df)} .h5 files)")
+    print(f"  {args.registry_output_dir}/   ({len(reg_df)} .h5 files)")
+    print(f"  {args.non_iga_output_dir}/    ({len(non_iga_df)} .h5 files, all train)")
     print(f"  {args.summary_csv}")
     val_stem, val_ext = os.path.splitext(args.val_csv)
     print(f"  {args.val_csv}")
