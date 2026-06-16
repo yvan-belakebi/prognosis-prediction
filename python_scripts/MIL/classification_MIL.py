@@ -759,7 +759,6 @@ def main():
         stain_filter=args.stain_filter,
         scan_labels_fn=scan_labels,
         file_ext=args.file_ext,
-        label_ext=".npy",  # classification labels are still .npy
     )
 
     # Build pretrain dataset + scan its labels for balanced sampling

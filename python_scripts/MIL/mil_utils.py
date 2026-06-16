@@ -242,7 +242,6 @@ def build_dataset(
     scan_labels_fn=None,
     max_biopsies=None,
     file_ext=".h5",
-    label_ext=".h5",
 ):
     """Build train and (optionally) val datasets from lists of feature/label paths.
 
@@ -258,10 +257,6 @@ def build_dataset(
         The budget is split equally; if one dataset has fewer biopsies than its
         share, all of them are kept and the surplus is redistributed to the
         others.  Has no effect on the validation set.
-    label_ext : str, optional
-        File extension for the label bags (default ".h5").  Use ".npy" for the
-        legacy pipeline.  Both the labelled-bag discovery filter and the
-        ProcessedMILDataset readers use this extension.
 
     Returns
     -------
@@ -281,7 +276,7 @@ def build_dataset(
         filtered = get_filtered_bag_names(fp, sc, stain_filter)
         available = filtered if filtered is not None else discover_bags(fp)
 
-        labelled = set(discover_bags(lp, extensions=(label_ext,)))
+        labelled = set(discover_bags(lp, extensions=(".npy",)))
         n_before = len(available)
         available = [n for n in available if n in labelled]
         if len(available) < n_before:
@@ -325,7 +320,7 @@ def build_dataset(
                 dist_thr=dist_thr,
                 bag_names=train_names,
                 file_ext=file_ext,
-                label_ext=label_ext,
+                label_ext=".npy",
             )
         )
         if scan_labels_fn is not None:
@@ -341,7 +336,7 @@ def build_dataset(
                     dist_thr=dist_thr,
                     bag_names=val_names_here,
                     file_ext=file_ext,
-                    label_ext=label_ext,
+                    label_ext=".npy",
                 )
             )
             if scan_labels_fn is not None:

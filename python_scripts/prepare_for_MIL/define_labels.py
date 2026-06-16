@@ -6,10 +6,9 @@ Run from the project root:
 
 Key outputs
 -----------
-  Per-slide .h5 label files (dataset key 'labels', shape (2,), float64:
-  [time, event]) consumed by MIL.py --labels_paths.  Mirrors
-  define_regression_labels.py; nested biopsy_dirname/slide_stem paths are
-  created under each cohort's output dir:
+  Per-slide .npy label files (shape (2,), float64: [time, event]) consumed by
+  MIL.py --labels_paths.  Mirrors define_regression_labels.py; nested
+  biopsy_dirname/slide_stem paths are created under each cohort's output dir:
       <iga_output_dir>/        (default WSI/IgA/labels)
       <registry_output_dir>/   (default WSI/IgA_registry/labels)
       <non_iga_output_dir>/    (default WSI/non_IgA/labels — always train)
@@ -42,7 +41,6 @@ import os
 import re
 import sys
 
-import h5py
 import numpy as np
 import pandas as pd
 
@@ -101,12 +99,10 @@ def biopsy_to_dirname(biopsy_nr):
     return str(biopsy_nr).replace("/", "-").strip()
 
 
-def write_h5_labels(df, output_dir):
-    """Write one .h5 per slide containing [time, event] (shape (2,), float64).
+def write_npy_labels(df, output_dir):
+    """Write one .npy per slide containing [time, event] (shape (2,), float64).
 
-    The array is stored under the 'labels' dataset key expected by
-    ProcessedMILDataset / default_read_file.  Mirrors
-    define_regression_labels._write_cohort: rows with a missing time or
+    Mirrors define_regression_labels._write_cohort: rows with a missing time or
     event are dropped, and the nested file_name path (biopsy_dirname/slide_stem)
     is recreated as subdirectories under output_dir.  Returns the number of
     label files written.
@@ -114,15 +110,12 @@ def write_h5_labels(df, output_dir):
     df = df.dropna(subset=["time", "event"]).copy()
     os.makedirs(output_dir, exist_ok=True)
     for _, row in df.iterrows():
-        path = os.path.join(output_dir, f"{row['file_name']}.h5")
+        path = os.path.join(output_dir, f"{row['file_name']}.npy")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with h5py.File(path, "w") as f:
-            f.create_dataset(
-                "labels",
-                data=np.array(
-                    [float(row["time"]), float(row["event"])], dtype=np.float64
-                ),
-            )
+        np.save(
+            path,
+            np.array([float(row["time"]), float(row["event"])], dtype=np.float64),
+        )
     return len(df)
 
 
@@ -251,21 +244,21 @@ def main():
         help="Directory for all other CSV outputs.",
     )
 
-    # Per-cohort .h5 label output directories (consumed by MIL.py --labels_paths)
+    # Per-cohort .npy label output directories (consumed by MIL.py --labels_paths)
     parser.add_argument(
         "--iga_output_dir",
         default="WSI/IgA/labels",
-        help="Output dir for IgA per-slide .h5 survival labels.",
+        help="Output dir for IgA per-slide .npy survival labels.",
     )
     parser.add_argument(
         "--registry_output_dir",
         default="WSI/IgA_registry/labels",
-        help="Output dir for registry per-slide .h5 survival labels.",
+        help="Output dir for registry per-slide .npy survival labels.",
     )
     parser.add_argument(
         "--non_iga_output_dir",
         default="WSI/non_IgA/labels",
-        help="Output dir for non-IgA per-slide .h5 survival labels (always train).",
+        help="Output dir for non-IgA per-slide .npy survival labels (always train).",
     )
 
     # Input paths
@@ -339,12 +332,12 @@ def main():
 
     # ── Save outputs ──────────────────────────────────────────────────────────
 
-    # Per-slide .h5 survival labels ([time, event]) — consumed by
-    # MIL.py --labels_paths.  Split membership lives in the CSVs only; the .h5
+    # Per-slide .npy survival labels ([time, event]) — consumed by
+    # MIL.py --labels_paths.  Split membership lives in the CSVs only; the .npy
     # files hold the label regardless of split (MIL.py splits at load time).
-    n_iga_npy = write_h5_labels(iga_df, args.iga_output_dir)
-    n_reg_npy = write_h5_labels(registry_df, args.registry_output_dir)
-    n_non_iga_npy = write_h5_labels(non_iga_df, args.non_iga_output_dir)
+    n_iga_npy = write_npy_labels(iga_df, args.iga_output_dir)
+    n_reg_npy = write_npy_labels(registry_df, args.registry_output_dir)
+    n_non_iga_npy = write_npy_labels(non_iga_df, args.non_iga_output_dir)
 
     # IgA full cohort (all clinical columns, useful for downstream analysis)
     iga_df.to_csv(os.path.join(args.output_dir, "full_data.csv"), index=False)
@@ -396,9 +389,9 @@ def main():
     print(f"  non-IgA  — train: {len(non_iga_df):>5d}  val:    0  (always train)")
     print(f"  Combined val slides: {len(survival_val)}")
     print(f"\nOutputs:")
-    print(f"  {args.iga_output_dir}/        ({n_iga_npy} .h5 files)")
-    print(f"  {args.registry_output_dir}/   ({n_reg_npy} .h5 files)")
-    print(f"  {args.non_iga_output_dir}/    ({n_non_iga_npy} .h5 files, all train)")
+    print(f"  {args.iga_output_dir}/        ({n_iga_npy} .npy files)")
+    print(f"  {args.registry_output_dir}/   ({n_reg_npy} .npy files)")
+    print(f"  {args.non_iga_output_dir}/    ({n_non_iga_npy} .npy files, all train)")
     val_stem, val_ext = os.path.splitext(args.val_csv)
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")

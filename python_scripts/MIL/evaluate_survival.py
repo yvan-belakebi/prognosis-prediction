@@ -65,7 +65,7 @@ from mil_utils import discover_bags, load_val_names, make_collate_fn, get_bag_na
 
 def build_val_dataset(
     features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv,
-    file_ext=".h5", label_ext=".h5",
+    file_ext=".h5",
 ):
     val_names = load_val_names(val_csv)
     if val_names is None:
@@ -73,7 +73,7 @@ def build_val_dataset(
 
     datasets = []
     for fp, lp, cp in zip(features_paths, labels_paths, coords_paths):
-        labelled = set(discover_bags(lp, extensions=(label_ext,)))
+        labelled = set(discover_bags(lp, extensions=(".npy",)))
         available = discover_bags(fp)
         names_here = [n for n in available if n in val_names and n in labelled]
         if names_here:
@@ -86,7 +86,7 @@ def build_val_dataset(
                     dist_thr=dist_thr,
                     bag_names=names_here,
                     file_ext=file_ext,
-                    label_ext=label_ext,
+                    label_ext=".npy",
                 )
             )
     if not datasets:
@@ -516,12 +516,6 @@ def main():
         help="File extension for feature bags (default: .h5). Use .npy for the legacy pipeline.",
     )
     parser.add_argument(
-        "--label_ext",
-        default=".h5",
-        choices=[".h5", ".npy"],
-        help="File extension for label bags (default: .h5). Use .npy for the legacy pipeline.",
-    )
-    parser.add_argument(
         "--val_csv", required=True, help="CSV listing validation slide basenames."
     )
     parser.add_argument("--output_dir", default="results/survival_eval")
@@ -596,7 +590,6 @@ def main():
         args.dist_thr,
         args.val_csv,
         file_ext=args.file_ext,
-        label_ext=args.label_ext,
     )
     print(f"Val bags: {len(val_dataset)}")
 

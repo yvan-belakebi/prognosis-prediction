@@ -1,9 +1,8 @@
 """
 regression_MIL.py — Train and validate MIL models for WSI regression (e.g. eGFR).
 
-Labels: .h5 files containing a single float64 value as a shape (1,) array under
-the 'labels' dataset key (produced by define_regression_labels.py). Legacy .npy
-scalar labels remain supported via --label_ext .npy.
+Labels: .npy files containing a single float64 scalar (produced by
+define_regression_labels.py).
 
 Supported models:
     abmil     — Attention-Based MIL (Ilse et al., 2018)
@@ -53,7 +52,6 @@ if (
     sys.path.insert(0, _torchmil_root)
 
 from torchmil.datasets import ProcessedMILDataset
-from torchmil.datasets.processed_mil_dataset import default_read_file
 from torchmil.data import collate_fn
 from torchmil.models import abmil as abmil_module
 from torchmil.models import dsmil as dsmil_module
@@ -143,23 +141,10 @@ def val_epoch(
 # ---------------------------------------------------------------------------
 
 
-def scan_labels(labels_path: str, bag_names: list, label_ext: str = ".h5") -> np.ndarray:
-    """Read float regression labels from .h5 (or legacy .npy) label files.
-
-    Uses the same reader as ProcessedMILDataset so the 'labels' dataset key is
-    honoured for .h5 files.  Each label is a single scalar (stored as a shape
-    (1,) array in .h5, or a 0-d array in legacy .npy), so ``float(...)`` on the
-    flattened first element collapses either form to a Python float.
-    """
+def scan_labels(labels_path: str, bag_names: list) -> np.ndarray:
+    """Read float regression labels from .npy files."""
     return np.array(
-        [
-            float(
-                np.ravel(
-                    default_read_file(os.path.join(labels_path, f"{n}{label_ext}"), "labels")
-                )[0]
-            )
-            for n in bag_names
-        ],
+        [float(np.load(os.path.join(labels_path, f"{n}.npy"))) for n in bag_names],
         dtype=np.float32,
     )
 
@@ -390,13 +375,6 @@ def main():
         help="File extension for feature and coordinate bags (default: .h5). "
              "Use .npy for the legacy pipeline.",
     )
-    parser.add_argument(
-        "--label_ext",
-        default=".h5",
-        choices=[".h5", ".npy"],
-        help="File extension for label bags (default: .h5). "
-             "Use .npy for the legacy pipeline.",
-    )
     parser.add_argument("--val_csv", default=None)
     parser.add_argument("--stain_filter", default=None)
     parser.add_argument("--stain_csvs", nargs="+", default=None)
@@ -505,10 +483,9 @@ def main():
         val_names=val_names,
         stain_csvs=args.stain_csvs,
         stain_filter=args.stain_filter,
-        scan_labels_fn=partial(scan_labels, label_ext=args.label_ext),
+        scan_labels_fn=scan_labels,
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
-        label_ext=args.label_ext,
     )
 
     print(
@@ -523,9 +500,7 @@ def main():
     pretrain_dataset = None
     if do_pretrain:
         pretrain_names = discover_bags(args.pretrain_features_path)
-        pretrain_labelled = set(
-            discover_bags(args.pretrain_labels_path, extensions=(args.label_ext,))
-        )
+        pretrain_labelled = set(discover_bags(args.pretrain_labels_path, extensions=(".npy",)))
         pretrain_names = [n for n in pretrain_names if n in pretrain_labelled]
         pretrain_dataset = ProcessedMILDataset(
             features_path=args.pretrain_features_path,
@@ -535,7 +510,7 @@ def main():
             dist_thr=args.dist_thr,
             bag_names=pretrain_names,
             file_ext=args.file_ext,
-            label_ext=args.label_ext,
+            label_ext=".npy",
         )
         print(f"Pretrain bags: {len(pretrain_dataset)}")
 
