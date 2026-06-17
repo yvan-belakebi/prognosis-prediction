@@ -34,9 +34,12 @@ import pandas as pd
 # Reuse cohort loaders from define_labels.py (avoids duplicating biopsy-number
 # normalisation helpers and the IgA merge logic) and the shared val-split helper.
 sys.path.insert(0, os.path.dirname(__file__))
-from define_labels import load_iga_cohort, load_registry_cohort, load_non_iga_cohort  # noqa: E402
+from define_labels import (
+    load_iga_cohort,
+    load_registry_cohort,
+    load_non_iga_cohort,
+)  # noqa: E402
 from val_split import select_val_patients, write_val_csvs  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Per-cohort label writing
@@ -68,12 +71,14 @@ def main():
     )
 
     # Input files
-    parser.add_argument("--iga_slides_csv", default="followup_data/IgA_slide_data.csv")
+    parser.add_argument(
+        "--iga_slides_csv", default="followup_data/renamed/IgA_slide_data.csv"
+    )
     parser.add_argument(
         "--iga_followup_csv", default="followup_data/IgA_cohort_full_data.csv"
     )
     parser.add_argument(
-        "--registry_csv", default="followup_data/registry_anonymized.csv"
+        "--registry_csv", default="followup_data/renamed/registry_anonymized.csv"
     )
 
     # Label columns
@@ -110,10 +115,15 @@ def main():
     parser.add_argument("--random_state", type=int, default=42)
 
     # Output directories
-    parser.add_argument("--iga_output_dir",      default="WSI/IgA/labels_regression")
-    parser.add_argument("--registry_output_dir", default="WSI/IgA_registry/labels_regression")
-    parser.add_argument("--non_iga_output_dir",  default="WSI/non_IgA/labels_regression",
-                        help="Output dir for non-IgA .npy files (always train).")
+    parser.add_argument("--iga_output_dir", default="WSI/IgA/labels_regression")
+    parser.add_argument(
+        "--registry_output_dir", default="WSI/IgA_registry/labels_regression"
+    )
+    parser.add_argument(
+        "--non_iga_output_dir",
+        default="WSI/non_IgA/labels_regression",
+        help="Output dir for non-IgA .npy files (always train).",
+    )
 
     # Summary outputs
     parser.add_argument(
@@ -216,8 +226,10 @@ def main():
     non_iga_full = load_non_iga_cohort(args.registry_csv)
 
     if args.registry_label_col not in non_iga_full.columns:
-        print(f"Warning: '{args.registry_label_col}' not found in non-IgA registry data "
-              f"— non-IgA will be skipped.")
+        print(
+            f"Warning: '{args.registry_label_col}' not found in non-IgA registry data "
+            f"— non-IgA will be skipped."
+        )
         non_iga_df = pd.DataFrame(
             columns=["file_name", "eGFR", "Stain", "patient", "source", "split"]
         )

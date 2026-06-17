@@ -151,9 +151,9 @@ def load_iga_cohort(iga_slides_csv, iga_followup_csv):
     df = pd.merge(slides, followup, on="Biopsy Number", how="inner")
     df["time"] = df.apply(_follow_up_years, axis=1) * 365.25  # years → days
     df["event"] = (df["RRT_or_death"] == "Yes").astype(int)
-    df["slide_stem"]    = df["File Location"].apply(extract_file_name)
+    df["slide_stem"] = df["File Location"].apply(extract_file_name)
     df["biopsy_dirname"] = df["Biopsy Number"].apply(biopsy_to_dirname)
-    df["file_name"]     = df["biopsy_dirname"] + "/" + df["slide_stem"]
+    df["file_name"] = df["biopsy_dirname"] + "/" + df["slide_stem"]
     df["source"] = "IgA"
     return df
 
@@ -164,9 +164,11 @@ def _parse_registry_time_event(df):
         df["time_to_event"].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
     )
     df["event"] = df["Event"].notna().astype(int)
-    df["slide_stem"]    = df["ANON_name"].astype(str)
-    df["biopsy_dirname"] = df["biop_number"].astype(str).apply(transform_label).apply(biopsy_to_dirname)
-    df["file_name"]     = df["biopsy_dirname"] + "/" + df["slide_stem"]
+    df["slide_stem"] = df["ANON_name"].astype(str)
+    df["biopsy_dirname"] = (
+        df["biop_number"].astype(str).apply(transform_label).apply(biopsy_to_dirname)
+    )
+    df["file_name"] = df["biopsy_dirname"] + "/" + df["slide_stem"]
     df.rename(
         columns={"ID_diagnosis": "patient", "Stain": "stain"},
         inplace=True,
@@ -264,7 +266,7 @@ def main():
     # Input paths
     parser.add_argument(
         "--iga_slides_csv",
-        default="followup_data/IgA_slide_data.csv",
+        default="followup_data/renamed/IgA_slide_data.csv",
         help="Slide metadata for the IgA cohort.",
     )
     parser.add_argument(
@@ -274,7 +276,7 @@ def main():
     )
     parser.add_argument(
         "--registry_csv",
-        default="followup_data/registry_anonymized.csv",
+        default="followup_data/renamed/registry_anonymized.csv",
         help="Registry cohort data.",
     )
 
@@ -293,10 +295,15 @@ def main():
     # Slides present in iga_backup but removed by the date filter.
     # Saved so they can be explicitly excluded from feature directories
     # before training (e.g. passed to sync_dirs.py or inspected manually).
-    iga_excluded = iga_backup.loc[
-        ~iga_backup["file_name"].isin(set(iga_df["file_name"])),
-        ["file_name", "Biopsy_date", "Stain"],
-    ].drop_duplicates("file_name").sort_values("file_name").reset_index(drop=True)
+    iga_excluded = (
+        iga_backup.loc[
+            ~iga_backup["file_name"].isin(set(iga_df["file_name"])),
+            ["file_name", "Biopsy_date", "Stain"],
+        ]
+        .drop_duplicates("file_name")
+        .sort_values("file_name")
+        .reset_index(drop=True)
+    )
 
     registry_df = load_registry_cohort(args.registry_csv)
 
@@ -357,11 +364,11 @@ def main():
     non_iga_labels = non_iga_df[
         ["file_name", "time", "event", "stain", "source", "split"]
     ]
-    labels_combined = pd.concat(
+    labels_unfiltered = pd.concat(
         [iga_labels, registry_labels, non_iga_labels], ignore_index=True
     )
-    labels_combined.to_csv(
-        os.path.join(args.output_dir, "labels_combined.csv"), index=False
+    labels_unfiltered.to_csv(
+        os.path.join(args.output_dir, "labels_unfiltered.csv"), index=False
     )
 
     # Validation slide lists (combined + per-source) — see val_split.write_val_csvs.
@@ -383,8 +390,10 @@ def main():
         f"val_source={args.val_source}  val_frac={args.val_frac}"
         f"  n_bins={args.n_bins}  random_state={args.random_state}"
     )
-    print(f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}  "
-          f"excluded (pre-2006): {len(iga_excluded):>4d}")
+    print(
+        f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}  "
+        f"excluded (pre-2006): {len(iga_excluded):>4d}"
+    )
     print(f"  Registry — train: {n_reg_train:>5d}  val: {n_reg_val:>4d}")
     print(f"  non-IgA  — train: {len(non_iga_df):>5d}  val:    0  (always train)")
     print(f"  Combined val slides: {len(survival_val)}")
@@ -396,7 +405,7 @@ def main():
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")
     print(f"  {val_stem}_registry{val_ext}")
-    print(f"  {os.path.join(args.output_dir, 'labels_combined.csv')}")
+    print(f"  {os.path.join(args.output_dir, 'labels_unfiltered.csv')}")
     print(f"  {os.path.join(args.output_dir, 'full_data.csv')}")
     print(f"  {excluded_path}  ({len(iga_excluded)} slides excluded by date filter)")
 

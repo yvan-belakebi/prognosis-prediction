@@ -24,10 +24,46 @@ Run from the project root:
         --registry_dirs WSI/IgA_registry/UNI2-h_feats WSI/IgA_registry/labels \\
                         WSI/non_IgA/UNI2-h_feats WSI/non_IgA/labels \\
         --apply
+
+
+Rename mode (--rename)
+----------------------
+Some slides are named after scanner timestamps, e.g. "2024-06-13 11.40.31.h5".
+The embedded dots are harmless (os.path.splitext / discover_bags handle them),
+but the *space* is fragile: it breaks shell helpers (copy_files.sh, unquoted
+paths) and is an easy source of silent CSV-match failures where a slide is
+quietly dropped from training.
+
+--rename assigns each *unsafe* slide a filesystem-safe, biopsy-based sequential
+name (e.g. '12-23_s01', or 'unknown_s0001' when the biopsy is not known) and:
+  - writes a mapping CSV  (biopsy_number, old_name, new_name),
+  - renames the matching files across every --slide_dirs entry (feature, label,
+    coord and raw-WSI dirs), in both flat and biopsy-nested layouts, using one
+    consistent global plan,
+  - writes rewritten *copies* of the source metadata CSVs (IgA File Location /
+    registry ANON_name updated to the new names) into --csv_out_dir, which
+    downstream tasks then consume instead of the originals.
+
+Already-safe names (e.g. '32980023') are left untouched unless --rename-all is
+passed. Like the move mode, --rename is a dry run until you add --apply.
+
+    # Dry run — see which slides would be renamed
+    python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename \\
+        --slide_dirs WSI/IgA/UNI2-h_feats WSI/IgA/labels WSI/IgA/coords \\
+                     data/raw_wsi/IgA \\
+        --slide_exts .npy .h5 .svs
+
+    # Apply
+    python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename \\
+        --slide_dirs WSI/IgA/UNI2-h_feats WSI/IgA/labels WSI/IgA/coords \\
+                     data/raw_wsi/IgA \\
+        --slide_exts .npy .h5 .svs \\
+        --apply
 """
 
 import argparse
 import os
+import re
 import shutil
 import sys
 
@@ -70,6 +106,292 @@ def build_registry_mapping(registry_csv: str) -> dict:
         if stem:
             mapping[stem] = biopsy_dir
     return mapping
+
+
+# ---------------------------------------------------------------------------
+# Rename mode: assign filesystem-safe slide names + rewrite metadata CSVs
+# ---------------------------------------------------------------------------
+
+# A stem is "unsafe" if it has surrounding whitespace or any character outside
+# [word-char, dot, hyphen]. Internal dots (e.g. '11.40.31') are kept — only the
+# *space* and other punctuation actually break shells / CSV matching.
+_UNSAFE_STEM_RE = re.compile(r"[^\w.\-]")
+
+
+def is_unsafe_stem(stem: str) -> bool:
+    """True if `stem` needs renaming to be safe in shells and CSV joins."""
+    return stem != stem.strip() or bool(_UNSAFE_STEM_RE.search(stem))
+
+
+def build_iga_records(iga_slides_csv: str) -> list:
+    """Return [(slide_stem, biopsy_number)] for the IgA cohort.
+
+    biopsy_number is the normalised 'number/year' form (transform_label), or ""
+    when missing. Mirrors the stem/biopsy derivation in define_labels.py.
+    """
+    df = pd.read_csv(iga_slides_csv)
+    records = []
+    for _, row in df.iterrows():
+        stem = extract_file_name(row["File Location"])
+        if not stem or pd.isna(stem):
+            continue
+        biopsy = transform_label(str(row["Biopsy Number"]))
+        records.append((str(stem), "" if pd.isna(biopsy) else str(biopsy)))
+    return records
+
+
+def build_registry_records(registry_csv: str) -> list:
+    """Return [(slide_stem, biopsy_number)] for the full registry cohort."""
+    df = pd.read_csv(registry_csv, usecols=["ANON_name", "biop_number"])
+    records = []
+    for _, row in df.iterrows():
+        stem = str(row["ANON_name"]).strip()
+        if not stem or stem.lower() == "nan":
+            continue
+        biopsy = transform_label(str(row["biop_number"]))
+        records.append((stem, "" if pd.isna(biopsy) else str(biopsy)))
+    return records
+
+
+def discover_stems(directory: str, exts: set) -> set:
+    """Return the set of slide stems found directly under `directory` or one
+    level of subdirectories (flat + biopsy-nested), filtered by extension."""
+    stems = set()
+    if not os.path.isdir(directory):
+        return stems
+    for entry in os.scandir(directory):
+        if entry.is_file():
+            stem, ext = os.path.splitext(entry.name)
+            if ext in exts:
+                stems.add(stem)
+        elif entry.is_dir():
+            for sub in os.scandir(entry.path):
+                if sub.is_file():
+                    stem, ext = os.path.splitext(sub.name)
+                    if ext in exts:
+                        stems.add(stem)
+    return stems
+
+
+def assign_new_names(records: dict, existing_names: set, rename_all: bool) -> dict:
+    """Return {old_stem: new_stem} for every stem that needs a safe name.
+
+    records       : {old_stem: biopsy_number}
+    existing_names: every stem already in use (so new names never collide).
+    rename_all    : if False, only unsafe stems are renamed.
+
+    New names are biopsy-scoped sequential ids: '<biopsy_dir>_s<NN>'
+    (e.g. '12-23_s01'), or 'unknown_s<NNNN>' when the biopsy is unknown.
+    """
+    used = set(existing_names)
+    per_biopsy_counter = {}
+    plan = {}
+    for old_stem in sorted(records):
+        if not rename_all and not is_unsafe_stem(old_stem):
+            continue
+        biopsy = records[old_stem]
+        bdir = biopsy_to_dirname(biopsy) if biopsy else "unknown"
+        n = per_biopsy_counter.get(bdir, 0) + 1
+        while True:
+            candidate = f"{bdir}_s{n:02d}" if bdir != "unknown" else f"unknown_s{n:04d}"
+            if candidate not in used:
+                break
+            n += 1
+        per_biopsy_counter[bdir] = n
+        used.add(candidate)
+        plan[old_stem] = candidate
+    return plan
+
+
+def write_mapping_csv(plan: dict, records: dict, mapping_out: str, apply: bool):
+    """Write the biopsy_number / old_name / new_name mapping CSV."""
+    rows = [
+        {
+            "biopsy_number": records.get(old_stem, ""),
+            "old_name": old_stem,
+            "new_name": new_stem,
+        }
+        for old_stem, new_stem in plan.items()
+    ]
+    df = pd.DataFrame(rows).sort_values("new_name").reset_index(drop=True)
+    if apply:
+        os.makedirs(os.path.dirname(mapping_out) or ".", exist_ok=True)
+        df.to_csv(mapping_out, index=False)
+        print(f"[MAP  ] Wrote {len(df)} mappings → {mapping_out}\n")
+    else:
+        print(f"[DRY  ] Would write {len(df)} mappings → {mapping_out}")
+        print(df.head(10).to_string(index=False))
+        if len(df) > 10:
+            print(f"  ... ({len(df) - 10} more)")
+        print()
+    return df
+
+
+def _rename_file(file_path: str, name: str, parent: str, plan: dict, exts: set,
+                 apply: bool) -> int:
+    """Rename a single slide file in place (same dir) per `plan`. Returns 1 if
+    the file was (or would be) renamed, else 0."""
+    stem, ext = os.path.splitext(name)
+    if ext not in exts:
+        return 0
+    new_stem = plan.get(stem)
+    if new_stem is None:
+        return 0
+    dest = os.path.join(parent, new_stem + ext)
+    if apply:
+        if os.path.exists(dest):
+            print(f"  [WARN ] Destination exists, skipping: {dest}")
+            return 0
+        shutil.move(file_path, dest)
+        print(f"  [REN  ] {name}  →  {new_stem + ext}")
+    else:
+        print(f"  [DRY  ] {name}  →  {new_stem + ext}")
+    return 1
+
+
+def rename_in_dir(directory: str, plan: dict, exts: set, apply: bool) -> int:
+    """Rename matching slide files in `directory` (flat + one nested level)."""
+    if not os.path.isdir(directory):
+        print(f"  [SKIP] Directory not found: {directory}")
+        return 0
+    count = 0
+    for entry in sorted(os.scandir(directory), key=lambda e: e.name):
+        if entry.is_file():
+            count += _rename_file(entry.path, entry.name, directory, plan, exts, apply)
+        elif entry.is_dir():
+            for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
+                if sub.is_file():
+                    count += _rename_file(
+                        sub.path, sub.name, entry.path, plan, exts, apply
+                    )
+    return count
+
+
+def _swap_path_stem(file_location, plan: dict):
+    """Replace the basename stem of a path with its new name (dir + ext kept).
+
+    Returns the path unchanged when the stem is not in `plan` or is missing.
+    """
+    if pd.isna(file_location):
+        return file_location
+    s = str(file_location)
+    old_stem = extract_file_name(s)
+    new_stem = plan.get(old_stem)
+    if new_stem is None:
+        return file_location
+    # Keep original separators by splitting on the last one.
+    parts = re.split(r"([\\/])", s)
+    base = parts[-1]
+    _, ext = os.path.splitext(base.split("?")[0].split("#")[0])
+    parts[-1] = new_stem + ext
+    return "".join(parts)
+
+
+def rewrite_metadata_csvs(plan: dict, iga_slides_csv: str, registry_csv: str,
+                          out_dir: str, apply: bool):
+    """Write copies of the source metadata CSVs with slide names updated.
+
+    IgA      : 'File Location' basenames are swapped to the new names.
+    Registry : 'ANON_name' values are swapped to the new names.
+    Copies are written into out_dir under their original filenames; downstream
+    tasks point --iga_slides_csv / --registry_csv at these copies.
+    """
+    if apply:
+        os.makedirs(out_dir, exist_ok=True)
+
+    for src, swap in (
+        (iga_slides_csv, lambda df: df.assign(
+            **{"File Location": df["File Location"].apply(
+                lambda p: _swap_path_stem(p, plan))})),
+        (registry_csv, lambda df: df.assign(
+            ANON_name=df["ANON_name"].apply(
+                lambda s: plan.get(str(s).strip(), s)))),
+    ):
+        if not os.path.isfile(src):
+            print(f"  [SKIP] Metadata CSV not found: {src}")
+            continue
+        df = pd.read_csv(src)
+        before = df.copy()
+        df = swap(df)
+        # Count rows whose slide column actually changed.
+        col = "File Location" if "File Location" in df.columns else "ANON_name"
+        n_changed = int((df[col].astype(str) != before[col].astype(str)).sum())
+        dest = os.path.join(out_dir, os.path.basename(src))
+        if apply:
+            df.to_csv(dest, index=False)
+            print(f"  [CSV  ] {os.path.basename(src)}: {n_changed} rows updated → {dest}")
+        else:
+            print(f"  [DRY  ] {os.path.basename(src)}: {n_changed} rows would update → {dest}")
+
+
+def run_rename(args):
+    """Entry point for --rename mode."""
+    mode_label = "APPLY" if args.apply else "DRY RUN"
+    print(f"Rename mode: {mode_label}\n")
+
+    exts = {e if e.startswith(".") else f".{e}" for e in args.slide_exts}
+
+    # --- Collect every known slide stem and its biopsy number ----------------
+    records: dict = {}        # old_stem -> biopsy_number (CSV is source of truth)
+    all_known: set = set()    # every stem in use, for collision-free new names
+
+    if os.path.isfile(args.iga_slides_csv):
+        for stem, biopsy in build_iga_records(args.iga_slides_csv):
+            records.setdefault(stem, biopsy)
+            all_known.add(stem)
+    else:
+        print(f"[WARN ] IgA metadata CSV not found: {args.iga_slides_csv}")
+
+    if os.path.isfile(args.registry_csv):
+        for stem, biopsy in build_registry_records(args.registry_csv):
+            records.setdefault(stem, biopsy)
+            all_known.add(stem)
+    else:
+        print(f"[WARN ] Registry metadata CSV not found: {args.registry_csv}")
+
+    # Slides present on disk but absent from the CSVs get an unknown biopsy.
+    for d in args.slide_dirs:
+        for stem in discover_stems(d, exts):
+            all_known.add(stem)
+            records.setdefault(stem, "")
+
+    # --- Build the rename plan -----------------------------------------------
+    plan = assign_new_names(records, all_known, args.rename_all)
+    if not plan:
+        print(
+            "No slides need renaming (all names are already safe). "
+            "Pass --rename-all to force a remap of every slide."
+        )
+        return
+
+    n_unknown = sum(1 for s in plan if not records.get(s))
+    print(f"{len(plan)} slide(s) to rename  ({n_unknown} with unknown biopsy).\n")
+
+    # --- Outputs --------------------------------------------------------------
+    write_mapping_csv(plan, records, args.mapping_out, args.apply)
+
+    total = 0
+    for d in args.slide_dirs:
+        print(f"--- Renaming in: {d} ---")
+        n = rename_in_dir(d, plan, exts, args.apply)
+        total += n
+        print(f"  Summary: {n} file(s) {'renamed' if args.apply else 'to rename'}\n")
+
+    print("--- Rewriting metadata CSV copies ---")
+    rewrite_metadata_csvs(
+        plan, args.iga_slides_csv, args.registry_csv, args.csv_out_dir, args.apply
+    )
+
+    print("\n" + "=" * 60)
+    print(f"Slides mapped to safe names : {len(plan)}")
+    print(f"Files {'renamed' if args.apply else 'to rename'} on disk      : {total}")
+    print(f"Mapping CSV                 : {args.mapping_out}")
+    print(f"Rewritten metadata CSV dir  : {args.csv_out_dir}")
+    if not args.apply:
+        print(
+            "\nThis was a dry run — no files were changed.\n"
+            "Run with --apply to write the mapping, rename files, and emit CSV copies."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +454,14 @@ def reorganize_dir(directory: str, mapping: dict, apply: bool) -> tuple:
 
 
 def main():
+    # The status lines use the '→' glyph; force UTF-8 so output does not crash
+    # when stdout is piped/redirected on Windows (default cp1252 can't encode it).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(
         description=(
             "Reorganize flat WSI slide directories into biopsy-nested layout.\n"
@@ -174,7 +504,62 @@ def main():
         action="store_true",
         help="Perform the actual file moves. Omitting this flag is a safe dry run.",
     )
+
+    # --- Rename mode ----------------------------------------------------------
+    parser.add_argument(
+        "--rename",
+        action="store_true",
+        help=(
+            "Rename mode: assign filesystem-safe sequential names to slides with "
+            "unsafe names (spaces / punctuation), write a mapping CSV, rename the "
+            "files in --slide_dirs, and emit rewritten metadata CSV copies. "
+            "Ignores --iga_dirs / --registry_dirs (those drive the move mode)."
+        ),
+    )
+    parser.add_argument(
+        "--slide_dirs",
+        nargs="*",
+        default=[],
+        metavar="DIR",
+        help=(
+            "Rename mode: directories whose slide files should be renamed "
+            "(feature / label / coord / raw-WSI dirs). Flat and biopsy-nested "
+            "layouts are both handled."
+        ),
+    )
+    parser.add_argument(
+        "--slide_exts",
+        nargs="*",
+        default=[".npy", ".h5"],
+        metavar="EXT",
+        help="Rename mode: file extensions treated as slides (e.g. .npy .h5 .svs).",
+    )
+    parser.add_argument(
+        "--rename_all",
+        action="store_true",
+        help="Rename mode: remap every slide, not just those with unsafe names.",
+    )
+    parser.add_argument(
+        "--mapping_out",
+        default="followup_data/slide_name_mapping.csv",
+        help="Rename mode: output path for the biopsy_number/old_name/new_name CSV.",
+    )
+    parser.add_argument(
+        "--csv_out_dir",
+        default="followup_data/renamed",
+        help=(
+            "Rename mode: directory for rewritten metadata CSV copies "
+            "(downstream tasks point --iga_slides_csv / --registry_csv here)."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if args.rename:
+        if not args.slide_dirs:
+            parser.error("--rename requires at least one --slide_dirs entry.")
+        run_rename(args)
+        return
 
     if not args.iga_dirs and not args.registry_dirs:
         parser.error("Provide at least one of --iga_dirs or --registry_dirs.")
