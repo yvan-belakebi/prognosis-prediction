@@ -146,26 +146,24 @@ def _patch_lab_stats(patch_np, bg_threshold):
 # ---------------------------------------------------------------------------
 
 def compute_reference(
-    patches_dir,
+    coord_files,
     wsi_dir,
     slide_ext,
     n_patches_per_slide,
     bg_threshold,
     rng,
-    slide_filter=None,
     n_save=0,
 ):
-    """Sample patches from all slides, accumulate LAB stats, return grand mean.
+    """Sample patches from the given slides, accumulate LAB stats, return grand mean.
+
+    coord_files: list of (h5_path, biopsy_nr, slide_id) as produced by
+                 _discover_coord_files (already filtered to the slides of interest).
 
     Returns (target_means, target_stds, qc_patches):
       target_means, target_stds — float32 numpy arrays of shape (3,).
       qc_patches — list of (slide_id, patch_np) for the first n_save valid
                    tissue patches encountered; empty when n_save=0.
     """
-    coord_files = _discover_coord_files(patches_dir, slide_filter)
-    if not coord_files:
-        raise RuntimeError(f"No .h5 coord files found in {patches_dir!r}.")
-
     all_means = []
     all_stds = []
     qc_patches = []
@@ -372,26 +370,46 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     n_save = args.n_save_patches if args.save_patches is not None else 0
 
+    # Scan the filesystem once; a genuinely empty patches_dir is fatal, but
+    # individual stains with no patched slides are skipped below (not fatal).
+    all_coord_files = _discover_coord_files(args.patches_dir)
+    if not all_coord_files:
+        raise RuntimeError(f"No .h5 coord files found in {args.patches_dir!r}.")
+
+    def _bag_name(entry):
+        _, biopsy_nr, slide_id = entry
+        return f"{biopsy_nr}/{slide_id}" if biopsy_nr else slide_id
+
     def _run_one(stain_label, slide_filter):
-        """Compute and save a single reference; return the output path."""
+        """Compute and save a single reference; return the output path, or None if skipped."""
+        if slide_filter is None:
+            coord_files = all_coord_files
+        else:
+            coord_files = [e for e in all_coord_files if _bag_name(e) in slide_filter]
+
         if stain_label is not None:
             stem = _sanitize_stain_name(stain_label)
             out_path = os.path.join(args.output, f"{stem}.pt")
             qc_dir = os.path.join(args.save_patches, stem) if args.save_patches else None
-            print(f"\nStain '{stain_label}' ({len(slide_filter)} slides) …")
+            print(
+                f"\nStain '{stain_label}' "
+                f"({len(slide_filter)} in CSV, {len(coord_files)} patched) …"
+            )
+            if not coord_files:
+                print(f"  [SKIP] No patched slides for stain {stain_label!r}.")
+                return None
         else:
             out_path = os.path.join(args.output, "reference.pt")
             qc_dir = args.save_patches
 
         rng = np.random.default_rng(args.seed)  # same seed → reproducible per stain
         target_means, target_stds, qc_patches = compute_reference(
-            patches_dir=args.patches_dir,
+            coord_files=coord_files,
             wsi_dir=args.wsi_dir,
             slide_ext=slide_ext,
             n_patches_per_slide=args.n_patches_per_slide,
             bg_threshold=args.bg_threshold,
             rng=rng,
-            slide_filter=slide_filter,
             n_save=n_save,
         )
         if qc_dir is not None:
