@@ -24,11 +24,18 @@ Example run:
 # Tiling
 python python_scripts/prepare_for_MIL/run_clam_tiling.py --wsi_dir data/raw_wsi --output_dir WSI/IgA_CLAM --step_size 112 --stitch store_false
 
+# Reorganize and rename
+python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA_CLAM/patches --apply
+
+python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs WSI/IgA_CLAM/patches data/unlabeled/IgA --apply
+
 # Labels definition
-python python_scripts/prepare_for_MIL/define_labels.py
+python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA_CLAM/labels
+
+python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA_CLAM/labels_regression
 
 # Stain normalization (Reinhard)
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv followup_data/labels.csv --save_patches stain_refs/IgA/qc
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA_CLAM/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv followup_data/labels_unfiltered.csv --save_patches stain_refs/IgA/qc
 
 # Feature extraction
 python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA_CLAM/patches --wsi_dir data/raw_wsi --output_dir WSI/IgA_CLAM/UNI2-h_feats --backbone UNI2-h --batch_size 256
