@@ -59,6 +59,24 @@ passed. Like the move mode, --rename is a dry run until you add --apply.
                      data/raw_wsi/IgA \\
         --slide_exts .npy .h5 .svs \\
         --apply
+
+
+Directory-rename mode (--rename_dirs)
+-------------------------------------
+Normalises the *biopsy-level subdirectory* names (not the files inside them) of
+each --slide_dirs entry, applying transform_label() then biopsy_to_dirname() to
+every first-level subdirectory (e.g. "B2312" → "12-23"). When the normalised
+name already exists as a sibling directory, the two are merged (items moved
+across, source removed). Like the other modes, it is a dry run until --apply.
+
+    # Dry run — see which biopsy dirs would be renamed
+    python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename_dirs \\
+        --slide_dirs WSI/IgA/labels WSI/IgA/coords WSI/IgA/UNI2-h_feats
+
+    # Apply
+    python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename_dirs \\
+        --slide_dirs WSI/IgA/labels WSI/IgA/coords WSI/IgA/UNI2-h_feats \\
+        --apply
 """
 
 import argparse
@@ -395,6 +413,69 @@ def run_rename(args):
 
 
 # ---------------------------------------------------------------------------
+# Directory-rename mode: normalise biopsy-level subdirectory names
+# ---------------------------------------------------------------------------
+
+
+def rename_dirs_in(directory: str, apply: bool) -> int:
+    """Rename first-level subdirectories of `directory` to normalised form.
+
+    Each subdirectory name is passed through transform_label() then
+    biopsy_to_dirname() (e.g. "B2312" → "12-23"). When the target name already
+    exists as a sibling, the two are merged (items moved across, source removed).
+    Returns the count of directories (to be) renamed.
+    """
+    if not os.path.isdir(directory):
+        print(f"  [SKIP] Directory not found: {directory}")
+        return 0
+    count = 0
+    for entry in sorted(os.scandir(directory), key=lambda e: e.name):
+        if not entry.is_dir():
+            continue
+        new_name = biopsy_to_dirname(transform_label(entry.name))
+        if new_name == entry.name:
+            continue
+        new_path = os.path.join(directory, new_name)
+        merge = os.path.isdir(new_path)
+        if apply:
+            tag = "MERGE" if merge else "REN  "
+        else:
+            tag = "DRY  "
+        print(f"  [{tag}] {entry.name!r:30s} → {new_name!r}")
+        if apply:
+            if merge:
+                # Destination already exists — move every item across, then
+                # remove the now-empty source directory.
+                for item in os.scandir(entry.path):
+                    shutil.move(item.path, os.path.join(new_path, item.name))
+                os.rmdir(entry.path)
+            else:
+                os.rename(entry.path, new_path)
+        count += 1
+    return count
+
+
+def run_rename_dirs(args):
+    """Entry point for --rename_dirs mode."""
+    mode_label = "APPLY" if args.apply else "DRY RUN"
+    print(f"Directory-rename mode: {mode_label}\n")
+
+    total = 0
+    for d in args.slide_dirs:
+        print(f"--- {d} ---")
+        n = rename_dirs_in(d, args.apply)
+        total += n
+        print(f"  Summary: {n} dir(s) {'renamed' if args.apply else 'to rename'}\n")
+
+    print("=" * 60)
+    print(f"Total director{'y' if total == 1 else 'ies'} "
+          f"{'renamed' if args.apply else 'to rename'}: {total}")
+    if not args.apply and total:
+        print("\nThis was a dry run — no directories were changed.\n"
+              "Run with --apply to perform the renames.")
+
+
+# ---------------------------------------------------------------------------
 # Core: reorganize one directory
 # ---------------------------------------------------------------------------
 
@@ -517,14 +598,25 @@ def main():
         ),
     )
     parser.add_argument(
+        "--rename_dirs",
+        action="store_true",
+        help=(
+            "Directory-rename mode: normalise the biopsy-level subdirectory names "
+            "of each --slide_dirs entry via transform_label() + biopsy_to_dirname() "
+            "(e.g. 'B2312' → '12-23'), merging into an existing sibling when the "
+            "normalised name already exists. Renames directories, not files."
+        ),
+    )
+    parser.add_argument(
         "--slide_dirs",
         nargs="*",
         default=[],
         metavar="DIR",
         help=(
-            "Rename mode: directories whose slide files should be renamed "
-            "(feature / label / coord / raw-WSI dirs). Flat and biopsy-nested "
-            "layouts are both handled."
+            "Rename / rename_dirs mode: directories to operate on. In --rename, the "
+            "slide files within (feature / label / coord / raw-WSI dirs, flat or "
+            "biopsy-nested) are renamed; in --rename_dirs, their first-level "
+            "subdirectories are renamed."
         ),
     )
     parser.add_argument(
@@ -554,6 +646,15 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.rename and args.rename_dirs:
+        parser.error("Use only one of --rename or --rename_dirs.")
+
+    if args.rename_dirs:
+        if not args.slide_dirs:
+            parser.error("--rename_dirs requires at least one --slide_dirs entry.")
+        run_rename_dirs(args)
+        return
 
     if args.rename:
         if not args.slide_dirs:
