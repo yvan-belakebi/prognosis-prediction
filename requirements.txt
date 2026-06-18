@@ -11,6 +11,9 @@ openslide-python
 openslide-bin
 scikit-image
 opencv-python
+# torch-staintools (vendored in python_scripts/torch-staintools-main) needs kornia;
+# it also requires torch>=2.10.0.
+kornia~=0.8.2
 # For feature extraction
 timm
 huggingface_hub

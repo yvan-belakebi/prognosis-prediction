@@ -54,45 +54,68 @@ _clam_dir = os.path.abspath(os.path.join(_script_dir, "..", "CLAM-master"))
 if _clam_dir not in sys.path:
     sys.path.insert(0, _clam_dir)
 
-_torchstain_dir = os.path.abspath(os.path.join(_script_dir, "..", "torchstain-main"))
-if _torchstain_dir not in sys.path:
-    sys.path.insert(0, _torchstain_dir)
+_staintools_dir = os.path.abspath(os.path.join(_script_dir, "..", "torch-staintools-main"))
+if _staintools_dir not in sys.path:
+    sys.path.insert(0, _staintools_dir)
 
 # CLAM's on-the-fly patch loader
 import openslide  # noqa: E402 (requires openslide-python)
 from dataset_modules.dataset_h5 import Whole_Slide_Bag_FP  # noqa: E402
 from utils.file_utils import save_hdf5  # noqa: E402
+from torch_staintools.constants import CONFIG  # noqa: E402
+from torch_staintools.normalizer import NormalizerBuilder  # noqa: E402
+
+# torch.compile recompiles on each new batch shape (e.g. the short final batch per
+# slide); disable for stable throughput. Re-enable if you need the speedup and accept
+# the recompilation cost.
+CONFIG.ENABLE_COMPILE = False
+
+# Concentration solver — see fit_stain_reference.py. 'qr' is robust for batched tiles.
+_CONCENTRATION_SOLVER = "qr"
+_LUMINOSITY_THRESHOLD = 0.8
 
 # ---------------------------------------------------------------------------
-# Stain normalisation transform
+# Stain normalisation (Vahadane, torch-staintools — applied on the GPU batch)
 # ---------------------------------------------------------------------------
 
 
-class ReinhardNormTransform:
-    """PIL Image → PIL Image Modified Reinhard stain normalizer.
+def load_vahadane_normalizer(ref_path: str, device: torch.device):
+    """Build a Vahadane normalizer from a .pt reference produced by fit_stain_reference.py.
 
-    Loaded from a .pt reference file produced by fit_stain_reference.py.
-    On failure (e.g. degenerate patch with zero std) the original image is
-    returned unchanged so the rest of the pipeline is unaffected.
+    The reference holds the fitted target buffers ('stain_matrix_target', 'maxC_target');
+    we re-inject them onto a freshly built normalizer so it can transform without re-fitting.
+    Returns an nn.Module that maps an RGB [0, 1] BxCxHxW batch to a normalised RGB [0, 1]
+    batch. On a degenerate/empty-mask patch its forward returns the input unchanged.
     """
+    ref = torch.load(ref_path, weights_only=True)
+    norm = NormalizerBuilder.build(
+        "vahadane",
+        concentration_solver=_CONCENTRATION_SOLVER,
+        luminosity_threshold=_LUMINOSITY_THRESHOLD,
+        device=device,
+    ).to(device)
+    norm.register_buffer("stain_matrix_target", ref["stain_matrix_target"].to(device))
+    norm.register_buffer("maxC_target", ref["maxC_target"].to(device))
+    return norm
 
-    def __init__(self, ref_path: str):
-        from PIL import Image as _Image
-        from torchstain.numpy.normalizers.reinhard import NumpyReinhardNormalizer
 
-        self._Image = _Image
-        ref = torch.load(ref_path, weights_only=True)
-        self._normalizer = NumpyReinhardNormalizer(method="modified")
-        self._normalizer.target_means = ref["target_means"].numpy()
-        self._normalizer.target_stds = ref["target_stds"].numpy()
+def split_backbone_transform(base_transform):
+    """Split a backbone torchvision Compose at the trailing Normalize.
 
-    def __call__(self, img):
-        try:
-            arr = np.array(img)
-            arr = self._normalizer.normalize(arr)
-            return self._Image.fromarray(arr)
-        except Exception:
-            return img
+    Returns (pre_transform, backbone_normalize) where pre_transform turns a PIL patch
+    into an RGB [0, 1] CxHxW tensor (Resize/CenterCrop/ToTensor) and backbone_normalize
+    is the mean/std Normalize. This lets stain normalisation run on RGB [0, 1] (on the
+    GPU batch) before the backbone's channel normalisation.
+    """
+    from torchvision import transforms as T
+
+    steps = list(base_transform.transforms)
+    if not steps or not isinstance(steps[-1], T.Normalize):
+        raise ValueError(
+            "Expected the backbone transform to end with a torchvision Normalize; "
+            f"got {type(steps[-1]).__name__ if steps else 'empty Compose'}."
+        )
+    return T.Compose(steps[:-1]), steps[-1]
 
 
 def _sanitize_stain_name(stain: str) -> str:
@@ -185,7 +208,9 @@ def extract_slide_features(
     h5_path: str,
     wsi_path: str,
     model: torch.nn.Module,
-    transform,
+    pre_transform,
+    backbone_normalize,
+    stain_normalizer,
     output_path: str,
     batch_size: int,
     num_workers: int,
@@ -214,7 +239,7 @@ def extract_slide_features(
             dataset = Whole_Slide_Bag_FP(
                 file_path=h5_path,
                 wsi=wsi,
-                img_transforms=transform,
+                img_transforms=pre_transform,
             )
         except Exception as exc:
             raise RuntimeError(f"Cannot load coord file {h5_path}: {exc}") from exc
@@ -247,9 +272,14 @@ def extract_slide_features(
                 unit="batch",
                 leave=False,
             ):
-                imgs = batch["img"].to(device, non_blocking=True)
+                imgs = batch["img"].to(device, non_blocking=True)  # RGB [0,1] BxCxHxW
                 coords = batch["coord"].numpy().astype(np.int32)  # (B, 2)
 
+                # Stain normalisation on the GPU batch (RGB [0,1] -> RGB [0,1]),
+                # then the backbone's channel normalisation, then the forward pass.
+                if stain_normalizer is not None:
+                    imgs = stain_normalizer(imgs)
+                imgs = backbone_normalize(imgs)
                 feats = model(imgs)
                 # Transformer models may output (B, seq, D) — flatten to (B*seq, D)
                 if feats.ndim == 3:
@@ -376,13 +406,17 @@ def main():
     model = model.eval().to(device)
     print(f"Backbone ready.")
 
-    # --- Build per-stain transform cache ------------------------------------
+    # --- Split the backbone transform at the trailing Normalize --------------
+    # pre_transform (PIL → RGB [0,1] tensor) runs in the DataLoader; backbone_normalize
+    # (mean/std) runs on the GPU batch after stain normalisation.
+    pre_transform, backbone_normalize = split_backbone_transform(base_transform)
+
+    # --- Build per-stain Vahadane normalizer cache ---------------------------
     stain_lookup = {}  # bag_name (biopsy_nr/slide_id or slide_id) → stain label
-    transform_cache = {}  # stain label → T.Compose with stain norm prepended
+    normalizer_cache = {}  # stain label → Vahadane nn.Module (on device)
 
     if args.labels_csv is not None:
         import pandas as pd
-        from torchvision import transforms as T
 
         df_labels = pd.read_csv(args.labels_csv)
         stain_lookup = dict(
@@ -394,10 +428,7 @@ def main():
                 args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt"
             )
             if os.path.isfile(ref_path):
-                norm = ReinhardNormTransform(ref_path)
-                transform_cache[stain] = T.Compose(
-                    [norm] + list(base_transform.transforms)
-                )
+                normalizer_cache[stain] = load_vahadane_normalizer(ref_path, device)
                 n_loaded += 1
             else:
                 print(
@@ -405,7 +436,7 @@ def main():
                     "normalisation skipped for affected slides."
                 )
         print(
-            f"Stain normalisation: Modified Reinhard — "
+            f"Stain normalisation: Vahadane — "
             f"{n_loaded}/{df_labels['stain'].nunique()} stains loaded."
         )
 
@@ -456,12 +487,12 @@ def main():
                 tqdm.write(
                     f"  [WARN] {lookup_key!r} not in labels CSV — normalisation skipped."
                 )
-                slide_transform = base_transform
+                stain_normalizer = None
             else:
-                slide_transform = transform_cache.get(stain, base_transform)
+                stain_normalizer = normalizer_cache.get(stain)
                 tqdm.write(f"  stain: {stain}")
         else:
-            slide_transform = base_transform
+            stain_normalizer = None
 
         wsi_path = find_wsi(args.wsi_dir, biopsy_nr, slide_id, slide_ext)
         if wsi_path is None:
@@ -477,7 +508,9 @@ def main():
                 h5_path=h5_path,
                 wsi_path=wsi_path,
                 model=model,
-                transform=slide_transform,
+                pre_transform=pre_transform,
+                backbone_normalize=backbone_normalize,
+                stain_normalizer=stain_normalizer,
                 output_path=output_path,
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,

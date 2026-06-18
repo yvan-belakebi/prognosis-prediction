@@ -1,29 +1,35 @@
 """
-fit_stain_reference.py — Compute a mean Modified Reinhard stain reference from CLAM-tiled WSIs.
+fit_stain_reference.py — Fit a Vahadane stain reference from CLAM-tiled WSIs.
 
-Randomly samples patches from every slide in patches_dir, discards background patches using
-an L* threshold, and computes the grand mean of per-channel LAB statistics across all valid
-tissue patches.  The result is a .pt file with keys 'target_means' and 'target_stds' (shape 3,
-float32, L/a/b order) that can be passed to compute_feats_clam.py via --stain_ref.
+Randomly samples patches from every slide in patches_dir, discards background patches
+using a luminosity-based tissue mask, tiles the kept tissue patches into one large
+montage image and fits a single Vahadane stain separation (torch-staintools) to it.
+The result is a .pt file with keys 'stain_matrix_target' (1, 2, 3), 'maxC_target'
+(1, 2) and 'method' ('vahadane') that can be passed to compute_feats_clam.py via
+--stain_refs_dir.
 
-For datasets with multiple staining protocols, run once per stain using --stain_csv / --stain
-to restrict sampling to slides of that stain, producing one reference file per stain.  Then
-pass the matching reference when extracting features for each stain group.
+Unlike the previous Reinhard reference (a grand mean of per-channel LAB statistics),
+Vahadane fits to a *single* target image.  We therefore build a cohort-level target by
+montaging tissue patches sampled across all slides of the stain; the Vahadane luminosity
+mask ignores any white padding between tiles.
+
+For datasets with multiple staining protocols, pass --labels_csv to restrict sampling to
+slides of each stain, producing one reference file per stain.  Then pass the matching
+--stain_refs_dir when extracting features for each stain group.
 
 Usage:
     # Single stain
     python python_scripts/prepare_for_MIL/fit_stain_reference.py \\
         --patches_dir WSI/IgA/patches \\
         --wsi_dir     data/raw_wsi/IgA \\
-        --output      stain_refs/IgA_ref.pt
+        --output      stain_refs/IgA
 
-    # One of several stains (run once per stain)
+    # One reference per stain (run once over all stains in the CSV)
     python python_scripts/prepare_for_MIL/fit_stain_reference.py \\
         --patches_dir WSI/IgA/patches \\
         --wsi_dir     data/raw_wsi/IgA \\
-        --output      stain_refs/IgA_PAS_ref.pt \\
-        --stain_csv   followup_data/stain_labels.csv \\
-        --stain       PAS
+        --output      stain_refs/IgA \\
+        --labels_csv  followup_data/stain_labels.csv
 
 Stain CSV format (same as used by MIL training scripts):
     file_name,stain
@@ -33,6 +39,7 @@ Stain CSV format (same as used by MIL training scripts):
 """
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -47,18 +54,29 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
-_torchstain_dir = os.path.abspath(os.path.join(_script_dir, "..", "torchstain-main"))
-if _torchstain_dir not in sys.path:
-    sys.path.insert(0, _torchstain_dir)
+_staintools_dir = os.path.abspath(
+    os.path.join(_script_dir, "..", "torch-staintools-main")
+)
+if _staintools_dir not in sys.path:
+    sys.path.insert(0, _staintools_dir)
 
 _clam_dir = os.path.abspath(os.path.join(_script_dir, "..", "CLAM-master"))
 if _clam_dir not in sys.path:
     sys.path.insert(0, _clam_dir)
 
 import openslide  # noqa: E402
-from torchstain.numpy.utils.rgb2lab import rgb2lab  # noqa: E402
-from torchstain.numpy.utils.split import lab_split  # noqa: E402
-from torchstain.numpy.utils.stats import get_mean_std  # noqa: E402
+from torch_staintools.constants import CONFIG  # noqa: E402
+from torch_staintools.functional.tissue_mask import get_tissue_mask  # noqa: E402
+from torch_staintools.normalizer import NormalizerBuilder  # noqa: E402
+
+# torch.compile recompiles on each new input shape (the montage fit is a single large
+# image, the QC transform a small batch); disable it for stable one-off use.
+CONFIG.ENABLE_COMPILE = False
+
+# Concentration solver. 'qr' is robust both for the single large montage and for batched
+# small tiles; 'ls' can fail on GPU for a single large image.
+_CONCENTRATION_SOLVER = "qr"
+_LUMINOSITY_THRESHOLD = 0.8
 
 
 def _sanitize_stain_name(stain: str) -> str:
@@ -67,12 +85,24 @@ def _sanitize_stain_name(stain: str) -> str:
     e.g. 'IgG - IgM - IgA' → 'IgG_-_IgM_-_IgA',  'PAS' → 'PAS'
     Must match the identical function in compute_feats_clam.py.
     """
-    return re.sub(r'[^\w\-]+', '_', stain).strip('_')
+    return re.sub(r"[^\w\-]+", "_", stain).strip("_")
+
+
+def _build_vahadane(device):
+    """Build a Vahadane normalizer (torch-staintools) on the given device."""
+    norm = NormalizerBuilder.build(
+        "vahadane",
+        concentration_solver=_CONCENTRATION_SOLVER,
+        luminosity_threshold=_LUMINOSITY_THRESHOLD,
+        device=device,
+    )
+    return norm.to(device)
 
 
 # ---------------------------------------------------------------------------
 # Slide discovery  (mirrors compute_feats_clam.py)
 # ---------------------------------------------------------------------------
+
 
 def _discover_coord_files(patches_dir, slide_filter=None):
     """Return list of (h5_path, biopsy_nr, slide_id).
@@ -88,7 +118,9 @@ def _discover_coord_files(patches_dir, slide_filter=None):
             for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
                 if sub.is_file() and sub.name.endswith(".h5"):
                     slide_id = os.path.splitext(sub.name)[0]
-                    bag_name = f"{entry.name}/{slide_id}"  # matches discover_bags() format
+                    bag_name = (
+                        f"{entry.name}/{slide_id}"  # matches discover_bags() format
+                    )
                     if slide_filter is None or bag_name in slide_filter:
                         results.append((sub.path, entry.name, slide_id))
                     has_nested = True
@@ -115,61 +147,81 @@ def _find_wsi(wsi_dir, biopsy_nr, slide_id, slide_ext):
 
 
 # ---------------------------------------------------------------------------
-# Per-patch analysis
+# Per-patch handling
 # ---------------------------------------------------------------------------
 
-def _patch_lab_stats(patch_np, bg_threshold):
-    """Return (means, stds) arrays of shape (3,) for L, a, b, or None to skip.
 
-    Skips if:
-      - mean L* >= bg_threshold  →  background / glass
-      - any channel std < 1e-6   →  completely flat, degenerate patch
+def _patch_to_tile(patch_np, tile_size, min_tissue_frac):
+    """Return a (3, tile_size, tile_size) float tensor in [0, 1], or None to skip.
 
-    L* after lab_split is in [0, 100].  White background ≈ 100, tissue ≈ 40-75.
+    Skips patches whose tissue fraction (luminosity mask) is below min_tissue_frac,
+    keeping background / glass out of the reference montage.
     patch_np: uint8 RGB numpy array (H, W, 3).
     """
-    try:
-        lab = rgb2lab(patch_np.astype("float32") / 255)
-        channels = lab_split(lab)          # tuple: (L/2.55, a-128, b-128)
-        if np.mean(channels[0]) >= bg_threshold:
-            return None
-        stats = np.array([get_mean_std(c) for c in channels])  # (3, 2): col0=mean, col1=std
-        if np.any(stats[:, 1] < 1e-6):
-            return None
-        return stats[:, 0].astype(np.float32), stats[:, 1].astype(np.float32)
-    except Exception:
+    t = torch.from_numpy(patch_np).permute(2, 0, 1).float().div_(255.0).unsqueeze(0)
+    if t.shape[-2:] != (tile_size, tile_size):
+        t = torch.nn.functional.interpolate(
+            t, size=(tile_size, tile_size), mode="bilinear", align_corners=False
+        )
+    mask = get_tissue_mask(t, _LUMINOSITY_THRESHOLD, throw_error=False)
+    if mask.float().mean().item() < min_tissue_frac:
         return None
+    return t.squeeze(0)
+
+
+def _montage(tiles):
+    """Tile a list of (3, P, P) tensors into a single (1, 3, H, W) montage.
+
+    Arranges tiles in a near-square grid; empty cells are left white (1.0), which the
+    Vahadane luminosity mask ignores during fitting.
+    """
+    n = len(tiles)
+    cols = max(int(math.ceil(math.sqrt(n))), 1)
+    rows = int(math.ceil(n / cols))
+    p = tiles[0].shape[-1]
+    montage = torch.ones(3, rows * p, cols * p, dtype=tiles[0].dtype)
+    for idx, tile in enumerate(tiles):
+        r, c = divmod(idx, cols)
+        montage[:, r * p : (r + 1) * p, c * p : (c + 1) * p] = tile
+    return montage.unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------
 # Reference computation
 # ---------------------------------------------------------------------------
 
+
 def compute_reference(
     coord_files,
     wsi_dir,
     slide_ext,
     n_patches_per_slide,
-    bg_threshold,
+    n_target_patches,
+    tile_size,
+    min_tissue_frac,
+    device,
     rng,
     n_save=0,
 ):
-    """Sample patches from the given slides, accumulate LAB stats, return grand mean.
+    """Sample tissue patches across slides, montage them, and fit Vahadane once.
 
     coord_files: list of (h5_path, biopsy_nr, slide_id) as produced by
                  _discover_coord_files (already filtered to the slides of interest).
 
-    Returns (target_means, target_stds, qc_patches):
-      target_means, target_stds — float32 numpy arrays of shape (3,).
-      qc_patches — list of (slide_id, patch_np) for the first n_save valid
-                   tissue patches encountered; empty when n_save=0.
+    Returns (stain_matrix_target, maxC_target, qc_patches):
+      stain_matrix_target — float32 tensor (1, 2, 3) on CPU.
+      maxC_target — float32 tensor (1, 2) on CPU.
+      qc_patches — list of (slide_id, tile_tensor) for the first n_save valid
+                   tissue tiles encountered; empty when n_save=0.
     """
-    all_means = []
-    all_stds = []
+    tiles = []
     qc_patches = []
     n_slides_used = 0
 
     for h5_path, biopsy_nr, slide_id in tqdm(coord_files, desc="Slides"):
+        if len(tiles) >= n_target_patches:
+            break
+
         wsi_path = _find_wsi(wsi_dir, biopsy_nr, slide_id, slide_ext)
         if wsi_path is None:
             print(f"  [WARN] WSI not found for {slide_id!r}, skipping.")
@@ -194,8 +246,10 @@ def compute_reference(
         n = len(coords)
         sample_idx = rng.choice(n, size=min(n_patches_per_slide, n), replace=False)
 
-        slide_means, slide_stds = [], []
+        used_this_slide = False
         for i in sample_idx:
+            if len(tiles) >= n_target_patches:
+                break
             x, y = int(coords[i][0]), int(coords[i][1])
             try:
                 patch = wsi.read_region(
@@ -205,71 +259,83 @@ def compute_reference(
             except Exception:
                 continue
 
-            result = _patch_lab_stats(patch_np, bg_threshold)
-            if result is None:
+            tile = _patch_to_tile(patch_np, tile_size, min_tissue_frac)
+            if tile is None:
                 continue
-            slide_means.append(result[0])
-            slide_stds.append(result[1])
+            tiles.append(tile)
+            used_this_slide = True
             if len(qc_patches) < n_save:
-                qc_patches.append((slide_id, patch_np.copy()))
+                qc_patches.append((slide_id, tile.clone()))
 
         wsi.close()
-
-        if slide_means:
-            all_means.extend(slide_means)
-            all_stds.extend(slide_stds)
+        if used_this_slide:
             n_slides_used += 1
 
-    if not all_means:
+    if not tiles:
         raise RuntimeError(
             "No valid tissue patches found across all slides. "
-            "Check --patches_dir, --wsi_dir, and --bg_threshold."
+            "Check --patches_dir, --wsi_dir, and --min_tissue_frac."
         )
 
-    target_means = np.mean(all_means, axis=0).astype(np.float32)
-    target_stds = np.mean(all_stds, axis=0).astype(np.float32)
+    montage = _montage(tiles).to(device)
+    print(
+        f"Fitting Vahadane on a montage of {len(tiles)} tissue tiles "
+        f"({n_slides_used}/{len(coord_files)} slides) — montage {tuple(montage.shape)} …"
+    )
+
+    normalizer = _build_vahadane(device)
+    normalizer.fit(montage)
+
+    stain_matrix_target = normalizer.stain_matrix_target.detach().to(
+        "cpu", torch.float32
+    )
+    maxC_target = normalizer.maxC_target.detach().to("cpu", torch.float32)
 
     print(
-        f"Reference built from {len(all_means)} tissue patches "
-        f"across {n_slides_used}/{len(coord_files)} slides."
+        f"  stain_matrix_target {tuple(stain_matrix_target.shape)}:\n{stain_matrix_target}"
     )
-    print(f"  target_means (L, a, b): {target_means}")
-    print(f"  target_stds  (L, a, b): {target_stds}")
+    print(f"  maxC_target {tuple(maxC_target.shape)}: {maxC_target}")
 
-    return target_means, target_stds, qc_patches
+    return stain_matrix_target, maxC_target, qc_patches
 
 
 # ---------------------------------------------------------------------------
 # QC image saving
 # ---------------------------------------------------------------------------
 
-def _save_qc_images(qc_patches, target_means, target_stds, out_dir):
-    """Save side-by-side before/after PNG images for each patch in qc_patches.
 
-    Each image is named '{slide_id}_{i:03d}.png' and shows the original patch
-    on the left, a 4-pixel white separator, and the normalised patch on the right.
-    Patches where normalisation fails (degenerate statistics) are skipped with a warning.
+def _save_qc_images(qc_patches, stain_matrix_target, maxC_target, device, out_dir):
+    """Save side-by-side before/after PNG images for each tile in qc_patches.
+
+    Each image is named '{slide_id}_{i:03d}.png' and shows the original tile on the
+    left, a 4-pixel white separator, and the Vahadane-normalised tile on the right.
     """
     from PIL import Image
-    from torchstain.numpy.normalizers.reinhard import NumpyReinhardNormalizer
 
-    normalizer = NumpyReinhardNormalizer(method="modified")
-    normalizer.target_means = target_means
-    normalizer.target_stds = target_stds
+    normalizer = _build_vahadane(device)
+    normalizer.register_buffer("stain_matrix_target", stain_matrix_target.to(device))
+    normalizer.register_buffer("maxC_target", maxC_target.to(device))
 
     os.makedirs(out_dir, exist_ok=True)
     saved = 0
 
-    for i, (slide_id, patch_np) in enumerate(qc_patches):
+    def _to_uint8(tile_tensor):
+        arr = tile_tensor.clamp(0, 1).mul(255).round().byte()
+        return arr.permute(1, 2, 0).cpu().numpy()
+
+    for i, (slide_id, tile) in enumerate(qc_patches):
         try:
-            normalized = normalizer.normalize(patch_np)
+            with torch.inference_mode():
+                normalized = normalizer(tile.unsqueeze(0).to(device)).squeeze(0)
         except Exception as exc:
-            print(f"  [WARN] QC normalisation failed for patch {i} ({slide_id}): {exc}")
+            print(f"  [WARN] QC normalisation failed for tile {i} ({slide_id}): {exc}")
             continue
 
-        h = patch_np.shape[0]
+        before = _to_uint8(tile)
+        after = _to_uint8(normalized)
+        h = before.shape[0]
         separator = np.full((h, 4, 3), 255, dtype=np.uint8)
-        side_by_side = np.concatenate([patch_np, separator, normalized], axis=1)
+        side_by_side = np.concatenate([before, separator, after], axis=1)
 
         safe_slide_id = slide_id.replace(os.sep, "_").replace("/", "_")
         fname = os.path.join(out_dir, f"{safe_slide_id}_{i:03d}.png")
@@ -283,9 +349,10 @@ def _save_qc_images(qc_patches, target_means, target_stds, out_dir):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute mean Modified Reinhard LAB reference from CLAM-tiled WSI patches.",
+        description="Fit a Vahadane stain reference from CLAM-tiled WSI patches.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -320,12 +387,29 @@ def main():
         help="Number of patches randomly sampled per slide.",
     )
     parser.add_argument(
-        "--bg_threshold",
-        type=float,
-        default=85.0,
+        "--n_target_patches",
+        type=int,
+        default=100,
         help=(
-            "Mean L* threshold (0–100) above which a patch is treated as background. "
-            "Tissue is typically 40–75; white background is ~100."
+            "Number of tissue tiles to collect into the reference montage. "
+            "Sampling stops once this many valid tiles are gathered. "
+            "Larger montages give a more representative reference but cost more "
+            "GPU/CPU memory and time to fit."
+        ),
+    )
+    parser.add_argument(
+        "--tile_size",
+        type=int,
+        default=256,
+        help="Side length each sampled patch is resized to before montaging.",
+    )
+    parser.add_argument(
+        "--min_tissue_frac",
+        type=float,
+        default=0.5,
+        help=(
+            "Minimum fraction of tissue pixels (luminosity < 0.8) for a patch to be "
+            "kept for the reference montage. Filters out background / glass."
         ),
     )
     parser.add_argument(
@@ -333,6 +417,12 @@ def main():
         type=int,
         default=42,
         help="Random seed for reproducible patch sampling.",
+    )
+    parser.add_argument(
+        "--gpu_index",
+        type=int,
+        default=0,
+        help="CUDA device index (used if a GPU is available; otherwise CPU).",
     )
     parser.add_argument(
         "--labels_csv",
@@ -349,9 +439,8 @@ def main():
         metavar="DIR",
         help=(
             "Directory to write before/after normalisation QC images. "
-            "Each image shows a randomly selected tissue patch before (left) "
-            "and after (right) Modified Reinhard normalisation. "
-            "Omit to skip QC image saving."
+            "Each image shows a sampled tissue tile before (left) and after (right) "
+            "Vahadane normalisation. Omit to skip QC image saving."
         ),
     )
     parser.add_argument(
@@ -366,6 +455,11 @@ def main():
     slide_ext = args.slide_ext
     if not slide_ext.startswith("."):
         slide_ext = f".{slide_ext}"
+
+    device = torch.device(
+        f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
+    )
+    print(f"Device: {device}")
 
     os.makedirs(args.output, exist_ok=True)
     n_save = args.n_save_patches if args.save_patches is not None else 0
@@ -390,7 +484,9 @@ def main():
         if stain_label is not None:
             stem = _sanitize_stain_name(stain_label)
             out_path = os.path.join(args.output, f"{stem}.pt")
-            qc_dir = os.path.join(args.save_patches, stem) if args.save_patches else None
+            qc_dir = (
+                os.path.join(args.save_patches, stem) if args.save_patches else None
+            )
             print(
                 f"\nStain '{stain_label}' "
                 f"({len(slide_filter)} in CSV, {len(coord_files)} patched) …"
@@ -403,21 +499,27 @@ def main():
             qc_dir = args.save_patches
 
         rng = np.random.default_rng(args.seed)  # same seed → reproducible per stain
-        target_means, target_stds, qc_patches = compute_reference(
+        stain_matrix_target, maxC_target, qc_patches = compute_reference(
             coord_files=coord_files,
             wsi_dir=args.wsi_dir,
             slide_ext=slide_ext,
             n_patches_per_slide=args.n_patches_per_slide,
-            bg_threshold=args.bg_threshold,
+            n_target_patches=args.n_target_patches,
+            tile_size=args.tile_size,
+            min_tissue_frac=args.min_tissue_frac,
+            device=device,
             rng=rng,
             n_save=n_save,
         )
         if qc_dir is not None:
-            _save_qc_images(qc_patches, target_means, target_stds, qc_dir)
+            _save_qc_images(
+                qc_patches, stain_matrix_target, maxC_target, device, qc_dir
+            )
         torch.save(
             {
-                "target_means": torch.tensor(target_means, dtype=torch.float32),
-                "target_stds": torch.tensor(target_stds, dtype=torch.float32),
+                "stain_matrix_target": stain_matrix_target,
+                "maxC_target": maxC_target,
+                "method": "vahadane",
             },
             out_path,
         )
@@ -426,6 +528,7 @@ def main():
 
     if args.labels_csv is not None:
         import pandas as pd
+
         df = pd.read_csv(args.labels_csv)
         stains = sorted(df["stain"].dropna().unique())
         print(f"Found {len(stains)} stain(s) in {args.labels_csv}: {stains}")
