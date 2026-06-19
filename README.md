@@ -30,12 +30,12 @@ python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/
 python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs WSI/IgA/patches data/unlabeled/IgA --apply
 
 # Labels definition
-python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/labels
+python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/labels --iga_date_filter None
 
-python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/labels_regression
+python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/labels_regression --iga_date_filter None
 
-# Stain normalization (Vahadane)
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv followup_data/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20
+# Stain normalization (Vahadane or Macenko)
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv followup_data/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
 
 # Feature extraction
 python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output_dir WSI/IgA/UNI2-h_feats --backbone UNI2-h --batch_size 128

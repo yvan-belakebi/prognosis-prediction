@@ -205,6 +205,14 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    # Date filter (consistent with define_regression_labels.py)
+    parser.add_argument(
+        "--iga_date_filter",
+        default="2006-01-01",
+        help="Exclude IgA biopsies before this date (IgA biopsies before 2006 "
+        "have very short follow-up). Pass 'none' to disable.",
+    )
+
     # Validation split
     parser.add_argument(
         "--val_source",
@@ -288,9 +296,10 @@ def main():
     iga_df = load_iga_cohort(args.iga_slides_csv, args.iga_followup_csv)
     iga_df["Biopsy_date"] = pd.to_datetime(iga_df["Biopsy_date"], errors="coerce")
     iga_backup = iga_df.copy()  # full IgA cohort before any filtering
-    iga_df = iga_df[
-        iga_df["Biopsy_date"] >= "2006-01-01"
-    ]  # IgA biopsies before 2006 have very short follow-up
+
+    # Apply date filter (same logic as define_regression_labels.py)
+    if args.iga_date_filter.lower() != "none":
+        iga_df = iga_df[iga_df["Biopsy_date"] >= args.iga_date_filter]
 
     # Slides present in iga_backup but removed by the date filter.
     # Saved so they can be explicitly excluded from feature directories
@@ -392,7 +401,7 @@ def main():
     )
     print(
         f"  IgA      — train: {n_iga_train:>5d}  val: {n_iga_val:>4d}  "
-        f"excluded (pre-2006): {len(iga_excluded):>4d}"
+        f"excluded (date filter): {len(iga_excluded):>4d}"
     )
     print(f"  Registry — train: {n_reg_train:>5d}  val: {n_reg_val:>4d}")
     print(f"  non-IgA  — train: {len(non_iga_df):>5d}  val:    0  (always train)")
