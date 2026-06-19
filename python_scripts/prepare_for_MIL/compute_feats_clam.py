@@ -65,14 +65,20 @@ from utils.file_utils import save_hdf5  # noqa: E402
 from torch_staintools.constants import CONFIG  # noqa: E402
 from torch_staintools.normalizer import NormalizerBuilder  # noqa: E402
 
-# torch.compile recompiles on each new batch shape (e.g. the short final batch per
-# slide); disable for stable throughput. Re-enable if you need the speedup and accept
-# the recompilation cost.
-CONFIG.ENABLE_COMPILE = False
+# torch.compile gives a large speedup for the per-patch Vahadane source stain-matrix
+# estimation, which dominates extraction time. It recompiles on each new input shape,
+# so the loop below pads the short final batch up to batch_size — the normalizer then
+# only ever sees one shape and compiles once for the whole run.
+CONFIG.ENABLE_COMPILE = True
 
 # Concentration solver — see fit_stain_reference.py. 'qr' is robust for batched tiles.
 _CONCENTRATION_SOLVER = "qr"
 _LUMINOSITY_THRESHOLD = 0.8
+# Lowered solver work (factory defaults are 60 / 50). Vahadane dictionary learning
+# converges early, so fewer iterations trade a little accuracy for substantially faster
+# per-patch stain-matrix estimation.
+_SPARSE_DICT_STEPS = 30
+_MAXITER = 30
 
 # ---------------------------------------------------------------------------
 # Stain normalisation (Vahadane, torch-staintools — applied on the GPU batch)
@@ -91,6 +97,8 @@ def load_vahadane_normalizer(ref_path: str, device: torch.device):
     norm = NormalizerBuilder.build(
         "vahadane",
         concentration_solver=_CONCENTRATION_SOLVER,
+        sparse_dict_steps=_SPARSE_DICT_STEPS,
+        maxiter=_MAXITER,
         luminosity_threshold=_LUMINOSITY_THRESHOLD,
         device=device,
     ).to(device)
@@ -278,7 +286,15 @@ def extract_slide_features(
                 # Stain normalisation on the GPU batch (RGB [0,1] -> RGB [0,1]),
                 # then the backbone's channel normalisation, then the forward pass.
                 if stain_normalizer is not None:
-                    imgs = stain_normalizer(imgs)
+                    # Pad the short final batch up to batch_size so the compiled
+                    # normalizer only ever sees one input shape (avoids recompilation);
+                    # the padding rows are dropped again before the backbone.
+                    b = imgs.shape[0]
+                    if b < batch_size:
+                        pad = imgs[-1:].repeat(batch_size - b, 1, 1, 1)
+                        imgs = stain_normalizer(torch.cat([imgs, pad], dim=0))[:b]
+                    else:
+                        imgs = stain_normalizer(imgs)
                 imgs = backbone_normalize(imgs)
                 feats = model(imgs)
                 # Transformer models may output (B, seq, D) — flatten to (B*seq, D)
@@ -385,8 +401,22 @@ def main():
         default=0,
         help="CUDA device index.",
     )
+    parser.add_argument(
+        "--no_compile",
+        action="store_true",
+        help=(
+            "Disable torch.compile for the Vahadane normalizer. Compile is on by "
+            "default and speeds up stain normalisation, but its Inductor backend needs "
+            "a C/C++ compiler toolchain (MSVC 'cl.exe' on Windows, gcc on Linux). Pass "
+            "this flag if compilation fails with a 'compiler not found' error."
+        ),
+    )
 
     args = parser.parse_args()
+
+    # torch.compile is enabled at import; honour --no_compile before any normalizer runs.
+    if args.no_compile:
+        CONFIG.ENABLE_COMPILE = False
 
     slide_ext = args.slide_ext
     if not slide_ext.startswith("."):
@@ -395,7 +425,7 @@ def main():
     device = torch.device(
         f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
     )
-    print(f"Device: {device}")
+    print(f"Device: {device}  |  torch.compile: {CONFIG.ENABLE_COMPILE}")
 
     if (args.labels_csv is None) != (args.stain_refs_dir is None):
         parser.error("--labels_csv and --stain_refs_dir must be provided together.")

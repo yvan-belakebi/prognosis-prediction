@@ -69,14 +69,19 @@ from torch_staintools.constants import CONFIG  # noqa: E402
 from torch_staintools.functional.tissue_mask import get_tissue_mask  # noqa: E402
 from torch_staintools.normalizer import NormalizerBuilder  # noqa: E402
 
-# torch.compile recompiles on each new input shape (the montage fit is a single large
-# image, the QC transform a small batch); disable it for stable one-off use.
+# torch.compile recompiles on each new input shape. Fitting is a one-off over a single
+# montage, so compilation overhead would not be amortised — keep it off here. (It is
+# enabled in compute_feats_clam.py, where the normalizer runs over many batches.)
 CONFIG.ENABLE_COMPILE = False
 
 # Concentration solver. 'qr' is robust both for the single large montage and for batched
 # small tiles; 'ls' can fail on GPU for a single large image.
 _CONCENTRATION_SOLVER = "qr"
 _LUMINOSITY_THRESHOLD = 0.8
+# Lowered solver work (factory defaults 60 / 50), matching compute_feats_clam.py so the
+# reference is built with the same Vahadane estimation settings used at inference.
+_SPARSE_DICT_STEPS = 30
+_MAXITER = 30
 
 
 def _sanitize_stain_name(stain: str) -> str:
@@ -93,6 +98,8 @@ def _build_vahadane(device):
     norm = NormalizerBuilder.build(
         "vahadane",
         concentration_solver=_CONCENTRATION_SOLVER,
+        sparse_dict_steps=_SPARSE_DICT_STEPS,
+        maxiter=_MAXITER,
         luminosity_threshold=_LUMINOSITY_THRESHOLD,
         device=device,
     )
