@@ -128,12 +128,12 @@ def main():
     # Summary outputs
     parser.add_argument(
         "--summary_csv",
-        default="followup_data/labels_regression.csv",
+        default="label_csvs/labels_regression.csv",
         help="Combined summary CSV (both cohorts, with split column).",
     )
     parser.add_argument(
         "--val_csv",
-        default="followup_data/regression_validation_files.csv",
+        default="validation_files_csvs/regression_validation_files.csv",
         help="Combined val slide list for regression_MIL.py --val_csv.",
     )
 
@@ -258,6 +258,9 @@ def main():
         [iga_df[_cols], reg_df[_cols], non_iga_df[_cols]],
         ignore_index=True,
     )
+    summary_dir = os.path.dirname(args.summary_csv)
+    if summary_dir:
+        os.makedirs(summary_dir, exist_ok=True)
     combined.to_csv(args.summary_csv, index=False)
 
     # Validation slide lists (combined + per-source) — see val_split.write_val_csvs.

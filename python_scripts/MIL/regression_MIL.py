@@ -16,7 +16,7 @@ Usage:
     python regression_MIL.py --model_type abmil \\
         --features_paths WSI/registry_IgA/UNI2-h_feats \\
         --labels_paths   WSI/registry_IgA/labels_regression \\
-        --val_csv followup_data/regression_validation_files.csv \\
+        --val_csv validation_files_csvs/regression_validation_files.csv \\
         --epochs 50
 """
 

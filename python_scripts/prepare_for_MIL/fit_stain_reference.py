@@ -29,7 +29,7 @@ Usage:
         --patches_dir WSI/IgA/patches \\
         --wsi_dir     data/raw_wsi/IgA \\
         --output      stain_refs/IgA \\
-        --labels_csv  followup_data/stain_labels.csv
+        --labels_csv  label_csvs/stain_labels.csv
 
 Stain CSV format (same as used by MIL training scripts):
     file_name,stain

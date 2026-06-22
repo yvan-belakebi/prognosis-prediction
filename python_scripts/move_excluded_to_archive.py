@@ -25,7 +25,7 @@ def main():
     )
     parser.add_argument(
         "--excluded_csv",
-        default="followup_data/iga_excluded_slides.csv",
+        default="label_csvs/iga_excluded_slides.csv",
         help="CSV with a 'file_name' column (stems, no extension) to move.",
     )
     parser.add_argument(

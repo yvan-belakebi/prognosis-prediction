@@ -69,6 +69,10 @@ def write_val_csvs(val_csv, iga_val_files, registry_val_files):
     """
     val_stem, val_ext = os.path.splitext(val_csv)
 
+    val_dir = os.path.dirname(val_csv)
+    if val_dir:
+        os.makedirs(val_dir, exist_ok=True)
+
     iga_val_files.to_csv(f"{val_stem}_IgA{val_ext}", index=False, header=False)
     registry_val_files.to_csv(
         f"{val_stem}_registry{val_ext}", index=False, header=False

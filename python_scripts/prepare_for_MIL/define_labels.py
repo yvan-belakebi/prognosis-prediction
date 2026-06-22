@@ -29,8 +29,8 @@ Parameters
 --n_bins        Quantile strata for time-stratified patient sampling  (default: 4)
 --random_state  Random seed  (default: 42)
 --val_csv       Full path of the combined validation list for MIL.py --val_csv
-                (default: followup_data/survival_validation_files.csv)
---output_dir    Directory for all other CSV outputs  (default: followup_data)
+                (default: validation_files_csvs/survival_validation_files.csv)
+--output_dir    Directory for all other CSV outputs  (default: label_csvs)
 --iga_slides_csv
 --iga_followup_csv
 --registry_csv  Input file paths (rarely need changing).
@@ -242,7 +242,7 @@ def main():
     # Output paths
     parser.add_argument(
         "--val_csv",
-        default="followup_data/survival_validation_files.csv",
+        default="validation_files_csvs/survival_validation_files.csv",
         help=(
             "Output path for the combined validation slide list consumed by "
             "MIL.py --val_csv."
@@ -250,7 +250,7 @@ def main():
     )
     parser.add_argument(
         "--output_dir",
-        default="followup_data",
+        default="label_csvs",
         help="Directory for all other CSV outputs.",
     )
 

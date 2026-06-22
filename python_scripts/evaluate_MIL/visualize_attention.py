@@ -21,7 +21,7 @@ Usage:
 
     # Regression DSMIL, two datasets — coords embedded in features .h5
     python python_scripts/MIL/visualize_attention.py \\
-        --label_csv      followup_data/labels.csv \\
+        --label_csv      label_csvs/labels.csv \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
         --checkpoint     runs/dsmil_reg/best_model.pth \\
         --model_type     dsmil --task regression \\

@@ -13,9 +13,9 @@ Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
         --pretrain_epochs 20 \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_csv followup_data/survival_validation_files.csv \\
+        --val_csv validation_files_csvs/survival_validation_files.csv \\
         --stain_filter PAS \\
-        --stain_csvs followup_data/labels_combined.csv none \\
+        --stain_csvs label_csvs/labels_combined.csv none \\
         --epochs 50
 
 Usage (DeepGraphSurv, two-phase — coords auto-read from features .h5, no --coords_paths needed):
@@ -25,9 +25,9 @@ Usage (DeepGraphSurv, two-phase — coords auto-read from features .h5, no --coo
         --pretrain_epochs 10 \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_csv followup_data/survival_validation_files.csv \\
+        --val_csv validation_files_csvs/survival_validation_files.csv \\
         --stain_filter PAS \\
-        --stain_csvs followup_data/labels_combined.csv followup_data/labels_combined.csv \\
+        --stain_csvs label_csvs/labels_combined.csv label_csvs/labels_combined.csv \\
         --checkpoint_dir checkpoints_10_epochs_pretraining/ \\
         --log_dir results/losses_10_pretraining/ \\
         --dropout 0.1 --save_every 5 --batch_size 4
@@ -37,7 +37,7 @@ Usage (single-repo, no pretraining):
     python MIL.py --model_type abmil \\
         --features_paths WSI/IgA/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels \\
-        --val_csv followup_data/survival_validation_files.csv
+        --val_csv validation_files_csvs/survival_validation_files.csv
 
 Labels (.npy, shape (2,)): [time_to_first_event, censoring_indicator]
 """

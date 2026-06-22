@@ -23,7 +23,7 @@ Usage:
     python python_scripts/MIL/compare_cindex.py \\
         --inputs_a results/model_a/risk_scores.csv \\
         --inputs_b results/model_b/risk_scores.csv \\
-        --label_csv followup_data/labels_combined.csv \\
+        --label_csv label_csvs/labels_combined.csv \\
         --n_boot 50000
 """
 

@@ -35,16 +35,16 @@ python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/
 python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/labels_regression --iga_date_filter None
 
 # Stain normalization (Vahadane or Macenko)
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv followup_data/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
 
 # Feature extraction
-python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output_dir WSI/IgA/UNI2-h_feats --backbone UNI2-h --batch_size 128 --labels_csv followup_data/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA
+python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output_dir WSI/IgA/UNI2-h_feats --backbone UNI2-h --batch_size 128 --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA
 
 # MIL
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels_regression --checkpoint_dir checkpoints_regression_transmil_CLAM --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
 # Attention map
-python python_scripts/MIL/visualize_attention.py --features_paths WSI/IgA/UNI2-h_feats --checkpoint checkpoints_regression_transmil_CLAM/transmil_regression.pth --model_type transmil --task regression --label_csv followup_data/labels_IgA.csv
+python python_scripts/MIL/visualize_attention.py --features_paths WSI/IgA/UNI2-h_feats --checkpoint checkpoints_regression_transmil_CLAM/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_IgA.csv
 
 # Survival curve
-python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints_CLAM/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv followup_data/survival_validation_20pct_both.csv --dropout 0.1
+python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints_CLAM/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1

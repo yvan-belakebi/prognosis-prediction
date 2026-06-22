@@ -20,7 +20,7 @@ Usage:
     # Override time/event with an external label CSV:
     python python_scripts/MIL/compute_cindex.py \\
         --inputs results/eval_30pct/risk_scores.csv \\
-        --label_csv followup_data/labels_combined.csv
+        --label_csv label_csvs/labels_combined.csv
 """
 
 import argparse
