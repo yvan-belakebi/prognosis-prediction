@@ -54,7 +54,9 @@ _clam_dir = os.path.abspath(os.path.join(_script_dir, "..", "CLAM-master"))
 if _clam_dir not in sys.path:
     sys.path.insert(0, _clam_dir)
 
-_staintools_dir = os.path.abspath(os.path.join(_script_dir, "..", "torch-staintools-main"))
+_staintools_dir = os.path.abspath(
+    os.path.join(_script_dir, "..", "torch-staintools-main")
+)
 if _staintools_dir not in sys.path:
     sys.path.insert(0, _staintools_dir)
 
@@ -65,11 +67,13 @@ from utils.file_utils import save_hdf5  # noqa: E402
 from torch_staintools.constants import CONFIG  # noqa: E402
 from torch_staintools.normalizer import NormalizerBuilder  # noqa: E402
 
-# torch.compile gives a large speedup for the per-patch Vahadane source stain-matrix
-# estimation, which dominates extraction time. It recompiles on each new input shape,
-# so the loop below pads the short final batch up to batch_size — the normalizer then
-# only ever sees one shape and compiles once for the whole run.
-CONFIG.ENABLE_COMPILE = True
+# torch.compile can speed up the per-patch stain-matrix estimation, but its backend
+# needs a working compiler toolchain that is often absent or misconfigured (Triton +
+# libcuda on Linux/GPU, MSVC 'cl.exe' on Windows) and then hard-crashes the run. It is
+# therefore OFF by default and opt-in via --compile. When enabled, the loop below pads
+# the short final batch up to batch_size so the normalizer sees one shape and compiles
+# once for the whole run instead of recompiling per slide.
+CONFIG.ENABLE_COMPILE = False
 
 # Concentration solver — see fit_stain_reference.py. 'qr' is robust for batched tiles.
 _CONCENTRATION_SOLVER = "qr"
@@ -81,30 +85,34 @@ _SPARSE_DICT_STEPS = 30
 _MAXITER = 30
 
 # ---------------------------------------------------------------------------
-# Stain normalisation (Vahadane, torch-staintools — applied on the GPU batch)
+# Stain normalisation (Vahadane/Macenko, torch-staintools — applied on the GPU batch)
 # ---------------------------------------------------------------------------
 
 
-def load_vahadane_normalizer(ref_path: str, device: torch.device):
-    """Build a Vahadane normalizer from a .pt reference produced by fit_stain_reference.py.
+def load_stain_normalizer(ref_path: str, device: torch.device):
+    """Build a stain normalizer from a .pt reference produced by fit_stain_reference.py.
 
-    The reference holds the fitted target buffers ('stain_matrix_target', 'maxC_target');
-    we re-inject them onto a freshly built normalizer so it can transform without re-fitting.
-    Returns an nn.Module that maps an RGB [0, 1] BxCxHxW batch to a normalised RGB [0, 1]
-    batch. On a degenerate/empty-mask patch its forward returns the input unchanged.
+    The algorithm is auto-matched to the 'method' recorded in the reference (defaulting
+    to 'vahadane' for older references that predate the key), so the per-patch source
+    stain matrix is estimated the same way as the target was. The fitted target buffers
+    ('stain_matrix_target', 'maxC_target') are re-injected so it can transform without
+    re-fitting. Returns (nn.Module, method); the module maps an RGB [0, 1] BxCxHxW batch
+    to a normalised one and returns the input unchanged on a degenerate/empty-mask patch.
     """
     ref = torch.load(ref_path, weights_only=True)
-    norm = NormalizerBuilder.build(
-        "vahadane",
+    method = ref.get("method", "vahadane")
+    kwargs = dict(
         concentration_solver=_CONCENTRATION_SOLVER,
-        sparse_dict_steps=_SPARSE_DICT_STEPS,
         maxiter=_MAXITER,
         luminosity_threshold=_LUMINOSITY_THRESHOLD,
         device=device,
-    ).to(device)
+    )
+    if method == "vahadane":
+        kwargs["sparse_dict_steps"] = _SPARSE_DICT_STEPS  # Vahadane-only knob
+    norm = NormalizerBuilder.build(method, **kwargs).to(device)
     norm.register_buffer("stain_matrix_target", ref["stain_matrix_target"].to(device))
     norm.register_buffer("maxC_target", ref["maxC_target"].to(device))
-    return norm
+    return norm, method
 
 
 def split_backbone_transform(base_transform):
@@ -286,11 +294,11 @@ def extract_slide_features(
                 # Stain normalisation on the GPU batch (RGB [0,1] -> RGB [0,1]),
                 # then the backbone's channel normalisation, then the forward pass.
                 if stain_normalizer is not None:
-                    # Pad the short final batch up to batch_size so the compiled
-                    # normalizer only ever sees one input shape (avoids recompilation);
-                    # the padding rows are dropped again before the backbone.
                     b = imgs.shape[0]
-                    if b < batch_size:
+                    if CONFIG.ENABLE_COMPILE and b < batch_size:
+                        # Pad the short final batch up to batch_size so the compiled
+                        # normalizer only ever sees one input shape (avoids
+                        # recompilation); padding rows are dropped before the backbone.
                         pad = imgs[-1:].repeat(batch_size - b, 1, 1, 1)
                         imgs = stain_normalizer(torch.cat([imgs, pad], dim=0))[:b]
                     else:
@@ -402,21 +410,21 @@ def main():
         help="CUDA device index.",
     )
     parser.add_argument(
-        "--no_compile",
+        "--compile",
         action="store_true",
         help=(
-            "Disable torch.compile for the Vahadane normalizer. Compile is on by "
-            "default and speeds up stain normalisation, but its Inductor backend needs "
-            "a C/C++ compiler toolchain (MSVC 'cl.exe' on Windows, gcc on Linux). Pass "
-            "this flag if compilation fails with a 'compiler not found' error."
+            "Enable torch.compile for the stain normalizer (off by default). Speeds up "
+            "stain normalisation but requires a working compile toolchain: Triton + "
+            "libcuda on Linux/GPU, MSVC 'cl.exe' on Windows. If it errors with a "
+            "Triton/gcc or 'compiler not found' message, drop this flag."
         ),
     )
 
     args = parser.parse_args()
 
-    # torch.compile is enabled at import; honour --no_compile before any normalizer runs.
-    if args.no_compile:
-        CONFIG.ENABLE_COMPILE = False
+    # torch.compile is off at import; honour --compile before any normalizer runs.
+    if args.compile:
+        CONFIG.ENABLE_COMPILE = True
 
     slide_ext = args.slide_ext
     if not slide_ext.startswith("."):
@@ -441,9 +449,10 @@ def main():
     # (mean/std) runs on the GPU batch after stain normalisation.
     pre_transform, backbone_normalize = split_backbone_transform(base_transform)
 
-    # --- Build per-stain Vahadane normalizer cache ---------------------------
+    # --- Build per-stain normalizer cache (method auto-matched per reference) -
     stain_lookup = {}  # bag_name (biopsy_nr/slide_id or slide_id) → stain label
-    normalizer_cache = {}  # stain label → Vahadane nn.Module (on device)
+    normalizer_cache = {}  # stain label → stain-normalizer nn.Module (on device)
+    method_cache = {}  # stain label → method name ('vahadane' / 'macenko')
 
     if args.labels_csv is not None:
         import pandas as pd
@@ -453,21 +462,31 @@ def main():
             zip(df_labels["file_name"].astype(str), df_labels["stain"].astype(str))
         )
         n_loaded = 0
+        methods_loaded = set()
         for stain in df_labels["stain"].dropna().unique():
             ref_path = os.path.join(
                 args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt"
             )
             if os.path.isfile(ref_path):
-                normalizer_cache[stain] = load_vahadane_normalizer(ref_path, device)
+                norm, method = load_stain_normalizer(ref_path, device)
+                normalizer_cache[stain] = norm
+                method_cache[stain] = method
+                methods_loaded.add(method)
                 n_loaded += 1
             else:
                 print(
                     f"  [WARN] No reference for stain '{stain}' ({ref_path}) — "
                     "normalisation skipped for affected slides."
                 )
+        methods_str = ", ".join(sorted(methods_loaded)) if methods_loaded else "none"
         print(
-            f"Stain normalisation: Vahadane — "
+            f"Stain normalisation: ENABLED ({methods_str}) — "
             f"{n_loaded}/{df_labels['stain'].nunique()} stains loaded."
+        )
+    else:
+        print(
+            "Stain normalisation: DISABLED — features computed on raw patches. "
+            "Pass --labels_csv and --stain_refs_dir to enable it."
         )
 
     # --- Discover coord files ------------------------------------------------
@@ -520,7 +539,10 @@ def main():
                 stain_normalizer = None
             else:
                 stain_normalizer = normalizer_cache.get(stain)
-                tqdm.write(f"  stain: {stain}")
+                if stain_normalizer is None:
+                    tqdm.write(f"  stain: {stain}  |  norm: none (no reference)")
+                else:
+                    tqdm.write(f"  stain: {stain}  |  norm: {method_cache[stain]}")
         else:
             stain_normalizer = None
 

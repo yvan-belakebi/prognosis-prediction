@@ -93,17 +93,23 @@ def _sanitize_stain_name(stain: str) -> str:
     return re.sub(r"[^\w\-]+", "_", stain).strip("_")
 
 
-def _build_vahadane(device):
-    """Build a Vahadane normalizer (torch-staintools) on the given device."""
-    norm = NormalizerBuilder.build(
-        "vahadane",
+def _build_normalizer(method, device):
+    """Build a stain-separation normalizer (torch-staintools) on the given device.
+
+    method: 'vahadane' (sparse NMF dictionary learning) or 'macenko' (SVD + percentile).
+    Both produce the same target buffers ('stain_matrix_target', 'maxC_target') and share
+    the same transform; only the stain-matrix estimator differs. 'sparse_dict_steps' is a
+    Vahadane-only dictionary-learning knob and is omitted for Macenko.
+    """
+    kwargs = dict(
         concentration_solver=_CONCENTRATION_SOLVER,
-        sparse_dict_steps=_SPARSE_DICT_STEPS,
         maxiter=_MAXITER,
         luminosity_threshold=_LUMINOSITY_THRESHOLD,
         device=device,
     )
-    return norm.to(device)
+    if method == "vahadane":
+        kwargs["sparse_dict_steps"] = _SPARSE_DICT_STEPS
+    return NormalizerBuilder.build(method, **kwargs).to(device)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +208,7 @@ def compute_reference(
     coord_files,
     wsi_dir,
     slide_ext,
+    method,
     n_patches_per_slide,
     n_target_patches,
     tile_size,
@@ -210,7 +217,7 @@ def compute_reference(
     rng,
     n_save=0,
 ):
-    """Sample tissue patches across slides, montage them, and fit Vahadane once.
+    """Sample tissue patches across slides, montage them, and fit the normalizer once.
 
     coord_files: list of (h5_path, biopsy_nr, slide_id) as produced by
                  _discover_coord_files (already filtered to the slides of interest).
@@ -286,11 +293,11 @@ def compute_reference(
 
     montage = _montage(tiles).to(device)
     print(
-        f"Fitting Vahadane on a montage of {len(tiles)} tissue tiles "
+        f"Fitting {method} on a montage of {len(tiles)} tissue tiles "
         f"({n_slides_used}/{len(coord_files)} slides) — montage {tuple(montage.shape)} …"
     )
 
-    normalizer = _build_vahadane(device)
+    normalizer = _build_normalizer(method, device)
     normalizer.fit(montage)
 
     stain_matrix_target = normalizer.stain_matrix_target.detach().to(
@@ -311,15 +318,15 @@ def compute_reference(
 # ---------------------------------------------------------------------------
 
 
-def _save_qc_images(qc_patches, stain_matrix_target, maxC_target, device, out_dir):
+def _save_qc_images(qc_patches, stain_matrix_target, maxC_target, method, device, out_dir):
     """Save side-by-side before/after PNG images for each tile in qc_patches.
 
     Each image is named '{slide_id}_{i:03d}.png' and shows the original tile on the
-    left, a 4-pixel white separator, and the Vahadane-normalised tile on the right.
+    left, a 4-pixel white separator, and the normalised tile on the right.
     """
     from PIL import Image
 
-    normalizer = _build_vahadane(device)
+    normalizer = _build_normalizer(method, device)
     normalizer.register_buffer("stain_matrix_target", stain_matrix_target.to(device))
     normalizer.register_buffer("maxC_target", maxC_target.to(device))
 
@@ -359,7 +366,7 @@ def _save_qc_images(qc_patches, stain_matrix_target, maxC_target, device, out_di
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fit a Vahadane stain reference from CLAM-tiled WSI patches.",
+        description="Fit a Vahadane/Macenko stain reference from CLAM-tiled WSI patches.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -380,6 +387,16 @@ def main():
             "Output directory for .pt reference files. "
             "Without --labels_csv: saves a single 'reference.pt'. "
             "With --labels_csv: saves one '{stain}.pt' per stain."
+        ),
+    )
+    parser.add_argument(
+        "--method",
+        choices=["vahadane", "macenko"],
+        default="vahadane",
+        help=(
+            "Stain-separation algorithm. 'vahadane' (sparse NMF) gives better stain "
+            "fidelity; 'macenko' (SVD + percentile) is much faster. The chosen method is "
+            "recorded in the .pt and auto-matched by compute_feats_clam.py."
         ),
     )
     parser.add_argument(
@@ -466,7 +483,7 @@ def main():
     device = torch.device(
         f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
     )
-    print(f"Device: {device}")
+    print(f"Device: {device}  |  method: {args.method}")
 
     os.makedirs(args.output, exist_ok=True)
     n_save = args.n_save_patches if args.save_patches is not None else 0
@@ -510,6 +527,7 @@ def main():
             coord_files=coord_files,
             wsi_dir=args.wsi_dir,
             slide_ext=slide_ext,
+            method=args.method,
             n_patches_per_slide=args.n_patches_per_slide,
             n_target_patches=args.n_target_patches,
             tile_size=args.tile_size,
@@ -520,13 +538,13 @@ def main():
         )
         if qc_dir is not None:
             _save_qc_images(
-                qc_patches, stain_matrix_target, maxC_target, device, qc_dir
+                qc_patches, stain_matrix_target, maxC_target, args.method, device, qc_dir
             )
         torch.save(
             {
                 "stain_matrix_target": stain_matrix_target,
                 "maxC_target": maxC_target,
-                "method": "vahadane",
+                "method": args.method,
             },
             out_path,
         )
