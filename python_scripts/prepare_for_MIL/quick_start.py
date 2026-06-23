@@ -1,279 +1,259 @@
 #!/usr/bin/env python
 """
-Quick Start Guide for WSI Feature Extraction Pipeline
+Quick Start — TRIDENT WSI feature-extraction pipeline.
 
-Run this script to get started with the complete pipeline:
-1. Extract patches from WSI files
-2. Compute features using foundation models
-3. Get output ready for MIL training
+Interactively drives the full TRIDENT-based pipeline:
+    1. Tissue segmentation        (stock TRIDENT, run once over all slides)
+    2. Patch coordinates          (stock TRIDENT, run once over all slides)
+    3. Patch feature extraction   (per-stain stain-normalised, run_trident_stain_feats.py)
+    4. Reorganise into the biopsy-nested {backbone}_feats/{biopsy_nr}/{slide_id}.h5 layout
+       consumed by ProcessedMILDataset (reorganize_trident_feats.py)
 
-Usage:
-    python quick_start.py
+Steps 3–4 reproduce the CLAM-path output format (one .h5 per slide with 'features' +
+'coords'), so downstream MIL training is unchanged.
+
+Run this with the TRIDENT environment's Python (the one where `pip install -e .` was run in
+python_scripts/external_repositories/TRIDENT-main):
+
+    python python_scripts/prepare_for_MIL/quick_start.py
+
+Every step prints the exact command it runs, so you can also copy/paste and run stages
+manually. Stain normalisation is optional: if you skip it, stock TRIDENT `--task feat` is
+used on raw patches instead.
 """
 
+import importlib.util
 import os
-import sys
 import subprocess
-import json
+import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+TRIDENT_RUNNER = ROOT / "python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py"
+STAIN_FEATS = ROOT / "python_scripts/prepare_for_MIL/run_trident_stain_feats.py"
+REORG = ROOT / "python_scripts/prepare_for_MIL/reorganize_trident_feats.py"
 
-def check_python_venv():
-    """Check if we're in a virtual environment."""
-    return hasattr(sys, "real_prefix") or (
-        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
-    )
+# Friendly name -> TRIDENT encoder name, per-encoder recommended patch_size (TRIDENT README
+# table), and the output feats-dir name matching the CLAM-path convention.
+BACKBONES = {
+    "1": {"name": "UNI2-h",      "trident": "uni_v2",   "patch_size": 256, "feats_dir": "UNI2-h_feats"},
+    "2": {"name": "Virchow2",    "trident": "virchow2", "patch_size": 224, "feats_dir": "Virchow2_feats"},
+    "3": {"name": "H-optimus-1", "trident": "hoptimus1","patch_size": 224, "feats_dir": "h-optimus-1_feats"},
+    "4": {"name": "Hibou-L",     "trident": "hibou_l",  "patch_size": 224, "feats_dir": "Hibou-L_feats"},
+}
 
 
-def install_dependencies():
-    """Install required packages from requirements.txt."""
-    print("\n📦 Installing required packages from requirements.txt...\n")
+def hr(char="=", n=70):
+    print(char * n)
 
-    # Get the path to requirements.txt
-    root_dir = Path(__file__).parent.parent.parent
-    requirements_file = root_dir / "requirements.txt"
 
-    if not requirements_file.exists():
-        print(f"❌ requirements.txt not found at {requirements_file}")
-        return False
+def ask(msg, default=None):
+    suffix = f" [{default}]" if default is not None else ""
+    resp = input(f"{msg}{suffix}: ").strip()
+    return resp or (default if default is not None else "")
 
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)],
-        capture_output=True,
-        text=True,
-    )
 
+def ask_yes(msg, default="y"):
+    return (ask(msg + " (y/n)", default).lower() or default) == "y"
+
+
+def run_cmd(cmd, desc):
+    """Run a subprocess, streaming output. Returns True on success."""
+    print(f"\n🎬 {desc}")
+    print("   $ " + " ".join(str(c) for c in cmd) + "\n")
+    result = subprocess.run([str(c) for c in cmd])
     if result.returncode == 0:
-        print("✅ All packages from requirements.txt installed successfully!")
+        print(f"\n✅ {desc} — done")
         return True
-    else:
-        print("⚠️  Failed to install some packages")
-        print(result.stderr)
-        return False
-
-
-def run_extraction():
-    """Run patch extraction on test data."""
-    print("\n🎬 Starting patch extraction from data/raw_wsi/...\n")
-
-    result = subprocess.run(
-        [sys.executable, "python_scripts/prepare_for_MIL/deepzoom_tiler.py"],
-        capture_output=False,
-        text=True,
-    )
-
-    if result.returncode == 0:
-        print("\n✅ Patch extraction completed successfully!")
-        return True
-    else:
-        print("\n❌ Patch extraction failed")
-        return False
-
-
-def show_feature_options():
-    """Show feature extraction options."""
-    print("\n" + "=" * 70)
-    print("🔬 FEATURE EXTRACTION OPTIONS")
-    print("=" * 70)
-
-    options = {
-        "1": {
-            "name": "UNI2-h (Recommended)",
-            "dims": "1536D",
-            "command": """python python_scripts/prepare_for_MIL/compute_feats.py \\
-  --dataset prognosis \\
-  --backbone UNI2-h \\
-  --batch_size 128 \\
-  --num_workers 4 \\
-  --magnification single""",
-        },
-        "2": {
-            "name": "H-optimus-1",
-            "dims": "1536D",
-            "command": """python python_scripts/prepare_for_MIL/compute_feats.py \\
-  --dataset prognosis \\
-  --backbone h-optimus-1 \\
-  --batch_size 128 \\
-  --num_workers 4 \\
-  --magnification single""",
-        },
-        "3": {
-            "name": "Virchow2",
-            "dims": "2560D",
-            "command": """python python_scripts/prepare_for_MIL/compute_feats.py \\
-  --dataset prognosis \\
-  --backbone Virchow2 \\
-  --batch_size 128 \\
-  --num_workers 4 \\
-  --magnification single""",
-        },
-    }
-
-    print("\nChoose a feature extractor:")
-    print()
-
-    for key, option in options.items():
-        marker = "🌟" if key == "1" else "  "
-        print(f"{marker} [{key}] {option['name']} ({option['dims']})")
-
-    print("\nExample command (UNI2-h):")
-    print(options["1"]["command"])
-
-    print("\n" + "=" * 70)
-
-
-def check_extraction_output():
-    """Check if patch extraction output exists."""
-    expected_dirs = [
-        "WSI/prognosis/single",
-        "WSI/prognosis",
-    ]
-
-    for directory in expected_dirs:
-        if os.path.exists(directory):
-            # Count patches
-            patches = []
-            for root, dirs, files in os.walk(directory):
-                patches.extend([f for f in files if f.endswith((".jpg", ".jpeg"))])
-
-            if patches:
-                print(f"\n✅ Found {len(patches)} patches in {directory}/")
-                return True
-
+    print(f"\n❌ {desc} — failed (exit {result.returncode})")
     return False
 
 
-def main():
-    print("\n" + "=" * 70)
-    print("🚀 WSI FEATURE EXTRACTION - QUICK START")
-    print("=" * 70)
-
-    # Check virtual environment
-    if not check_python_venv():
-        print("\n⚠️  You appear to be using system Python")
-        print("   It's recommended to use a virtual environment:")
-        print("   python -m venv .venv")
-        print("   source .venv/bin/activate  # or .venv\\Scripts\\activate on Windows")
+def check_environment():
+    """Warn if TRIDENT is not importable in the current interpreter."""
+    print("\n✅ Using Python:", sys.executable)
+    if importlib.util.find_spec("trident") is None:
+        print(
+            "\n⚠️  `trident` is not importable in this interpreter.\n"
+            "   Activate the TRIDENT venv and install it first:\n"
+            "     cd python_scripts/external_repositories/TRIDENT-main\n"
+            "     pip install -e .\n"
+            "   then re-run this script with that venv's Python."
+        )
+        if not ask_yes("\nContinue anyway?", "n"):
+            sys.exit(1)
     else:
-        print("\n✅ Using Python virtual environment")
+        print("✅ `trident` is importable")
 
-    # Step 1: Installation
-    print("\n" + "-" * 70)
-    print("Step 1: Install Dependencies")
-    print("-" * 70)
 
-    response = (
-        input("\nInstall/update required packages? (y/n) [y]: ").strip().lower() or "y"
+def collect_config():
+    """Prompt for the run configuration."""
+    hr("-")
+    print("Configuration")
+    hr("-")
+
+    cfg = {}
+    cfg["wsi_dir"] = ask("Raw WSI directory", "data/raw_wsi/IgA")
+    cfg["job_dir"] = ask("TRIDENT job/output directory", "WSI/IgA/trident")
+    cfg["search_nested"] = ask_yes("Are WSIs in biopsy-nested subfolders?", "y")
+    cfg["segmenter"] = ask("Segmenter (hest/grandqc/otsu)", "hest")
+    cfg["mag"] = float(ask("Target magnification", "20"))
+    cfg["overlap"] = int(ask("Patch overlap (px)", "0"))
+    cfg["gpu"] = int(ask("GPU index (-1 for CPU)", "0"))
+    cfg["batch_size"] = int(ask("Feature-extraction batch size", "256"))
+
+    print("\nBackbone:")
+    for key, b in BACKBONES.items():
+        star = " 🌟" if key == "1" else ""
+        print(f"   [{key}] {b['name']} (TRIDENT: {b['trident']}, patch {b['patch_size']}px){star}")
+    choice = ask("Choose backbone number", "1")
+    cfg["backbone"] = BACKBONES.get(choice, BACKBONES["1"])
+    cfg["patch_size"] = int(ask("Patch size (px)", str(cfg["backbone"]["patch_size"])))
+
+    cfg["use_stain"] = ask_yes("Apply per-stain stain normalisation?", "y")
+    if cfg["use_stain"]:
+        cfg["labels_csv"] = ask("Labels CSV (file_name,stain[,mpp])", "label_csvs/labels_unfiltered.csv")
+        cfg["stain_refs_dir"] = ask("Stain references dir (.pt per stain)", "stain_refs/IgA")
+
+    mag_str = f"{cfg['mag']:g}"
+    cfg["coords_dir"] = f"{mag_str}x_{cfg['patch_size']}px_{cfg['overlap']}px_overlap"
+    cfg["features_subdir"] = os.path.join(
+        cfg["job_dir"], cfg["coords_dir"], f"features_{cfg['backbone']['trident']}"
     )
-    if response == "y":
-        install_dependencies()
-
-    # Step 2: Validation
-    print("\n" + "-" * 70)
-    print("Step 2: Validate Pipeline")
-    print("-" * 70)
-
-    result = subprocess.run(
-        [sys.executable, "python_scripts/prepare_for_MIL/test_pipeline.py"],
-        capture_output=True,
-        text=True,
+    cfg["reorg_output"] = ask(
+        "Reorganised output dir (biopsy-nested)",
+        os.path.join(os.path.dirname(cfg["job_dir"]) or ".", cfg["backbone"]["feats_dir"]),
     )
+    return cfg
 
-    print(result.stdout)
-    if result.returncode != 0 and "Missing packages" not in result.stdout:
-        print("⚠️  Some validation checks failed")
 
-    # Step 3: Extract patches
-    print("\n" + "-" * 70)
-    print("Step 3: Extract Patches from WSI")
-    print("-" * 70)
+def step_segmentation(cfg):
+    cmd = [
+        sys.executable, TRIDENT_RUNNER,
+        "--task", "seg",
+        "--wsi_dir", cfg["wsi_dir"],
+        "--job_dir", cfg["job_dir"],
+        "--segmenter", cfg["segmenter"],
+        "--gpus", str(cfg["gpu"]),
+    ]
+    if cfg["search_nested"]:
+        cmd.append("--search_nested")
+    return run_cmd(cmd, "Step 1/4 — tissue segmentation")
 
-    response = (
-        input("\nExtract patches from data/raw_wsi/? (y/n) [y]: ").strip().lower()
-        or "y"
-    )
-    if response == "y":
-        if run_extraction():
-            if check_extraction_output():
-                print("\n✅ Patches ready for feature extraction!")
-            else:
-                print("⚠️  Could not verify patch extraction output")
-        else:
-            print("❌ Patch extraction failed")
+
+def step_coords(cfg):
+    cmd = [
+        sys.executable, TRIDENT_RUNNER,
+        "--task", "coords",
+        "--wsi_dir", cfg["wsi_dir"],
+        "--job_dir", cfg["job_dir"],
+        "--mag", f"{cfg['mag']:g}",
+        "--patch_size", str(cfg["patch_size"]),
+        "--overlap", str(cfg["overlap"]),
+    ]
+    if cfg["search_nested"]:
+        cmd.append("--search_nested")
+    return run_cmd(cmd, "Step 2/4 — patch coordinates")
+
+
+def step_features(cfg):
+    if cfg["use_stain"]:
+        cmd = [
+            sys.executable, STAIN_FEATS,
+            "--wsi_dir", cfg["wsi_dir"],
+            "--job_dir", cfg["job_dir"],
+            "--labels_csv", cfg["labels_csv"],
+            "--stain_refs_dir", cfg["stain_refs_dir"],
+            "--backbone", cfg["backbone"]["trident"],
+            "--mag", f"{cfg['mag']:g}",
+            "--patch_size", str(cfg["patch_size"]),
+            "--overlap", str(cfg["overlap"]),
+            "--batch_size", str(cfg["batch_size"]),
+            "--gpu_index", str(cfg["gpu"]),
+        ]
+        if cfg["search_nested"]:
+            cmd.append("--search_nested")
+        return run_cmd(cmd, "Step 3/4 — per-stain feature extraction")
+
+    # Plain stock TRIDENT feature extraction (raw patches, no stain normalisation).
+    cmd = [
+        sys.executable, TRIDENT_RUNNER,
+        "--task", "feat",
+        "--wsi_dir", cfg["wsi_dir"],
+        "--job_dir", cfg["job_dir"],
+        "--patch_encoder", cfg["backbone"]["trident"],
+        "--mag", f"{cfg['mag']:g}",
+        "--patch_size", str(cfg["patch_size"]),
+        "--overlap", str(cfg["overlap"]),
+        "--feat_batch_size", str(cfg["batch_size"]),
+        "--gpus", str(cfg["gpu"]),
+    ]
+    if cfg["search_nested"]:
+        cmd.append("--search_nested")
+    return run_cmd(cmd, "Step 3/4 — feature extraction (no stain norm)")
+
+
+def step_reorganize(cfg):
+    cmd = [
+        sys.executable, REORG,
+        "--features_dir", cfg["features_subdir"],
+        "--wsi_dir", cfg["wsi_dir"],
+        "--output_dir", cfg["reorg_output"],
+        "--copy",  # keep the original TRIDENT output in place
+    ]
+    return run_cmd(cmd, "Step 4/4 — reorganise into biopsy-nested layout")
+
+
+def main():
+    hr()
+    print("🔱  TRIDENT WSI FEATURE EXTRACTION — QUICK START")
+    hr()
+
+    check_environment()
+    cfg = collect_config()
+
+    hr("-")
+    print("Plan")
+    hr("-")
+    print(f"  WSI dir         : {cfg['wsi_dir']}")
+    print(f"  Job dir         : {cfg['job_dir']}")
+    print(f"  Backbone        : {cfg['backbone']['name']} ({cfg['backbone']['trident']})")
+    print(f"  Mag / patch     : {cfg['mag']:g}x / {cfg['patch_size']}px / {cfg['overlap']}px overlap")
+    print(f"  Stain norm      : {'on' if cfg['use_stain'] else 'off'}")
+    print(f"  Features        : {cfg['features_subdir']}")
+    print(f"  Reorg output    : {cfg['reorg_output']}")
+
+    if not ask_yes("\nProceed?", "y"):
+        print("Aborted.")
+        return 0
+
+    steps = [
+        ("segmentation", step_segmentation),
+        ("coords", step_coords),
+        ("features", step_features),
+        ("reorganize", step_reorganize),
+    ]
+    for name, fn in steps:
+        if not ask_yes(f"\nRun {name} step?", "y"):
+            print(f"   ⏭️  skipped {name}")
+            continue
+        if not fn(cfg):
+            print(f"\n❌ Pipeline stopped at '{name}'. Fix the error above and re-run "
+                  "(completed slides are skipped automatically).")
             return 1
 
-    # Step 4: Feature extraction options
-    print("\n" + "-" * 70)
-    print("Step 4: Compute Features")
-    print("-" * 70)
-
-    show_feature_options()
-
-    response = input("\nCompute features now? (y/n) [n]: ").strip().lower()
-    if response == "y":
-        backbone = (
-            input(
-                "Enter backbone number (1=UNI2-h, 2=h-optimus-1, 3=Virchow2) [1]: "
-            ).strip()
-            or "1"
-        )
-
-        backbones = {
-            "1": "UNI2-h",
-            "2": "h-optimus-1",
-            "3": "Virchow2",
-        }
-
-        if backbone in backbones:
-            print(f"\n🔬 Computing features with {backbones[backbone]}...\n")
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "python_scripts/prepare_for_MIL/compute_feats.py",
-                    "--dataset",
-                    "prognosis",
-                    "--backbone",
-                    backbones[backbone],
-                    "--batch_size",
-                    "128",
-                    "--num_workers",
-                    "8",
-                ],
-                capture_output=False,
-            )
-
-            if result.returncode == 0:
-                print("\n✅ Feature extraction completed!")
-                # Show output location
-                print("\n📊 Features saved to: datasets/prognosis/")
-                print("   Ready for MIL training!")
-            else:
-                print("\n❌ Feature extraction failed")
-                return 1
-
-    # Final summary
-    print("\n" + "=" * 70)
-    print("✅ PIPELINE SETUP COMPLETE")
-    print("=" * 70)
-
+    hr()
+    print("✅ PIPELINE COMPLETE")
+    hr()
     print(
-        """
-Your WSI features are now ready for training!
+        f"""
+Features ready for MIL training at:
+  {cfg['reorg_output']}/{{biopsy_nr}}/{{slide_id}}.h5   (keys: 'features', 'coords')
 
-Next steps:
-1. Organize your data with labels
-2. Choose a MIL architecture (DSMIL, TransMIL, etc.)
-3. Train your model on the extracted features
-4. Evaluate on test set
-
-For more details, see:
-  - PATCH_EXTRACTION_GUIDE.md
-  - MODIFICATIONS_SUMMARY.md
-
-Questions? Check test_pipeline.py --help
-    """
+Next: point your MIL training script (e.g. regression_MIL.py) at this directory via
+--features_paths. See README.md for the MIL / survival commands.
+"""
     )
-
     return 0
 
 
@@ -281,11 +261,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n\n⚠️  Pipeline interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
-        import traceback
-
-        traceback.print_exc()
+        print("\n\n⚠️  Interrupted by user")
         sys.exit(1)

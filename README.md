@@ -20,31 +20,82 @@ The foundation models tested for feature extraction are: Virchow2, UNI2-h, Hibou
 torchMIL, CLAM, StainStyleSampler and torchstain should be downloaded and included in the python_scripts folder.
 
 
-Example run:
-# Tiling
-python python_scripts/prepare_for_MIL/run_clam_tiling.py --wsi_dir data/raw_wsi --output_dir WSI/IgA --step_size 112 --stitch store_false
+Latest version now uses the TRIDENT repository, also from Mahmood lab
 
-# Reorganize and rename
-python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/patches --apply
+1) Installation
 
-python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs WSI/IgA/patches data/unlabeled/IgA --apply
+sudo dnf install python3.11-devel
+python3.11 -m venv .trident_venv
+pip install -r requirements.txt
+cd python_scripts/external_repositories/TRIDENT-main/
+pip install -e .
+cd /data/yvan-files/prognosis_prediction
+If running on vm without internet access, the errors will guide you to allow you to run locally.
+
+2) Quick start
+
+python python_scripts/prepare_for_MIL/quick_start.py
+
+OR run the stages manually (equivalent to quick_start.py). `--search_nested` is needed because
+the raw WSIs are stored in biopsy-nested subfolders. The TRIDENT job dir (WSI/IgA/trident) holds
+segmentation, coordinates and raw feature output; the final step folds features into the
+biopsy-nested layout (WSI/IgA/UNI2-h_feats) consumed by the MIL stage.
+
+2) Tiling  (tissue segmentation + patch coordinates, TRIDENT)
+
+# Tissue segmentation (HEST; use --segmenter otsu for a weights-free CPU fallback)
+python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task seg --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --segmenter hest --gpus 0 --search_nested
+
+# Patch coordinates (20x, 256 px, no overlap)
+python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 256 --overlap 0 --search_nested
 
 # Labels definition
 python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/labels --iga_date_filter None
 
 python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/labels_regression --iga_date_filter None
 
-# Stain normalization (Vahadane or Macenko)
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
+3) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
 
-# Feature extraction
-python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output_dir WSI/IgA/UNI2-h_feats --backbone UNI2-h --batch_size 128 --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA
+# (Optional) Stain references — one .pt per stain, used by the per-stain extractor below.
+# NOTE: fit_stain_reference.py reads CLAM-format coord files (needs coords.attrs["patch_level"]),
+# which TRIDENT coords do not have. Fit references from a CLAM tiling pass (run_clam_tiling.py),
+# or skip stain normalization and use stock TRIDENT --task feat (raw patches) instead.
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
 
-# MIL
+# Per-stain, stain-normalized feature extraction (backbone names: uni_v2, virchow2, hoptimus1, hibou_l)
+python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 256 --overlap 0 --batch_size 256 --search_nested
+
+#   Without stain normalization, use stock TRIDENT instead:
+#   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 256 --overlap 0 --gpus 0 --search_nested
+
+# Reorganize flat TRIDENT features into the biopsy-nested layout (recovers biopsy_nr from the raw WSI dir)
+python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_256px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/UNI2-h_feats --copy
+
+4) MIL pooling
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels_regression --checkpoint_dir checkpoints_regression_transmil_CLAM --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
 # Attention map
 python python_scripts/MIL/visualize_attention.py --features_paths WSI/IgA/UNI2-h_feats --checkpoint checkpoints_regression_transmil_CLAM/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_IgA.csv
 
-# Survival curve
+5) Survival model
 python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints_CLAM/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1
+
+
+---
+
+### Legacy CLAM pipeline (pre-TRIDENT)
+
+Kept for reference. Tiling + feature extraction via CLAM instead of TRIDENT:
+
+# Tiling
+python python_scripts/prepare_for_MIL/run_clam_tiling.py --wsi_dir data/raw_wsi --output_dir WSI/IgA --step_size 112 --stitch store_false
+
+# Reorganize and rename
+python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/patches --apply
+python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs WSI/IgA/patches data/unlabeled/IgA --apply
+
+# Stain normalization (Vahadane or Macenko)
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
+
+# Feature extraction
+python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output_dir WSI/IgA/UNI2-h_feats --backbone UNI2-h --batch_size 128 --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA
