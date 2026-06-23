@@ -57,10 +57,10 @@ python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_d
 3) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
 
 # (Optional) Stain references — one .pt per stain, used by the per-stain extractor below.
-# NOTE: fit_stain_reference.py reads CLAM-format coord files (needs coords.attrs["patch_level"]),
-# which TRIDENT coords do not have. Fit references from a CLAM tiling pass (run_clam_tiling.py),
-# or skip stain normalization and use stock TRIDENT --task feat (raw patches) instead.
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
+# fit_stain_reference.py auto-detects TRIDENT coords (point --patches_dir at the job's
+# patches/ dir); read recipe is detected per-file from the h5 attrs. Omit to skip stain
+# normalization and use stock TRIDENT --task feat (raw patches) instead.
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_256px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
 
 # Per-stain, stain-normalized feature extraction (backbone names: uni_v2, virchow2, hoptimus1, hibou_l)
 python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 256 --overlap 0 --batch_size 256 --search_nested

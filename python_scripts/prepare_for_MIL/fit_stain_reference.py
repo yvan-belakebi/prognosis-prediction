@@ -159,6 +159,102 @@ def _find_wsi(wsi_dir, biopsy_nr, slide_id, slide_ext):
     return None
 
 
+def _build_biopsy_lookup(wsi_dir, slide_exts):
+    """Map slide_id -> biopsy_nr by scanning a nested raw-WSI dir.
+
+    TRIDENT coord files are flat (no biopsy subdir), so the biopsy_nr is recovered from the
+    raw-WSI layout (mirrors reorganize_trident_feats.py / run_clam_tiling.py discovery).
+    """
+
+    def _matches(name):
+        return any(name.lower().endswith(ext) for ext in slide_exts)
+
+    lookup = {}
+    has_nested = False
+    for entry in sorted(os.scandir(wsi_dir), key=lambda e: e.name):
+        if entry.is_dir():
+            for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
+                if sub.is_file() and _matches(sub.name):
+                    lookup[os.path.splitext(sub.name)[0]] = entry.name
+                    has_nested = True
+    if not has_nested:
+        for entry in sorted(os.scandir(wsi_dir), key=lambda e: e.name):
+            if entry.is_file() and _matches(entry.name):
+                lookup[os.path.splitext(entry.name)[0]] = ""
+    return lookup
+
+
+def _discover_trident_coord_files(patches_dir, biopsy_lookup):
+    """Return list of (h5_path, biopsy_nr, slide_id) for TRIDENT coord files.
+
+    TRIDENT writes flat '{slide_id}_patches.h5' files under '{job_dir}/{mag}x_.../patches'.
+    biopsy_nr is recovered from biopsy_lookup so the output matches _discover_coord_files
+    (so labels filtering and WSI lookup behave identically to the CLAM path).
+    """
+    results = []
+    for entry in sorted(os.scandir(patches_dir), key=lambda e: e.name):
+        if entry.is_file() and entry.name.endswith("_patches.h5"):
+            slide_id = entry.name[: -len("_patches.h5")]
+            results.append((entry.path, biopsy_lookup.get(slide_id, ""), slide_id))
+    return results
+
+
+def _read_coord_file(h5_path):
+    """Read coords + a format-tagged read recipe from a CLAM or TRIDENT coord file.
+
+    Both store 'coords' as (N, 2) level-0 pixel top-left corners. They differ in attrs:
+        CLAM:    patch_size, patch_level          → read directly at patch_level.
+        TRIDENT: patch_size, level0_magnification, target_magnification
+                 → read at the best level for downsample=level0/target, then resize.
+    The format is auto-detected per file, so a mixed directory is fine.
+    """
+    with h5py.File(h5_path, "r") as f:
+        coords = f["coords"][:]
+        attrs = dict(f["coords"].attrs)
+
+    if "patch_level" in attrs:
+        return coords, {
+            "fmt": "clam",
+            "patch_size": int(attrs["patch_size"]),
+            "patch_level": int(attrs["patch_level"]),
+        }
+    if "target_magnification" in attrs and "level0_magnification" in attrs:
+        return coords, {
+            "fmt": "trident",
+            "patch_size": int(attrs["patch_size"]),
+            "downsample": float(attrs["level0_magnification"])
+            / float(attrs["target_magnification"]),
+        }
+    raise KeyError(
+        f"Unrecognized coord attrs in {h5_path!r} (keys: {sorted(attrs)}); "
+        "expected CLAM ('patch_level') or TRIDENT ('target_magnification')."
+    )
+
+
+def _read_patch_rgb(wsi, x, y, params):
+    """Read one patch as a uint8 RGB (H, W, 3) array, matching how the encoder will see it.
+
+    For TRIDENT, this reproduces WSIPatcher.get_tile_xy: read at the best pyramid level for
+    the target downsample, then resize to patch_size (so the calibration patch resolution
+    matches the feature-extraction patch resolution).
+    """
+    ps = params["patch_size"]
+    if params["fmt"] == "clam":
+        patch = wsi.read_region((x, y), params["patch_level"], (ps, ps)).convert("RGB")
+        return np.array(patch)
+
+    # TRIDENT: coords are level-0; read at best level for the target downsample, then resize.
+    downsample = params["downsample"]
+    patch_size_src = round(ps * downsample)
+    level = wsi.get_best_level_for_downsample(downsample)
+    level_ds = wsi.level_downsamples[level]
+    size_level = max(1, round(patch_size_src / level_ds))
+    patch = wsi.read_region((x, y), level, (size_level, size_level)).convert("RGB")
+    if patch.size != (ps, ps):
+        patch = patch.resize((ps, ps))
+    return np.array(patch)
+
+
 # ---------------------------------------------------------------------------
 # Per-patch handling
 # ---------------------------------------------------------------------------
@@ -248,10 +344,7 @@ def compute_reference(
             continue
 
         try:
-            with h5py.File(h5_path, "r") as f:
-                coords = f["coords"][:]
-                patch_size = int(f["coords"].attrs["patch_size"])
-                patch_level = int(f["coords"].attrs["patch_level"])
+            coords, read_params = _read_coord_file(h5_path)
         except Exception as exc:
             print(f"  [WARN] Cannot read {h5_path}: {exc}")
             wsi.close()
@@ -266,10 +359,7 @@ def compute_reference(
                 break
             x, y = int(coords[i][0]), int(coords[i][1])
             try:
-                patch = wsi.read_region(
-                    (x, y), patch_level, (patch_size, patch_size)
-                ).convert("RGB")
-                patch_np = np.array(patch)
+                patch_np = _read_patch_rgb(wsi, x, y, read_params)
             except Exception:
                 continue
 
@@ -372,7 +462,21 @@ def main():
     parser.add_argument(
         "--patches_dir",
         required=True,
-        help="Directory of CLAM patch-coordinate .h5 files (e.g. WSI/IgA/patches).",
+        help=(
+            "Directory of patch-coordinate .h5 files. CLAM: 'WSI/IgA/patches' "
+            "({slide}.h5, flat or biopsy-nested). TRIDENT: the 'patches' subdir of a job, "
+            "e.g. 'WSI/IgA/trident/20x_256px_0px_overlap/patches' ({slide}_patches.h5)."
+        ),
+    )
+    parser.add_argument(
+        "--coords_format",
+        choices=["auto", "clam", "trident"],
+        default="auto",
+        help=(
+            "Coordinate-file layout. 'auto' picks TRIDENT when the dir holds "
+            "'*_patches.h5' files, else CLAM. The per-file read recipe is always "
+            "auto-detected from the h5 attributes regardless of this flag."
+        ),
     )
     parser.add_argument(
         "--wsi_dir",
@@ -488,11 +592,28 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     n_save = args.n_save_patches if args.save_patches is not None else 0
 
+    # Resolve the coord-file layout. The per-file read recipe is detected separately from
+    # the h5 attrs, so 'auto' here only decides discovery (flat *_patches.h5 vs CLAM *.h5).
+    fmt = args.coords_format
+    if fmt == "auto":
+        has_trident = any(
+            e.is_file() and e.name.endswith("_patches.h5")
+            for e in os.scandir(args.patches_dir)
+        )
+        fmt = "trident" if has_trident else "clam"
+
     # Scan the filesystem once; a genuinely empty patches_dir is fatal, but
     # individual stains with no patched slides are skipped below (not fatal).
-    all_coord_files = _discover_coord_files(args.patches_dir)
+    if fmt == "trident":
+        biopsy_lookup = _build_biopsy_lookup(args.wsi_dir, (slide_ext,))
+        all_coord_files = _discover_trident_coord_files(args.patches_dir, biopsy_lookup)
+    else:
+        all_coord_files = _discover_coord_files(args.patches_dir)
     if not all_coord_files:
-        raise RuntimeError(f"No .h5 coord files found in {args.patches_dir!r}.")
+        raise RuntimeError(
+            f"No {'*_patches.h5' if fmt == 'trident' else '*.h5'} coord files "
+            f"found in {args.patches_dir!r} (format: {fmt})."
+        )
 
     def _bag_name(entry):
         _, biopsy_nr, slide_id = entry
