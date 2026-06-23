@@ -113,6 +113,15 @@ def main():
         help="Recursively search --wsi_dir for slides (biopsy-nested raw-WSI layout).",
     )
     parser.add_argument(
+        "--skip_errors",
+        action="store_true",
+        help=(
+            "Continue to the next slide when one fails instead of aborting. Failures are "
+            "logged by TRIDENT to {job_dir}/{coords_dir}/_logs_feats_{enc}.txt and "
+            "{job_dir}/wsi_states/, with the offending filename."
+        ),
+    )
+    parser.add_argument(
         "--patch_encoder_ckpt_path",
         default=None,
         help="Optional local encoder checkpoint (offline use).",
@@ -187,6 +196,7 @@ def main():
             custom_list_of_wsis=group_csv,
             max_workers=args.max_workers,
             search_nested=args.search_nested,
+            skip_errors=args.skip_errors,
         )
         processor.run_patch_feature_extraction_job(
             coords_dir=coords_dir,

@@ -69,6 +69,56 @@ def run_cmd(cmd, desc):
     return False
 
 
+def collect_failed_slides(job_dir):
+    """Scan TRIDENT per-stage logs ('_logs_*.txt') for failed slides.
+
+    With --skip_errors, TRIDENT records each failure as a line
+    '<slide_filename>: ERROR: <message>' in a per-stage log under job_dir (and in
+    wsi_states/). Returns a list of (stage_log_name, slide_filename, message).
+    """
+    failures = []
+    for root, _dirs, files in os.walk(job_dir):
+        for name in files:
+            if name.startswith("_logs_") and name.endswith(".txt"):
+                try:
+                    with open(
+                        os.path.join(root, name), "r", encoding="utf-8", errors="replace"
+                    ) as f:
+                        for line in f:
+                            if ": ERROR:" in line:
+                                slide, _sep, msg = line.partition(": ")
+                                failures.append((name, slide.strip(), msg.strip()))
+                except OSError:
+                    continue
+    return failures
+
+
+def write_error_report(job_dir):
+    """Aggregate TRIDENT failure logs into {job_dir}/quick_start_errors.log.
+
+    Returns (failures, report_path). The report is overwritten each call so it always
+    reflects the latest attempt per slide (TRIDENT logs are keyed per slide).
+    """
+    failures = collect_failed_slides(job_dir)
+    report_path = os.path.join(job_dir, "quick_start_errors.log")
+    if failures:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(f"# {len(failures)} slide(s) failed across stages\n")
+            for stage_log, slide, msg in failures:
+                f.write(f"[{stage_log}] {slide}: {msg}\n")
+    return failures, report_path
+
+
+def report_errors(cfg, stage_label):
+    """Print a one-line running tally of failed slides after a stage."""
+    failures, report_path = write_error_report(cfg["job_dir"])
+    if failures:
+        print(
+            f"\n⚠️  {len(failures)} slide(s) errored so far (after {stage_label}); "
+            f"continuing. Filenames logged → {report_path}"
+        )
+
+
 def check_environment():
     """Warn if TRIDENT is not importable in the current interpreter."""
     print("\n✅ Using Python:", sys.executable)
@@ -96,6 +146,7 @@ def collect_config():
     cfg["wsi_dir"] = ask("Raw WSI directory", "data/raw_wsi/IgA")
     cfg["job_dir"] = ask("TRIDENT job/output directory", "WSI/IgA/trident")
     cfg["search_nested"] = ask_yes("Are WSIs in biopsy-nested subfolders?", "y")
+    cfg["skip_errors"] = ask_yes("Skip slides that error (continue + log filename)?", "y")
     cfg["segmenter"] = ask("Segmenter (hest/grandqc/otsu)", "hest")
     cfg["mag"] = float(ask("Target magnification", "20"))
     cfg["overlap"] = int(ask("Patch overlap (px)", "0"))
@@ -138,6 +189,8 @@ def step_segmentation(cfg):
     ]
     if cfg["search_nested"]:
         cmd.append("--search_nested")
+    if cfg["skip_errors"]:
+        cmd.append("--skip_errors")
     return run_cmd(cmd, "Step 1/4 — tissue segmentation")
 
 
@@ -153,6 +206,8 @@ def step_coords(cfg):
     ]
     if cfg["search_nested"]:
         cmd.append("--search_nested")
+    if cfg["skip_errors"]:
+        cmd.append("--skip_errors")
     return run_cmd(cmd, "Step 2/4 — patch coordinates")
 
 
@@ -173,6 +228,8 @@ def step_features(cfg):
         ]
         if cfg["search_nested"]:
             cmd.append("--search_nested")
+        if cfg["skip_errors"]:
+            cmd.append("--skip_errors")
         return run_cmd(cmd, "Step 3/4 — per-stain feature extraction")
 
     # Plain stock TRIDENT feature extraction (raw patches, no stain normalisation).
@@ -190,6 +247,8 @@ def step_features(cfg):
     ]
     if cfg["search_nested"]:
         cmd.append("--search_nested")
+    if cfg["skip_errors"]:
+        cmd.append("--skip_errors")
     return run_cmd(cmd, "Step 3/4 — feature extraction (no stain norm)")
 
 
@@ -220,6 +279,7 @@ def main():
     print(f"  Backbone        : {cfg['backbone']['name']} ({cfg['backbone']['trident']})")
     print(f"  Mag / patch     : {cfg['mag']:g}x / {cfg['patch_size']}px / {cfg['overlap']}px overlap")
     print(f"  Stain norm      : {'on' if cfg['use_stain'] else 'off'}")
+    print(f"  Skip errors     : {'on' if cfg['skip_errors'] else 'off'}")
     print(f"  Features        : {cfg['features_subdir']}")
     print(f"  Reorg output    : {cfg['reorg_output']}")
 
@@ -237,14 +297,27 @@ def main():
         if not ask_yes(f"\nRun {name} step?", "y"):
             print(f"   ⏭️  skipped {name}")
             continue
-        if not fn(cfg):
+        ok = fn(cfg)
+        # Surface per-slide failures recorded by TRIDENT (skip_errors continues the run,
+        # so the stage still 'succeeds' overall while individual slides are logged).
+        if name in ("segmentation", "coords", "features"):
+            report_errors(cfg, name)
+        if not ok:
             print(f"\n❌ Pipeline stopped at '{name}'. Fix the error above and re-run "
                   "(completed slides are skipped automatically).")
             return 1
 
+    failures, report_path = write_error_report(cfg["job_dir"])
+
     hr()
     print("✅ PIPELINE COMPLETE")
     hr()
+    if failures:
+        print(f"\n⚠️  {len(failures)} slide(s) failed and were skipped. "
+              f"Full list → {report_path}")
+        for _stage_log, slide, _msg in failures:
+            print(f"     - {slide}")
+        print()
     print(
         f"""
 Features ready for MIL training at:
