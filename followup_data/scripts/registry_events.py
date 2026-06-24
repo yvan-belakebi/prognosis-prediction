@@ -1,9 +1,9 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-events = pd.read_excel("followup_data/registry_events.xlsx")
-death = pd.read_excel("followup_data/registry_death.xlsx")
-diagnosis = pd.read_excel("followup_data/registry_full_data.xlsx")
+events = pd.read_excel("followup_data/raw/registry/registry_events.xlsx")
+death = pd.read_excel("followup_data/raw/registry/registry_death.xlsx")
+diagnosis = pd.read_excel("followup_data/raw/registry/registry_full_data.xlsx")
 
 death.rename(
     columns={
@@ -90,16 +90,16 @@ plt.xlabel("Time to event (days)")
 plt.ylabel("Count")
 plt.title("Distribution of Time to Event for IgA Patients")
 plt.tight_layout()
-plt.savefig("followup_data/times_to_event.png")
+plt.savefig("followup_data/derived/registry/times_to_event.png")
 plt.close()
 
-data.to_csv("followup_data/registry_currated.csv", index=False)
+data.to_csv("followup_data/derived/registry/registry_currated.csv", index=False)
 
 wsi_registry_NKBR = pd.read_excel(
-    "followup_data/NKBR_with_filenames_new_stain_all_found_fix.xlsx"
+    "followup_data/raw/registry/NKBR_with_filenames_new_stain_all_found_fix.xlsx"
 )
 wsi_registry_KB = pd.read_excel(
-    "followup_data/KB_with_filenames_new_stain_all_found_fix.xlsx"
+    "followup_data/raw/registry/KB_with_filenames_new_stain_all_found_fix.xlsx"
 )
 wsi_registry = pd.concat(
     [
@@ -121,4 +121,4 @@ persnummer_to_id = {
 # Add new column with anonymized IDs
 data_registry["AnonymizedID"] = data_registry["patient_fnr"].map(persnummer_to_id)
 data_registry.drop(columns=["patient_fnr"], inplace=True)
-data_registry.to_csv("followup_data/registry_anonymized.csv", index=False)
+data_registry.to_csv("followup_data/derived/renamed/registry_anonymized.csv", index=False)

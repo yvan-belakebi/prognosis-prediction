@@ -5,8 +5,8 @@ Before: WSI/IgA/UNI2-h_feats/slide_name.h5
 After:  WSI/IgA/UNI2-h_feats/<biopsy_dir>/slide_name.h5
 
 Biopsy directories are derived from:
-  - IgA cohort     : followup_data/IgA_slide_data.csv   (Biopsy Number + File Location)
-  - Registry cohort: followup_data/registry_anonymized.csv  (biop_number + ANON_name)
+  - IgA cohort     : followup_data/derived/renamed/IgA_slide_data.csv   (Biopsy Number + File Location)
+  - Registry cohort: followup_data/derived/renamed/registry_anonymized.csv  (biop_number + ANON_name)
 
 By default runs in dry-run mode — prints planned moves without touching files.
 Pass --apply to perform the actual moves.
@@ -572,12 +572,12 @@ def main():
     )
     parser.add_argument(
         "--iga_slides_csv",
-        default="followup_data/IgA_slide_data.csv",
+        default="followup_data/derived/renamed/IgA_slide_data.csv",
         help="IgA slide metadata CSV (columns: Biopsy Number, File Location).",
     )
     parser.add_argument(
         "--registry_csv",
-        default="followup_data/registry_anonymized.csv",
+        default="followup_data/derived/renamed/registry_anonymized.csv",
         help="Registry metadata CSV (columns: ANON_name, biop_number).",
     )
     parser.add_argument(
@@ -633,12 +633,12 @@ def main():
     )
     parser.add_argument(
         "--mapping_out",
-        default="followup_data/slide_name_mapping.csv",
+        default="followup_data/derived/renamed/slide_name_mapping.csv",
         help="Rename mode: output path for the biopsy_number/old_name/new_name CSV.",
     )
     parser.add_argument(
         "--csv_out_dir",
-        default="followup_data/renamed",
+        default="followup_data/derived/renamed",
         help=(
             "Rename mode: directory for rewritten metadata CSV copies "
             "(downstream tasks point --iga_slides_csv / --registry_csv here)."

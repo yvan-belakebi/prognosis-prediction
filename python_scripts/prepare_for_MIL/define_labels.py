@@ -274,17 +274,17 @@ def main():
     # Input paths
     parser.add_argument(
         "--iga_slides_csv",
-        default="followup_data/renamed/IgA_slide_data.csv",
+        default="followup_data/derived/renamed/IgA_slide_data.csv",
         help="Slide metadata for the IgA cohort.",
     )
     parser.add_argument(
         "--iga_followup_csv",
-        default="followup_data/IgA_cohort_full_data.csv",
+        default="followup_data/raw/IgA/IgA_cohort_full_data.csv",
         help="Clinical follow-up data for the IgA cohort.",
     )
     parser.add_argument(
         "--registry_csv",
-        default="followup_data/renamed/registry_anonymized.csv",
+        default="followup_data/derived/renamed/registry_anonymized.csv",
         help="Registry cohort data.",
     )
 

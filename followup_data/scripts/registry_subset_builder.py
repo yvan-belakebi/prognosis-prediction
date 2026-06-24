@@ -3,7 +3,7 @@ import pandas as pd
 import datetime as dt
 import matplotlib.pyplot as plt
 
-df = pd.read_csv("registry_anonymized.csv", encoding="utf-8")
+df = pd.read_csv("followup_data/derived/renamed/registry_anonymized.csv", encoding="utf-8")
 df = df[df["Stain"] == "PAS"]
 df["time_to_event"] = pd.to_timedelta(df["time_to_event"], errors="coerce")
 df = df[df["time_to_event"] >= dt.timedelta(days=730)]
@@ -24,15 +24,19 @@ non_IgA_sub_df = stratified_sample_n(non_igA_df, "Diagnosis", n=1000)
 
 df = pd.concat([igA_df, non_IgA_sub_df], ignore_index=True)
 
-df.to_csv("registry_anonymized_long_TTE_PAS.csv", index=False, encoding="utf-8")
+df.to_csv(
+    "followup_data/derived/subsets/registry_anonymized_long_TTE_PAS.csv",
+    index=False,
+    encoding="utf-8",
+)
 df[df["is_IgA"]]["ANON_name"].to_csv(
-    "registry_IgA_long_TTE_PAS_file_names.csv",
+    "followup_data/derived/subsets/registry_IgA_long_TTE_PAS_file_names.csv",
     index=False,
     header=False,
     encoding="utf-8",
 )
 df[~df["is_IgA"]]["ANON_name"].to_csv(
-    "registry_non_IgA_long_TTE_PAS_file_names.csv",
+    "followup_data/derived/subsets/registry_non_IgA_long_TTE_PAS_file_names.csv",
     index=False,
     header=False,
     encoding="utf-8",

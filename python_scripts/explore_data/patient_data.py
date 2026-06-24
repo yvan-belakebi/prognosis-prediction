@@ -2,9 +2,9 @@ import pandas as pd
 from itables import init_notebook_mode, show
 
 init_notebook_mode(all_interactive=True)
-# patient_df = pd.read_csv("followup_data/IgA_cohort_full_data.csv", encoding="utf-8")
+# patient_df = pd.read_csv("followup_data/raw/IgA/IgA_cohort_full_data.csv", encoding="utf-8")
 patient_df = pd.read_csv(
-    "../../followup_data/IgA_cohort_full_data.csv", encoding="utf-8"
+    "../../followup_data/raw/IgA/IgA_cohort_full_data.csv", encoding="utf-8"
 )
 patient_df.rename(columns={"Mors": "Death", "Mors_year": "Death_year"}, inplace=True)
 

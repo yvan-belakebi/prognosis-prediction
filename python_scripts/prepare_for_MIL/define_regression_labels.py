@@ -4,10 +4,10 @@ ready for use with regression_MIL.py.
 
 Two cohorts are processed in parallel, mirroring define_labels.py:
 
-  IgA      — source column: eGFR_diagnosis  (followup_data/IgA_cohort_full_data.csv)
+  IgA      — source column: eGFR_diagnosis  (followup_data/raw/IgA/IgA_cohort_full_data.csv)
              output dir:    WSI/IgA/labels_regression/
 
-  Registry — source column: eGFR            (followup_data/registry_anonymized.csv)
+  Registry — source column: eGFR            (followup_data/derived/renamed/registry_anonymized.csv)
              output dir:    WSI/IgA_registry/labels_regression/
 
 .npy files contain a scalar float64 (the eGFR value).
@@ -72,20 +72,21 @@ def main():
 
     # Input files
     parser.add_argument(
-        "--iga_slides_csv", default="followup_data/renamed/IgA_slide_data.csv"
+        "--iga_slides_csv", default="followup_data/derived/renamed/IgA_slide_data.csv"
     )
     parser.add_argument(
-        "--iga_followup_csv", default="followup_data/IgA_cohort_full_data.csv"
+        "--iga_followup_csv", default="followup_data/raw/IgA/IgA_cohort_full_data.csv"
     )
     parser.add_argument(
-        "--registry_csv", default="followup_data/renamed/registry_anonymized.csv"
+        "--registry_csv",
+        default="followup_data/derived/renamed/registry_anonymized.csv",
     )
 
     # Label columns
     parser.add_argument(
         "--iga_label_col",
         default="eGFR_diagnosis",
-        help="eGFR column in IgA_cohort_full_data.csv.",
+        help="eGFR column in raw/IgA/IgA_cohort_full_data.csv.",
     )
     parser.add_argument(
         "--registry_label_col",
