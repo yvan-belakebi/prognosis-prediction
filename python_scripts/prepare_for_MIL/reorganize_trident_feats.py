@@ -16,7 +16,7 @@ The h5 schema is identical, so this only relocates files (move, or copy with --c
 
 Usage:
     python python_scripts/prepare_for_MIL/reorganize_trident_feats.py \\
-        --features_dir WSI/IgA/trident/20x_256px_0px_overlap/features_uni_v2 \\
+        --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
         --wsi_dir      data/raw_wsi/IgA \\
         --output_dir   WSI/IgA/UNI2-h_feats
 """

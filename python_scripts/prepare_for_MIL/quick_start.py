@@ -33,10 +33,12 @@ TRIDENT_RUNNER = ROOT / "python_scripts/external_repositories/TRIDENT-main/run_b
 STAIN_FEATS = ROOT / "python_scripts/prepare_for_MIL/run_trident_stain_feats.py"
 REORG = ROOT / "python_scripts/prepare_for_MIL/reorganize_trident_feats.py"
 
-# Friendly name -> TRIDENT encoder name, per-encoder recommended patch_size (TRIDENT README
-# table), and the output feats-dir name matching the CLAM-path convention.
+# Friendly name -> TRIDENT encoder name, encoder input patch_size (px), and the output
+# feats-dir name matching the CLAM-path convention. Default input is 224x224 for every
+# encoder (the native ViT resolution). TRIDENT's table suggests 256 for UNI2-h; we
+# standardize on 224 for a consistent feature-extraction input — override at the prompt.
 BACKBONES = {
-    "1": {"name": "UNI2-h",      "trident": "uni_v2",   "patch_size": 256, "feats_dir": "UNI2-h_feats"},
+    "1": {"name": "UNI2-h",      "trident": "uni_v2",   "patch_size": 224, "feats_dir": "UNI2-h_feats"},
     "2": {"name": "Virchow2",    "trident": "virchow2", "patch_size": 224, "feats_dir": "Virchow2_feats"},
     "3": {"name": "H-optimus-1", "trident": "hoptimus1","patch_size": 224, "feats_dir": "h-optimus-1_feats"},
     "4": {"name": "Hibou-L",     "trident": "hibou_l",  "patch_size": 224, "feats_dir": "Hibou-L_feats"},

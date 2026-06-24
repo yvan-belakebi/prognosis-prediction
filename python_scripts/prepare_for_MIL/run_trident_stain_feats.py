@@ -11,7 +11,7 @@ Segmentation and patching are stain-independent, so run them ONCE with stock TRI
         --task seg   --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --segmenter hest
     python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py \\
         --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident \\
-        --mag 20 --patch_size 256 --overlap 0
+        --mag 20 --patch_size 224 --overlap 0
 
     # 2. Per-stain feature extraction (this script)
     python python_scripts/prepare_for_MIL/run_trident_stain_feats.py \\
@@ -20,7 +20,7 @@ Segmentation and patching are stain-independent, so run them ONCE with stock TRI
         --labels_csv    label_csvs/labels_unfiltered.csv \\
         --stain_refs_dir stain_refs/IgA \\
         --backbone      uni_v2 \\
-        --mag 20 --patch_size 256 --overlap 0 --batch_size 256
+        --mag 20 --patch_size 224 --overlap 0 --batch_size 256
 
 Outputs (stock TRIDENT layout — features + coords in one .h5 per slide):
     {job_dir}/{mag}x_{ps}px_{ov}px_overlap/features_{enc_name}/{slide_id}.h5
@@ -102,7 +102,7 @@ def main():
     )
     parser.add_argument("--slide_ext", default=".svs", help="WSI file extension.")
     parser.add_argument("--mag", type=float, default=20.0)
-    parser.add_argument("--patch_size", type=int, default=256)
+    parser.add_argument("--patch_size", type=int, default=224)
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--gpu_index", type=int, default=0)

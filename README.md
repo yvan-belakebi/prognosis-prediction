@@ -46,8 +46,8 @@ biopsy-nested layout (WSI/IgA/UNI2-h_feats) consumed by the MIL stage.
 # Tissue segmentation (HEST; use --segmenter otsu for a weights-free CPU fallback)
 python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task seg --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --segmenter hest --gpus 0 --search_nested
 
-# Patch coordinates (20x, 256 px, no overlap)
-python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 256 --overlap 0 --search_nested
+# Patch coordinates (20x, 224 px, no overlap)
+python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 224 --overlap 0 --search_nested
 
 # Labels definition
 python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/labels --iga_date_filter None
@@ -60,16 +60,16 @@ python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_d
 # fit_stain_reference.py auto-detects TRIDENT coords (point --patches_dir at the job's
 # patches/ dir); read recipe is detected per-file from the h5 attrs. Omit to skip stain
 # normalization and use stock TRIDENT --task feat (raw patches) instead.
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_256px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
 
 # Per-stain, stain-normalized feature extraction (backbone names: uni_v2, virchow2, hoptimus1, hibou_l)
-python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 256 --overlap 0 --batch_size 256 --search_nested
+python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --batch_size 256 --search_nested
 
 #   Without stain normalization, use stock TRIDENT instead:
-#   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 256 --overlap 0 --gpus 0 --search_nested
+#   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 224 --overlap 0 --gpus 0 --search_nested
 
 # Reorganize flat TRIDENT features into the biopsy-nested layout (recovers biopsy_nr from the raw WSI dir)
-python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_256px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/UNI2-h_feats --copy
+python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/UNI2-h_feats --copy
 
 4) MIL pooling
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels_regression --checkpoint_dir checkpoints_regression_transmil_CLAM --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1

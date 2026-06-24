@@ -465,7 +465,7 @@ def main():
         help=(
             "Directory of patch-coordinate .h5 files. CLAM: 'WSI/IgA/patches' "
             "({slide}.h5, flat or biopsy-nested). TRIDENT: the 'patches' subdir of a job, "
-            "e.g. 'WSI/IgA/trident/20x_256px_0px_overlap/patches' ({slide}_patches.h5)."
+            "e.g. 'WSI/IgA/trident/20x_224px_0px_overlap/patches' ({slide}_patches.h5)."
         ),
     )
     parser.add_argument(
