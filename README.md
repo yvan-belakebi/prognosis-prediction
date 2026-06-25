@@ -65,6 +65,13 @@ python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/I
 # Per-stain, stain-normalized feature extraction (backbone names: uni_v2, virchow2, hoptimus1, hibou_l)
 python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --batch_size 256 --search_nested
 
+# (Optional) Speed benchmark: Macenko vs Vahadane normalization on a small subset.
+# Fit one reference set per method first (stored under stain_refs_macenko / stain_refs_vahadane),
+# then time run_trident_stain_feats.py's extraction path both ways on --n_slides slides.
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_macenko/IgA  --labels_csv label_csvs/labels_unfiltered.csv --method macenko
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_vahadane/IgA --labels_csv label_csvs/labels_unfiltered.csv --method vahadane
+python python_scripts/prepare_for_MIL/benchmark_stain_norm.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --macenko_refs_dir stain_refs_macenko/IgA --vahadane_refs_dir stain_refs_vahadane/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --n_slides 4 --batch_size 256 --search_nested
+
 #   Without stain normalization, use stock TRIDENT instead:
 #   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 224 --overlap 0 --gpus 0 --search_nested
 
