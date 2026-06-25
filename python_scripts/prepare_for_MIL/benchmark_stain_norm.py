@@ -17,6 +17,12 @@ sparse-NMF dictionary learning). To isolate that cost the benchmark:
       a slide mid-benchmark (and the real features_{enc}/ output is left untouched);
     * times only Processor.run_patch_feature_extraction_job (seg + coords are reused).
 
+Slide selection: the subset is drawn at RANDOM from the slides actually present in the
+pipeline — the coord files on disk under --job_dir, intersected with the WSIs in --wsi_dir —
+never from a CSV list, so it can never pick a slide that isn't tiled. A stain CSV is OPTIONAL
+and used only to label the drawn slides (and to spread the draw across stains); slides absent
+from it are benchmarked without normalisation.
+
 Prerequisites (same as run_trident_stain_feats.py): seg + coords already done for the slides
 under --job_dir, and one .pt reference per stain in BOTH refs dirs, e.g.
 
@@ -74,28 +80,78 @@ from trident_io import (  # noqa: E402
 _METHODS = ("macenko", "vahadane")
 
 
-def _select_subset(df, n_slides, seed):
-    """Pick up to n_slides rows, spread across stains so each group is represented.
+def _discover_wsi_stems(wsi_dir, slide_ext, search_nested):
+    """Return the set of slide stems (basenames) found in wsi_dir for the given extension."""
+    stems = set()
+    if not os.path.isdir(wsi_dir):
+        return stems
+    ext = slide_ext.lower()
+    if search_nested:
+        for _root, _dirs, files in os.walk(wsi_dir):
+            for fn in files:
+                if fn.lower().endswith(ext):
+                    stems.add(os.path.splitext(fn)[0])
+    else:
+        for e in os.scandir(wsi_dir):
+            if e.is_file() and e.name.lower().endswith(ext):
+                stems.add(os.path.splitext(e.name)[0])
+    return stems
 
-    Round-robins one slide per stain at a time (deterministic given --seed) so a small
-    --n_slides still exercises every stain's reference rather than a single group.
+
+def _build_stain_map(labels_csv, name_col, stain_col):
+    """Best-effort {slide_stem: stain} from a CSV (or {} if no CSV).
+
+    The CSV is used only to LABEL slides with a stain, not to choose them. A stem absent
+    from the CSV maps to no stain (benchmarked without normalisation). Matching is by exact
+    stem, so name_col should hold the same names as the on-disk coord/WSI files.
     """
-    rng = __import__("numpy").random.default_rng(seed)
+    if not labels_csv:
+        return {}
+    df = pd.read_csv(labels_csv)
+    if name_col not in df.columns or stain_col not in df.columns:
+        raise SystemExit(
+            f"--labels_csv must contain '{name_col}' and '{stain_col}' columns "
+            f"(got {list(df.columns)}). Use --name_col / --stain_col to override."
+        )
+    stain_map = {}
+    for _, r in df.iterrows():
+        stem = str(r[name_col]).strip()
+        stain = r[stain_col]
+        if stem and pd.notna(stain):
+            stain_map[stem] = str(stain)
+    return stain_map
+
+
+def _select_from_disk(pool, stain_map, n_slides, seed):
+    """Randomly draw up to n_slides stems from `pool`, spread across stains.
+
+    pool: list of slide stems available on disk (coords present).
+    stain_map: {stem: stain}; stems absent are grouped under None (unknown stain).
+    Round-robins one slide per stain group at a time (deterministic given seed) so a small
+    n_slides still exercises several stains. Returns a list of (stem, stain_or_None).
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
     by_stain = {}
-    for stain, grp in df.groupby("stain"):
-        idx = grp.index.to_numpy().copy()
-        rng.shuffle(idx)
-        by_stain[stain] = list(idx)
+    for stem in pool:
+        by_stain.setdefault(stain_map.get(stem), []).append(stem)
+    for stems in by_stain.values():
+        rng.shuffle(stems)
+
+    # Deterministic group order: known stains first (sorted), unknown (None) last.
+    order = sorted(k for k in by_stain if k is not None)
+    if None in by_stain:
+        order.append(None)
 
     chosen = []
-    while len(chosen) < n_slides and any(by_stain.values()):
-        for stain in list(by_stain):
-            if not by_stain[stain]:
-                continue
-            chosen.append(by_stain[stain].pop(0))
-            if len(chosen) >= n_slides:
-                break
-    return df.loc[chosen]
+    while len(chosen) < n_slides and any(by_stain[k] for k in order):
+        for key in order:
+            if by_stain[key]:
+                chosen.append((by_stain[key].pop(), key))
+                if len(chosen) >= n_slides:
+                    break
+    return chosen
 
 
 def _count_patches(job_dir, coords_dir, file_names):
@@ -133,38 +189,44 @@ def _time_method(
     method,
     refs_dir,
     base_encoder,
-    df_subset,
+    subset,
     args,
     coords_dir,
     device,
     slide_ext,
     tmp_dir,
 ):
-    """Run + time the extraction for one method; returns elapsed seconds for one pass."""
+    """Run + time the extraction for one method; returns (elapsed_seconds, enc_name).
+
+    subset: list of (slide_stem, stain_or_None). Slides are grouped by stain so each group
+    loads its own reference; a None stain (or a missing reference) runs without normalisation.
+    """
     enc_name = f"{base_encoder.enc_name}_bench_{method}"
-    file_names = [str(r["file_name"]) for _, r in df_subset.iterrows()]
-    has_mpp = "mpp" in df_subset.columns
+    file_names = [name for name, _ in subset]
 
     # Force recompute: drop any features from a previous repeat/run.
     _clear_features(args.job_dir, coords_dir, enc_name, file_names)
 
-    elapsed = 0.0
-    for stain, group in df_subset.groupby("stain"):
-        ref_path = os.path.join(refs_dir, f"{_sanitize_stain_name(stain)}.pt")
-        if not os.path.isfile(ref_path):
-            print(
-                f"  [WARN] {method}: no reference for stain '{stain}' at {ref_path} — "
-                f"this group runs WITHOUT normalisation (timing not comparable)."
-            )
-            ref_path = None
+    groups = {}
+    for name, stain in subset:
+        groups.setdefault(stain, []).append(name)
 
-        rows = []
-        for _, r in group.iterrows():
-            row = {"wsi": f"{r['file_name']}{slide_ext}"}
-            if has_mpp and pd.notna(r.get("mpp")):
-                row["mpp"] = r["mpp"]
-            rows.append(row)
-        group_csv = os.path.join(tmp_dir, f"{method}_{_sanitize_stain_name(stain)}.csv")
+    elapsed = 0.0
+    for stain, names in groups.items():
+        if stain is None:
+            ref_path = None
+        else:
+            ref_path = os.path.join(refs_dir, f"{_sanitize_stain_name(stain)}.pt")
+            if not os.path.isfile(ref_path):
+                print(
+                    f"  [WARN] {method}: no reference for stain '{stain}' at {ref_path} — "
+                    f"this group runs WITHOUT normalisation (timing not comparable)."
+                )
+                ref_path = None
+
+        label = _sanitize_stain_name(stain) if stain is not None else "unknown"
+        rows = [{"wsi": f"{name}{slide_ext}"} for name in names]
+        group_csv = os.path.join(tmp_dir, f"{method}_{label}.csv")
         pd.DataFrame(rows).to_csv(group_csv, index=False)
 
         wrapped = build_stain_encoder(
@@ -210,8 +272,23 @@ def main():
     )
     parser.add_argument(
         "--labels_csv",
-        required=True,
-        help="CSV with 'file_name' and 'stain' columns (optional 'mpp').",
+        default=None,
+        help=(
+            "Optional CSV used ONLY to assign a stain to each drawn slide (and to spread "
+            "the random draw across stains) — NOT to choose the subset. Slides absent from "
+            "it are benchmarked without normalisation. Matched by exact stem; see "
+            "--name_col / --stain_col."
+        ),
+    )
+    parser.add_argument(
+        "--name_col",
+        default="file_name",
+        help="Column in --labels_csv holding the slide name (matched to on-disk stems).",
+    )
+    parser.add_argument(
+        "--stain_col",
+        default="stain",
+        help="Column in --labels_csv holding the stain.",
     )
     parser.add_argument(
         "--macenko_refs_dir",
@@ -235,7 +312,7 @@ def main():
         "--n_slides",
         type=int,
         default=4,
-        help="Number of slides in the benchmark subset (spread across stains).",
+        help="Number of slides to draw at random from on-disk slides (spread across stains).",
     )
     parser.add_argument(
         "--repeats",
@@ -272,15 +349,40 @@ def main():
     device = f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
     coords_dir = coords_dir_name(args.mag, args.patch_size, args.overlap)
 
-    df = pd.read_csv(args.labels_csv)
-    if "file_name" not in df.columns or "stain" not in df.columns:
-        parser.error("--labels_csv must contain 'file_name' and 'stain' columns.")
-    df = df.dropna(subset=["stain"])
+    # Draw pool = slides actually in the pipeline (coords on disk), intersected with the
+    # WSIs in --wsi_dir when those are enumerable, so we never pick a slide that isn't both
+    # tiled and present. Never a CSV list.
+    coords_pool = set(discover_coords(patches_dir(args.job_dir, coords_dir)))
+    if not coords_pool:
+        print(
+            f"\n[ERROR] No coord files under {patches_dir(args.job_dir, coords_dir)}. "
+            "Run the seg + coords stages first."
+        )
+        return 1
 
-    df_subset = _select_subset(df, args.n_slides, args.seed)
-    file_names = [str(r["file_name"]) for _, r in df_subset.iterrows()]
-    n_patches, found, missing = _count_patches(args.job_dir, coords_dir, file_names)
+    wsi_stems = _discover_wsi_stems(args.wsi_dir, slide_ext, args.search_nested)
+    if wsi_stems:
+        pool = sorted(coords_pool & wsi_stems)
+        if not pool:
+            print(
+                "[WARN] No overlap between coord files and WSIs in --wsi_dir; "
+                "drawing from all tiled slides instead."
+            )
+            pool = sorted(coords_pool)
+    else:
+        pool = sorted(coords_pool)
+
+    stain_map = _build_stain_map(args.labels_csv, args.name_col, args.stain_col)
+    subset = _select_from_disk(pool, stain_map, args.n_slides, args.seed)
+    if not subset:
+        print("\n[ERROR] No slides available to benchmark.")
+        return 1
+
+    file_names = [name for name, _ in subset]
+    n_patches, found, _missing = _count_patches(args.job_dir, coords_dir, file_names)
     n_with_coords = len(found)
+    stains_drawn = sorted({s for _, s in subset if s is not None})
+    n_unknown = sum(1 for _, s in subset if s is None)
 
     print("=" * 70)
     print("STAIN NORMALISATION SPEED BENCHMARK — Macenko vs Vahadane")
@@ -288,38 +390,25 @@ def main():
     print(f"Device          : {device}")
     print(f"Backbone        : {args.backbone}")
     print(f"Coords dir      : {coords_dir}")
-    print(f"Subset          : {len(df_subset)} slide(s) across "
-          f"{df_subset['stain'].nunique()} stain(s)")
-    print(f"Coord files     : {n_with_coords}/{len(df_subset)} found  "
-          f"({n_patches} patches total)")
+    print(f"Pool            : {len(pool)} slide(s) available on disk")
+    print(f"Subset          : {len(subset)} slide(s) across {len(stains_drawn)} stain(s)"
+          + (f" + {n_unknown} unknown" if n_unknown else ""))
+    print(f"Patches         : {n_patches} total")
     print(f"Batch size      : {args.batch_size}  |  repeats: {args.repeats}")
-    for _, r in df_subset.iterrows():
-        flag = "" if str(r["file_name"]) in found else "   [no coord file]"
-        print(f"   - {r['file_name']}  [{r['stain']}]{flag}")
+    for name, stain in subset:
+        print(f"   - {name}  [{stain if stain is not None else 'unknown stain'}]")
 
-    if missing:
-        pdir = patches_dir(args.job_dir, coords_dir)
-        present = sorted(discover_coords(pdir))
+    if not stain_map:
         print(
-            f"\n[WARN] {len(missing)} of {len(df_subset)} subset slide(s) have no coord "
-            f"file in {pdir}."
+            "\n[WARN] No --labels_csv given — all slides run WITHOUT normalisation, so "
+            "Macenko and Vahadane will time identically. Pass --labels_csv to enable it."
         )
+    elif not stains_drawn:
         print(
-            f"       {len(present)} coord file(s) exist there"
-            + (f"; e.g. {present[:3]}" if present else " (directory empty or missing)")
-            + "."
+            f"\n[WARN] None of the drawn slides matched a stain in --labels_csv (column "
+            f"'{args.name_col}'); all run WITHOUT normalisation. Check that the CSV names "
+            "match the on-disk slide names."
         )
-        print(
-            "       Likely causes: seg+coords were run at a different "
-            "--mag/--patch_size/--overlap (the coords_dir must match exactly), or the "
-            "labels file_name does not match the WSI basename."
-        )
-    if n_with_coords == 0:
-        print(
-            "\n[ERROR] No coord files matched the subset — cannot benchmark. "
-            "Run seg + coords for these slides at this coords_dir first."
-        )
-        return 1
 
     print(f"\nLoading TRIDENT encoder '{args.backbone}' once …")
     base_encoder = encoder_factory(
@@ -341,7 +430,7 @@ def main():
         times = []
         for rep in range(args.repeats):
             elapsed, enc_name = _time_method(
-                method, refs_dirs[method], base_encoder, df_subset, args,
+                method, refs_dirs[method], base_encoder, subset, args,
                 coords_dir, device, slide_ext, tmp_dir,
             )
             enc_names[method] = enc_name
