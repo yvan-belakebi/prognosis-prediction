@@ -40,3 +40,5 @@ StainStyleSampler-remove-histomicstk-dependency/
 torch-staintools-main/
 TRIDENT-main/
 WSI/
+# Ignore venv
+*trident_venv/
