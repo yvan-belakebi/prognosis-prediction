@@ -26,7 +26,7 @@
 # Ignore shell scripts
 *.sh
 # Ignore stain references
-stain_refs/
+stain_refs*/
 # Miscellaneous 
 *.zip
 *.svg
