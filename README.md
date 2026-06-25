@@ -61,8 +61,12 @@ python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_d
 # fit_stain_reference.py auto-detects TRIDENT coords (point --patches_dir at the job's
 # patches/ dir); read recipe is detected per-file from the h5 attrs. Omit to skip stain
 # normalization and use stock TRIDENT --task feat (raw patches) instead.
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_macenko/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs_macenko/IgA/qc --n_save_patches 20 --method macenko --skip_errors
 
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_vahadane/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs_vahadane/IgA/qc --n_save_patches 20 --method vahadane --skip_errors
+
+After having run both, create a stain_refs dir and copy paste the relevant .pt file for each stain
+(Explicit choice of the method).
 # Per-stain, stain-normalized feature extraction (backbone names: uni_v2, virchow2, hoptimus1, hibou_l)
 python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --batch_size 256 --search_nested
 
