@@ -23,6 +23,11 @@ never from a CSV list, so it can never pick a slide that isn't tiled. A stain CS
 and used only to label the drawn slides (and to spread the draw across stains); slides absent
 from it are benchmarked without normalisation.
 
+When the on-disk slides are raw-named but the stain CSV is keyed by anonymized names, pass
+--mapping_csv (slide_name_mapping.csv: old_name/new_name). Each raw stem is translated to its
+anonymized name purely for the stain lookup — files are still read and written under their raw
+names, so nothing on disk needs renaming.
+
 Prerequisites (same as run_trident_stain_feats.py): seg + coords already done for the slides
 under --job_dir, and one .pt reference per stain in BOTH refs dirs, e.g.
 
@@ -66,6 +71,7 @@ if _trident_dir not in sys.path:
 from trident import Processor  # noqa: E402
 from trident.patch_encoder_models.load import encoder_factory  # noqa: E402
 
+from apply_slide_rename import load_mapping  # noqa: E402
 from run_trident_stain_feats import _sanitize_stain_name  # noqa: E402
 from stain_norm_encoder import build_stain_encoder  # noqa: E402
 from trident_io import (  # noqa: E402
@@ -291,6 +297,17 @@ def main():
         help="Column in --labels_csv holding the stain.",
     )
     parser.add_argument(
+        "--mapping_csv",
+        default=None,
+        help=(
+            "Optional old_name->new_name CSV (reorganize_wsi_dirs.py --rename output, "
+            "slide_name_mapping.csv). When the on-disk slides are raw-named but --labels_csv "
+            "is keyed by the anonymized name, this translates each raw stem to its anonymized "
+            "name before the stain lookup. Files are still read/written under their raw "
+            "names; only the stain assignment is translated."
+        ),
+    )
+    parser.add_argument(
         "--macenko_refs_dir",
         default="stain_refs_macenko",
         help="Directory of Macenko .pt references (one per stain).",
@@ -372,8 +389,17 @@ def main():
     else:
         pool = sorted(coords_pool)
 
-    stain_map = _build_stain_map(args.labels_csv, args.name_col, args.stain_col)
-    subset = _select_from_disk(pool, stain_map, args.n_slides, args.seed)
+    anon_stain = _build_stain_map(args.labels_csv, args.name_col, args.stain_col)
+    raw_to_anon = load_mapping(args.mapping_csv) if args.mapping_csv else {}
+    # On-disk slides are raw-named while stain info is keyed by the anonymized name.
+    # Translate each raw stem -> anonymized name via the mapping (falling back to the raw
+    # stem when it is not in the mapping, e.g. already-safe names), then look up its stain.
+    stain_by_stem = {}
+    for stem in pool:
+        stain = anon_stain.get(raw_to_anon.get(stem, stem))
+        if stain is not None:
+            stain_by_stem[stem] = stain
+    subset = _select_from_disk(pool, stain_by_stem, args.n_slides, args.seed)
     if not subset:
         print("\n[ERROR] No slides available to benchmark.")
         return 1
@@ -390,6 +416,8 @@ def main():
     print(f"Device          : {device}")
     print(f"Backbone        : {args.backbone}")
     print(f"Coords dir      : {coords_dir}")
+    if raw_to_anon:
+        print(f"Name mapping    : {len(raw_to_anon)} entries (raw → anonymized)")
     print(f"Pool            : {len(pool)} slide(s) available on disk")
     print(f"Subset          : {len(subset)} slide(s) across {len(stains_drawn)} stain(s)"
           + (f" + {n_unknown} unknown" if n_unknown else ""))
@@ -398,16 +426,21 @@ def main():
     for name, stain in subset:
         print(f"   - {name}  [{stain if stain is not None else 'unknown stain'}]")
 
-    if not stain_map:
+    if not anon_stain:
         print(
             "\n[WARN] No --labels_csv given — all slides run WITHOUT normalisation, so "
             "Macenko and Vahadane will time identically. Pass --labels_csv to enable it."
         )
     elif not stains_drawn:
+        hint = (
+            "Pass --mapping_csv (slide_name_mapping.csv) to translate the raw on-disk names "
+            "to the anonymized names used in --labels_csv."
+            if not raw_to_anon
+            else f"Check that --mapping_csv new_name values match --labels_csv '{args.name_col}'."
+        )
         print(
-            f"\n[WARN] None of the drawn slides matched a stain in --labels_csv (column "
-            f"'{args.name_col}'); all run WITHOUT normalisation. Check that the CSV names "
-            "match the on-disk slide names."
+            f"\n[WARN] None of the drawn slides matched a stain (labels column "
+            f"'{args.name_col}'); all run WITHOUT normalisation. {hint}"
         )
 
     print(f"\nLoading TRIDENT encoder '{args.backbone}' once …")
