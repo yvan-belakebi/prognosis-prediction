@@ -1,5 +1,6 @@
 # For data exploration and manipulation
 pandas
+geopandas
 numpy
 openpyxl
 itables
@@ -7,6 +8,7 @@ IPython
 # For image processing
 Pillow
 # For tiling and stain normalization
+einops
 openslide-python
 openslide-bin
 scikit-image
