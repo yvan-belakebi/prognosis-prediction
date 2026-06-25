@@ -72,7 +72,7 @@ def main():
 
     # Input files
     parser.add_argument(
-        "--iga_slides_csv", default="followup_data/derived/renamed/IgA_slide_data.csv"
+        "--iga_slides_csv", default="followup_data/derived/renamed/IgA_full_data.csv"
     )
     parser.add_argument(
         "--iga_followup_csv", default="followup_data/raw/IgA/IgA_cohort_full_data.csv"

@@ -5,7 +5,7 @@ Before: WSI/IgA/UNI2-h_feats/slide_name.h5
 After:  WSI/IgA/UNI2-h_feats/<biopsy_dir>/slide_name.h5
 
 Biopsy directories are derived from:
-  - IgA cohort     : followup_data/derived/renamed/IgA_slide_data.csv   (Biopsy Number + File Location)
+  - IgA cohort     : followup_data/derived/renamed/IgA_full_data.csv   (Biopsy Number + File Location)
   - Registry cohort: followup_data/derived/renamed/registry_anonymized.csv  (biop_number + ANON_name)
 
 By default runs in dry-run mode — prints planned moves without touching files.
@@ -572,7 +572,7 @@ def main():
     )
     parser.add_argument(
         "--iga_slides_csv",
-        default="followup_data/derived/renamed/IgA_slide_data.csv",
+        default="followup_data/derived/renamed/IgA_full_data.csv",
         help="IgA slide metadata CSV (columns: Biopsy Number, File Location).",
     )
     parser.add_argument(

@@ -274,7 +274,7 @@ def main():
     # Input paths
     parser.add_argument(
         "--iga_slides_csv",
-        default="followup_data/derived/renamed/IgA_slide_data.csv",
+        default="followup_data/derived/renamed/IgA_full_data.csv",
         help="Slide metadata for the IgA cohort.",
     )
     parser.add_argument(
