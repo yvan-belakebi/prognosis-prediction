@@ -75,6 +75,41 @@ def _sanitize_stain_name(stain: str) -> str:
     return re.sub(r"[^\w\-]+", "_", stain).strip("_")
 
 
+def build_disk_index(wsi_dir: str, slide_ext: str, search_nested: bool) -> dict:
+    """Map each on-disk slide filename to its path relative to ``wsi_dir``.
+
+    With the biopsy-nested raw-WSI layout (``wsi_dir/<biopsy_dir>/<name>.svs``)
+    the slide files live one level below ``wsi_dir``. TRIDENT's custom_list_of_wsis
+    path ignores ``search_nested`` and looks the 'wsi' column up literally under
+    ``wsi_dir`` (see trident/IO.collect_valid_slides), so we must hand it the full
+    relative path. This index lets us translate a bare ``<name>.svs`` to its real
+    nested location. When ``search_nested`` is False the relative path is just the
+    filename, preserving the original flat behaviour.
+
+    Duplicate filenames across different biopsy dirs are ambiguous; the first
+    seen wins and a warning is printed.
+    """
+    index: dict = {}
+    if search_nested:
+        for root, _dirs, files in os.walk(wsi_dir):
+            for f in files:
+                if not f.lower().endswith(slide_ext.lower()):
+                    continue
+                rel = os.path.relpath(os.path.join(root, f), wsi_dir)
+                if f in index and index[f] != rel:
+                    print(
+                        f"[WARN] duplicate slide filename '{f}' "
+                        f"({index[f]} and {rel}); keeping {index[f]}."
+                    )
+                    continue
+                index[f] = rel
+    else:
+        for f in os.listdir(wsi_dir):
+            if f.lower().endswith(slide_ext.lower()):
+                index[f] = f
+    return index
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Per-stain TRIDENT patch-feature extraction (seg+coords must be done first).",
@@ -179,6 +214,17 @@ def main():
     tmp_dir = os.path.join(args.job_dir, "_stain_group_lists")
     os.makedirs(tmp_dir, exist_ok=True)
 
+    # Index the on-disk slides so each bare '<name>.svs' can be resolved to its
+    # path relative to --wsi_dir. With the biopsy-nested raw-WSI layout the file
+    # lives at <wsi_dir>/<biopsy_dir>/<name>.svs, and TRIDENT's custom-list path
+    # looks the 'wsi' column up literally under --wsi_dir, so it needs that
+    # relative path rather than a bare filename.
+    disk_index = build_disk_index(args.wsi_dir, slide_ext, args.search_nested)
+    print(
+        f"Indexed {len(disk_index)} slide file(s) under {args.wsi_dir} "
+        f"(search_nested={args.search_nested})."
+    )
+
     stains = [s for s in df["stain"].dropna().unique()]
     print(f"Found {len(stains)} stain group(s): {stains}")
 
@@ -193,10 +239,18 @@ def main():
             ref_path = None
 
         # Write a TRIDENT custom_list_of_wsis CSV (column 'wsi', optional 'mpp').
+        # 'wsi' holds the path RELATIVE to --wsi_dir (resolved via disk_index so
+        # biopsy-nested slides are found); slides absent from disk are skipped.
         rows = []
+        missing = []
         for _, r in group.iterrows():
             disk_name = anon_to_raw.get(str(r["file_name"]), r["file_name"])
-            row = {"wsi": f"{disk_name}{slide_ext}"}
+            fname = f"{disk_name}{slide_ext}"
+            rel_path = disk_index.get(fname)
+            if rel_path is None:
+                missing.append(fname)
+                continue
+            row = {"wsi": rel_path}
             if has_mpp and pd.notna(r.get("mpp")):
                 row["mpp"] = r["mpp"]
             rows.append(row)
@@ -207,6 +261,15 @@ def main():
             f"\n=== stain '{stain}'  |  {len(rows)} slide(s)  |  "
             f"norm: {'on' if ref_path else 'off'} ==="
         )
+        if missing:
+            print(
+                f"[WARN] stain '{stain}': {len(missing)} slide(s) listed in "
+                f"--labels_csv not found on disk under {args.wsi_dir} — skipped "
+                f"(e.g. {', '.join(missing[:5])}{' …' if len(missing) > 5 else ''})."
+            )
+        if not rows:
+            print(f"[WARN] stain '{stain}': no slides on disk — skipping.")
+            continue
 
         # Wrap the encoder with this stain's reference (passthrough if ref_path is None).
         wrapped = build_stain_encoder(
