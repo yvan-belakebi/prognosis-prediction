@@ -44,9 +44,11 @@ def select_val_patients(
         n = max(1, math.ceil(frac * len(g)))
         return g.sample(n=n, random_state=random_state)
 
-    return (patient_df.groupby("stratum", group_keys=False).apply(_sample))[
-        patient_col
-    ].tolist()
+    return (
+        patient_df.groupby("stratum", group_keys=False).apply(
+            _sample, include_groups=False
+        )
+    )[patient_col].tolist()
 
 
 def write_val_csvs(val_csv, iga_val_files, registry_val_files):
