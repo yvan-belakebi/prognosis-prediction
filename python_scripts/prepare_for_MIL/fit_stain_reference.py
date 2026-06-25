@@ -578,6 +578,15 @@ def main():
         default=5,
         help="Number of patches to save when --save_patches is set.",
     )
+    parser.add_argument(
+        "--skip_errors",
+        action="store_true",
+        help=(
+            "Continue processing remaining stains if computing a reference fails "
+            "(e.g. no valid tissue patches found) instead of crashing. "
+            "Failed stains are reported in a summary at the end."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -673,17 +682,36 @@ def main():
         print(f"Reference saved → {out_path}")
         return out_path
 
+    def _run_one_safe(stain_label, slide_filter):
+        """Wrap _run_one to optionally swallow failures when --skip_errors is set."""
+        try:
+            _run_one(stain_label, slide_filter)
+            return None
+        except Exception as exc:
+            if not args.skip_errors:
+                raise
+            label = stain_label if stain_label is not None else "<all slides>"
+            print(f"  [ERROR] Skipping stain {label!r}: {exc}")
+            return (label, str(exc))
+
     if args.labels_csv is not None:
         import pandas as pd
 
         df = pd.read_csv(args.labels_csv)
         stains = sorted(df["stain"].dropna().unique())
         print(f"Found {len(stains)} stain(s) in {args.labels_csv}: {stains}")
+        failures = []
         for stain in stains:
             slide_filter = set(df.loc[df["stain"] == stain, "file_name"].astype(str))
-            _run_one(stain, slide_filter)
+            failure = _run_one_safe(stain, slide_filter)
+            if failure is not None:
+                failures.append(failure)
+        if failures:
+            print(f"\n{len(failures)} stain(s) failed and were skipped:")
+            for label, msg in failures:
+                print(f"  - {label}: {msg}")
     else:
-        _run_one(None, None)
+        _run_one_safe(None, None)
 
 
 if __name__ == "__main__":
