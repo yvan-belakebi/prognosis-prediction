@@ -38,6 +38,7 @@ from define_labels import (
     load_iga_cohort,
     load_registry_cohort,
     load_non_iga_cohort,
+    make_bag_name,
 )  # noqa: E402
 from val_split import select_val_patients, write_val_csvs  # noqa: E402
 
@@ -47,13 +48,17 @@ from val_split import select_val_patients, write_val_csvs  # noqa: E402
 
 
 def _write_cohort(df, label_col, patient_col, output_dir, val_patients, split_kwargs):
-    """Assign split, save .npy files, return the annotated DataFrame."""
+    """Assign split, save .npy files, return the annotated DataFrame.
+
+    Files are written under the bag_name path (biopsy_number/file_name when
+    nested, file_name when flat); subdirectories are created as needed.
+    """
     df = df.dropna(subset=[label_col]).copy()
     df["split"] = df[patient_col].isin(val_patients).map({True: "val", False: "train"})
 
     os.makedirs(output_dir, exist_ok=True)
     for _, row in df.iterrows():
-        path = os.path.join(output_dir, f"{row['file_name']}.npy")
+        path = os.path.join(output_dir, f"{row['bag_name']}.npy")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         np.save(path, np.array(float(row[label_col]), dtype=np.float64))
     return df
@@ -115,6 +120,24 @@ def main():
     )
     parser.add_argument("--random_state", type=int, default=42)
 
+    # Biopsy-nesting layout for the written .npy labels and validation lists.
+    # The summary CSV always carries biopsy_number and file_name as separate
+    # columns; this flag only controls the on-disk bag-name form (make_bag_name).
+    parser.add_argument(
+        "--nest_biopsy",
+        dest="nest_biopsy",
+        action="store_true",
+        default=True,
+        help="Nest .npy labels and val lists under biopsy dirs "
+        "(biopsy_number/file_name). Default; matches the nested WSI layout.",
+    )
+    parser.add_argument(
+        "--no_nest_biopsy",
+        dest="nest_biopsy",
+        action="store_false",
+        help="Flat layout: key .npy labels and val lists by file_name only.",
+    )
+
     # Output directories
     parser.add_argument("--iga_output_dir", default="WSI/IgA/labels_regression")
     parser.add_argument(
@@ -161,9 +184,12 @@ def main():
             f"Available: {[c for c in iga_full.columns if 'egfr' in c.lower() or 'GFR' in c]}"
         )
 
-    iga_df = iga_full[["file_name", "PERSON_NR", args.iga_label_col, "Stain"]].copy()
+    iga_df = iga_full[
+        ["biopsy_number", "file_name", "PERSON_NR", args.iga_label_col, "Stain"]
+    ].copy()
     iga_df = iga_df.rename(columns={args.iga_label_col: "eGFR", "PERSON_NR": "patient"})
     iga_df["source"] = "IgA"
+    iga_df["bag_name"] = make_bag_name(iga_df, args.nest_biopsy)
 
     iga_val_patients = (
         select_val_patients(iga_df, "patient", "eGFR", agg="mean", **split_kwargs)
@@ -194,9 +220,12 @@ def main():
             f"Available: {[c for c in reg_full.columns if 'egfr' in c.lower() or 'GFR' in c]}"
         )
 
-    reg_df = reg_full[["file_name", "patient", args.registry_label_col, "stain"]].copy()
+    reg_df = reg_full[
+        ["biopsy_number", "file_name", "patient", args.registry_label_col, "stain"]
+    ].copy()
     reg_df = reg_df.rename(columns={args.registry_label_col: "eGFR", "stain": "Stain"})
     reg_df["source"] = "registry"
+    reg_df["bag_name"] = make_bag_name(reg_df, args.nest_biopsy)
 
     reg_val_patients = (
         select_val_patients(reg_df, "patient", "eGFR", agg="mean", **split_kwargs)
@@ -232,16 +261,20 @@ def main():
             f"— non-IgA will be skipped."
         )
         non_iga_df = pd.DataFrame(
-            columns=["file_name", "eGFR", "Stain", "patient", "source", "split"]
+            columns=[
+                "biopsy_number", "file_name", "eGFR", "Stain",
+                "patient", "source", "split", "bag_name",
+            ]
         )
     else:
         non_iga_df = non_iga_full[
-            ["file_name", "patient", args.registry_label_col, "stain"]
+            ["biopsy_number", "file_name", "patient", args.registry_label_col, "stain"]
         ].copy()
         non_iga_df = non_iga_df.rename(
             columns={args.registry_label_col: "eGFR", "stain": "Stain"}
         )
         non_iga_df["source"] = "non_IgA"
+        non_iga_df["bag_name"] = make_bag_name(non_iga_df, args.nest_biopsy)
         # val_patients=[] → all rows get split="train"
         non_iga_df = _write_cohort(
             non_iga_df, "eGFR", "patient", args.non_iga_output_dir, [], split_kwargs
@@ -254,7 +287,9 @@ def main():
 
     # ── Combined outputs ──────────────────────────────────────────────────────
 
-    _cols = ["file_name", "eGFR", "Stain", "patient", "source", "split"]
+    # biopsy_number and file_name (slide stem) are separate columns so downstream
+    # can match flat (file_name) or nested (biopsy_number/file_name) layouts.
+    _cols = ["biopsy_number", "file_name", "eGFR", "Stain", "patient", "source", "split"]
     combined = pd.concat(
         [iga_df[_cols], reg_df[_cols], non_iga_df[_cols]],
         ignore_index=True,
@@ -265,10 +300,15 @@ def main():
     combined.to_csv(args.summary_csv, index=False)
 
     # Validation slide lists (combined + per-source) — see val_split.write_val_csvs.
+    # The val lists carry the on-disk bag name under the "file_name" column header.
     val_list = write_val_csvs(
         args.val_csv,
-        iga_df[iga_df["split"] == "val"][["file_name"]],
-        reg_df[reg_df["split"] == "val"][["file_name"]],
+        iga_df[iga_df["split"] == "val"][["bag_name"]].rename(
+            columns={"bag_name": "file_name"}
+        ),
+        reg_df[reg_df["split"] == "val"][["bag_name"]].rename(
+            columns={"bag_name": "file_name"}
+        ),
     )
 
     print(f"\nCombined val slides: {len(val_list)}")

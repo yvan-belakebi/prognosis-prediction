@@ -7,14 +7,19 @@ Run from the project root:
 Key outputs
 -----------
   Per-slide .npy label files (shape (2,), float64: [time, event]) consumed by
-  MIL.py --labels_paths.  Mirrors define_regression_labels.py; nested
-  biopsy_dirname/slide_stem paths are created under each cohort's output dir:
+  MIL.py --labels_paths.  Mirrors define_regression_labels.py.  By default the
+  bag path is nested (biopsy_number/file_name); pass --no_nest_biopsy for a flat
+  layout (file_name only).  Files are written under each cohort's output dir:
       <iga_output_dir>/        (default WSI/IgA/labels)
       <registry_output_dir>/   (default WSI/IgA_registry/labels)
       <non_iga_output_dir>/    (default WSI/non_IgA/labels — always train)
 
-  <output_dir>/labels_combined.csv          All slides (IgA + registry + non-IgA) with
-                                            time, event, stain, source, split.
+  <output_dir>/labels_unfiltered.csv        All slides (IgA + registry + non-IgA) with
+                                            biopsy_number, file_name, time, event,
+                                            stain, source, split.  biopsy_number and
+                                            file_name (slide stem) are separate columns
+                                            so downstream can match flat (file_name) or
+                                            nested (biopsy_number/file_name) layouts.
                                             non-IgA slides always have split="train".
   <val_csv>                                 Flat list of validation slide names
                                             (file_name column); consumed directly
@@ -99,18 +104,37 @@ def biopsy_to_dirname(biopsy_nr):
     return str(biopsy_nr).replace("/", "-").strip()
 
 
+def make_bag_name(df, nest_biopsy):
+    """Build the on-disk bag name from the biopsy_number and file_name columns.
+
+    The bag name is what discover_bags() returns and what MIL.py/regression_MIL.py
+    match against, so it must mirror the WSI feature directory layout:
+
+        nested (default) : 'biopsy_number/file_name'   (e.g. '34-12/slide_abc')
+        flat             : 'file_name'                  (e.g. 'slide_abc')
+
+    file_name holds only the slide stem; biopsy_number holds the biopsy
+    directory name.  Keeping them as separate CSV columns lets downstream code
+    reconstruct either layout — this helper picks one for the .npy label files
+    and validation lists written by this script.
+    """
+    if nest_biopsy:
+        return df["biopsy_number"].astype(str) + "/" + df["file_name"].astype(str)
+    return df["file_name"].astype(str)
+
+
 def write_npy_labels(df, output_dir):
     """Write one .npy per slide containing [time, event] (shape (2,), float64).
 
     Mirrors define_regression_labels._write_cohort: rows with a missing time or
-    event are dropped, and the nested file_name path (biopsy_dirname/slide_stem)
-    is recreated as subdirectories under output_dir.  Returns the number of
-    label files written.
+    event are dropped, and the bag_name path (biopsy_number/file_name when
+    nested, file_name when flat) is recreated as subdirectories under
+    output_dir.  Returns the number of label files written.
     """
     df = df.dropna(subset=["time", "event"]).copy()
     os.makedirs(output_dir, exist_ok=True)
     for _, row in df.iterrows():
-        path = os.path.join(output_dir, f"{row['file_name']}.npy")
+        path = os.path.join(output_dir, f"{row['bag_name']}.npy")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         np.save(
             path,
@@ -151,24 +175,27 @@ def load_iga_cohort(iga_slides_csv, iga_followup_csv):
     df = pd.merge(slides, followup, on="Biopsy Number", how="inner")
     df["time"] = df.apply(_follow_up_years, axis=1) * 365.25  # years → days
     df["event"] = (df["RRT_or_death"] == "Yes").astype(int)
-    df["slide_stem"] = df["File Location"].apply(extract_file_name)
-    df["biopsy_dirname"] = df["Biopsy Number"].apply(biopsy_to_dirname)
-    df["file_name"] = df["biopsy_dirname"] + "/" + df["slide_stem"]
+    # file_name is the slide stem; biopsy_number is the biopsy directory name.
+    # They are kept separate so downstream can reconstruct either the flat
+    # ('file_name') or nested ('biopsy_number/file_name') layout — see make_bag_name.
+    df["file_name"] = df["File Location"].apply(extract_file_name)
+    df["biopsy_number"] = df["Biopsy Number"].apply(biopsy_to_dirname)
     df["source"] = "IgA"
     return df
 
 
 def _parse_registry_time_event(df):
-    """Add time (days), event, file_name, and biopsy_dirname columns to registry data."""
+    """Add time (days), event, file_name, and biopsy_number columns to registry data."""
     df["time"] = (
         df["time_to_event"].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0].astype(float)
     )
     df["event"] = df["Event"].notna().astype(int)
-    df["slide_stem"] = df["ANON_name"].astype(str)
-    df["biopsy_dirname"] = (
+    # file_name is the slide stem; biopsy_number is the biopsy directory name
+    # (kept separate so downstream can pick flat or nested layout — see make_bag_name).
+    df["file_name"] = df["ANON_name"].astype(str)
+    df["biopsy_number"] = (
         df["biop_number"].astype(str).apply(transform_label).apply(biopsy_to_dirname)
     )
-    df["file_name"] = df["biopsy_dirname"] + "/" + df["slide_stem"]
     df.rename(
         columns={"ID_diagnosis": "patient", "Stain": "stain"},
         inplace=True,
@@ -254,6 +281,24 @@ def main():
         help="Directory for all other CSV outputs.",
     )
 
+    # Biopsy-nesting layout for the written .npy labels and validation lists.
+    # The CSVs always carry biopsy_number and file_name as separate columns;
+    # this flag only controls the on-disk bag-name form (see make_bag_name).
+    parser.add_argument(
+        "--nest_biopsy",
+        dest="nest_biopsy",
+        action="store_true",
+        default=True,
+        help="Nest .npy labels and val lists under biopsy dirs "
+        "(biopsy_number/file_name). Default; matches the nested WSI layout.",
+    )
+    parser.add_argument(
+        "--no_nest_biopsy",
+        dest="nest_biopsy",
+        action="store_false",
+        help="Flat layout: key .npy labels and val lists by file_name only.",
+    )
+
     # Per-cohort .npy label output directories (consumed by MIL.py --labels_paths)
     parser.add_argument(
         "--iga_output_dir",
@@ -294,6 +339,7 @@ def main():
     # ── Load cohorts ──────────────────────────────────────────────────────────
 
     iga_df = load_iga_cohort(args.iga_slides_csv, args.iga_followup_csv)
+    iga_df["bag_name"] = make_bag_name(iga_df, args.nest_biopsy)
     iga_df["Biopsy_date"] = pd.to_datetime(iga_df["Biopsy_date"], errors="coerce")
     iga_backup = iga_df.copy()  # full IgA cohort before any filtering
 
@@ -306,18 +352,20 @@ def main():
     # before training (e.g. passed to sync_dirs.py or inspected manually).
     iga_excluded = (
         iga_backup.loc[
-            ~iga_backup["file_name"].isin(set(iga_df["file_name"])),
-            ["file_name", "Biopsy_date", "Stain"],
+            ~iga_backup["bag_name"].isin(set(iga_df["bag_name"])),
+            ["biopsy_number", "file_name", "Biopsy_date", "Stain"],
         ]
-        .drop_duplicates("file_name")
-        .sort_values("file_name")
+        .drop_duplicates(["biopsy_number", "file_name"])
+        .sort_values(["biopsy_number", "file_name"])
         .reset_index(drop=True)
     )
 
     registry_df = load_registry_cohort(args.registry_csv)
+    registry_df["bag_name"] = make_bag_name(registry_df, args.nest_biopsy)
 
     # Non-IgA registry — always train, never validated
     non_iga_df = load_non_iga_cohort(args.registry_csv)
+    non_iga_df["bag_name"] = make_bag_name(non_iga_df, args.nest_biopsy)
     non_iga_df["split"] = "train"
 
     # ── Assign train / val splits ─────────────────────────────────────────────
@@ -363,16 +411,15 @@ def main():
     excluded_path = os.path.join(args.output_dir, "iga_excluded_slides.csv")
     iga_excluded.to_csv(excluded_path, index=False)
 
-    # Combined label file (all three cohorts)
+    # Combined label file (all three cohorts).  biopsy_number and file_name are
+    # separate columns so downstream can match either the flat (file_name) or
+    # nested (biopsy_number/file_name) WSI layout.
+    _label_cols = ["biopsy_number", "file_name", "time", "event", "stain", "source", "split"]
     iga_labels = iga_df[
-        ["file_name", "time", "event", "Stain", "source", "split"]
+        ["biopsy_number", "file_name", "time", "event", "Stain", "source", "split"]
     ].rename(columns={"Stain": "stain"})
-    registry_labels = registry_df[
-        ["file_name", "time", "event", "stain", "source", "split"]
-    ]
-    non_iga_labels = non_iga_df[
-        ["file_name", "time", "event", "stain", "source", "split"]
-    ]
+    registry_labels = registry_df[_label_cols]
+    non_iga_labels = non_iga_df[_label_cols]
     labels_unfiltered = pd.concat(
         [iga_labels, registry_labels, non_iga_labels], ignore_index=True
     )
@@ -381,11 +428,16 @@ def main():
     )
 
     # Validation slide lists (combined + per-source) — see val_split.write_val_csvs.
-    # Combined list is consumed by MIL.py --val_csv.
+    # The val lists carry the on-disk bag name (matched directly against
+    # discover_bags), so they use bag_name under the "file_name" column header.
     survival_val = write_val_csvs(
         args.val_csv,
-        iga_df[iga_df["split"] == "val"][["file_name"]],
-        registry_df[registry_df["split"] == "val"][["file_name"]],
+        iga_df[iga_df["split"] == "val"][["bag_name"]].rename(
+            columns={"bag_name": "file_name"}
+        ),
+        registry_df[registry_df["split"] == "val"][["bag_name"]].rename(
+            columns={"bag_name": "file_name"}
+        ),
     )
 
     # ── Summary ───────────────────────────────────────────────────────────────

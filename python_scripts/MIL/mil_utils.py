@@ -58,11 +58,21 @@ def get_filtered_bag_names(features_path, stain_csv, stain_filter):
 
     Returns None when stain_csv is None or 'none', meaning no filtering is applied
     and ProcessedMILDataset will auto-discover all bags in features_path.
+
+    The stain CSV stores biopsy_number and file_name (slide stem) as separate
+    columns. This builds both the flat ('file_name') and nested
+    ('biopsy_number/file_name') candidate bag names and intersects them with the
+    bags actually on disk, so it works whether or not the WSI layout is nested.
     """
     if stain_csv is None or stain_csv.lower() == "none":
         return None
     df = pd.read_csv(stain_csv)
-    matching = set(df.loc[df["stain"] == stain_filter, "file_name"].astype(str))
+    rows = df.loc[df["stain"] == stain_filter]
+    matching = set(rows["file_name"].astype(str))
+    if "biopsy_number" in rows.columns:
+        matching |= set(
+            rows["biopsy_number"].astype(str) + "/" + rows["file_name"].astype(str)
+        )
     available = set(discover_bags(features_path))
     return sorted(matching & available)
 
