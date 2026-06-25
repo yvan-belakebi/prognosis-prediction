@@ -178,7 +178,7 @@ def _parse_registry_time_event(df):
 
 def load_registry_cohort(registry_csv):
     """Return the IgA registry cohort (is_IgA == True) with time, event, file_name."""
-    df = pd.read_csv(registry_csv)
+    df = pd.read_csv(registry_csv, low_memory=False)
     df = _parse_registry_time_event(df[df["is_IgA"] == True].copy())
     df["source"] = "registry"
     return df
@@ -190,7 +190,7 @@ def load_non_iga_cohort(registry_csv):
     Non-IgA slides are always assigned to the training set; they are never
     included in the validation split.
     """
-    df = pd.read_csv(registry_csv)
+    df = pd.read_csv(registry_csv, low_memory=False)
     df = _parse_registry_time_event(df[df["is_IgA"] == False].copy())
     df["source"] = "non_IgA"
     return df
