@@ -35,6 +35,10 @@ Notes:
       per-stain runs over the same job_dir never conflict.
     * --enc_name_suffix keeps stain-normalised features in features_{backbone}{suffix}/ so a
       later raw-patch run doesn't overwrite them (default: no suffix → features_{backbone}/).
+    * When the on-disk slides are raw-named but --labels_csv is keyed by the anonymized name,
+      pass --mapping_csv (slide_name_mapping.csv: old_name/new_name). Each anonymized file_name
+      is translated back to its raw name so TRIDENT can locate the file on disk; the stain
+      assignment comes from --labels_csv as before.
 """
 
 import argparse
@@ -59,6 +63,7 @@ if _trident_dir not in sys.path:
 from trident import Processor  # noqa: E402
 from trident.patch_encoder_models.load import encoder_factory  # noqa: E402
 
+from apply_slide_rename import load_mapping  # noqa: E402
 from stain_norm_encoder import build_stain_encoder  # noqa: E402
 from trident_io import coords_dir_name  # noqa: E402
 
@@ -90,6 +95,17 @@ def main():
         "--stain_refs_dir",
         required=True,
         help="Directory of .pt references from fit_stain_reference.py (one per stain).",
+    )
+    parser.add_argument(
+        "--mapping_csv",
+        default=None,
+        help=(
+            "Optional old_name->new_name CSV (reorganize_wsi_dirs.py --rename output, "
+            "slide_name_mapping.csv). When the on-disk slides are raw-named but --labels_csv "
+            "is keyed by the anonymized name, this translates each anonymized 'file_name' back "
+            "to its raw name so TRIDENT can locate the file on disk. The stain assignment still "
+            "comes from --labels_csv; only the on-disk filename is translated."
+        ),
     )
     parser.add_argument(
         "--backbone",
@@ -141,6 +157,15 @@ def main():
         parser.error("--labels_csv must contain 'file_name' and 'stain' columns.")
     has_mpp = "mpp" in df.columns
 
+    # load_mapping gives {raw_name: anonymized_name}; --labels_csv is keyed by the anonymized
+    # name while the files on disk are raw-named, so invert it to translate each file_name
+    # back to its raw on-disk name. Names absent from the mapping (already-safe) pass through.
+    anon_to_raw = {anon: raw for raw, anon in load_mapping(args.mapping_csv).items()} \
+        if args.mapping_csv else {}
+    if anon_to_raw:
+        print(f"Loaded {len(anon_to_raw)} name mapping(s) (anonymized → raw) "
+              f"from {args.mapping_csv}.")
+
     # Build the base encoder once; it is re-wrapped per stain with a different reference.
     print(f"Loading TRIDENT encoder '{args.backbone}' …")
     base_encoder = encoder_factory(
@@ -170,7 +195,8 @@ def main():
         # Write a TRIDENT custom_list_of_wsis CSV (column 'wsi', optional 'mpp').
         rows = []
         for _, r in group.iterrows():
-            row = {"wsi": f"{r['file_name']}{slide_ext}"}
+            disk_name = anon_to_raw.get(str(r["file_name"]), r["file_name"])
+            row = {"wsi": f"{disk_name}{slide_ext}"}
             if has_mpp and pd.notna(r.get("mpp")):
                 row["mpp"] = r["mpp"]
             rows.append(row)
