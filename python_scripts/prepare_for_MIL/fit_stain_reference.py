@@ -188,15 +188,16 @@ def _discover_trident_coord_files(patches_dir, biopsy_lookup):
     """Return list of (h5_path, biopsy_nr, slide_id) for TRIDENT coord files.
 
     TRIDENT writes flat '{slide_id}_patches.h5' files under '{job_dir}/{mag}x_.../patches'.
-    biopsy_nr is recovered from biopsy_lookup so the output matches _discover_coord_files
-    (so labels filtering and WSI lookup behave identically to the CLAM path).
+    The '_patches' convention is owned by trident_io.discover_coords (single source of
+    truth); biopsy_nr is recovered from biopsy_lookup so the output matches
+    _discover_coord_files (labels filtering and WSI lookup behave as in the CLAM path).
     """
-    results = []
-    for entry in sorted(os.scandir(patches_dir), key=lambda e: e.name):
-        if entry.is_file() and entry.name.endswith("_patches.h5"):
-            slide_id = entry.name[: -len("_patches.h5")]
-            results.append((entry.path, biopsy_lookup.get(slide_id, ""), slide_id))
-    return results
+    from trident_io import discover_coords
+
+    return [
+        (path, biopsy_lookup.get(slide_id, ""), slide_id)
+        for slide_id, path in sorted(discover_coords(patches_dir).items())
+    ]
 
 
 def _read_coord_file(h5_path):

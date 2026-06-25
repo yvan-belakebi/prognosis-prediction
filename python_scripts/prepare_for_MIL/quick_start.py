@@ -28,6 +28,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from trident_io import coords_dir_name, features_dir  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 TRIDENT_RUNNER = ROOT / "python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py"
 STAIN_FEATS = ROOT / "python_scripts/prepare_for_MIL/run_trident_stain_feats.py"
@@ -168,10 +171,9 @@ def collect_config():
         cfg["labels_csv"] = ask("Labels CSV (file_name,stain[,mpp])", "label_csvs/labels_unfiltered.csv")
         cfg["stain_refs_dir"] = ask("Stain references dir (.pt per stain)", "stain_refs/IgA")
 
-    mag_str = f"{cfg['mag']:g}"
-    cfg["coords_dir"] = f"{mag_str}x_{cfg['patch_size']}px_{cfg['overlap']}px_overlap"
-    cfg["features_subdir"] = os.path.join(
-        cfg["job_dir"], cfg["coords_dir"], f"features_{cfg['backbone']['trident']}"
+    cfg["coords_dir"] = coords_dir_name(cfg["mag"], cfg["patch_size"], cfg["overlap"])
+    cfg["features_subdir"] = features_dir(
+        cfg["job_dir"], cfg["coords_dir"], cfg["backbone"]["trident"]
     )
     cfg["reorg_output"] = ask(
         "Reorganised output dir (biopsy-nested)",

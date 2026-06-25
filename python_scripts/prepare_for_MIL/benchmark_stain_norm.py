@@ -42,7 +42,6 @@ import shutil
 import sys
 import time
 
-import h5py
 import pandas as pd
 import torch
 
@@ -63,6 +62,14 @@ from trident.patch_encoder_models.load import encoder_factory  # noqa: E402
 
 from run_trident_stain_feats import _sanitize_stain_name  # noqa: E402
 from stain_norm_encoder import build_stain_encoder  # noqa: E402
+from trident_io import (  # noqa: E402
+    coords_dir_name,
+    count_patches,
+    discover_coords,
+    feature_path,
+    features_dir,
+    patches_dir,
+)
 
 _METHODS = ("macenko", "vahadane")
 
@@ -91,32 +98,33 @@ def _select_subset(df, n_slides, seed):
     return df.loc[chosen]
 
 
-def _count_patches(job_dir, coords_dir, file_names, slide_ext):
-    """Sum patch counts for the subset from TRIDENT coord files (best effort).
+def _count_patches(job_dir, coords_dir, file_names):
+    """Sum patch counts for the subset, pairing slides to coord files by on-disk scan.
 
-    Returns (total_patches, n_with_coords). Slides without a coord file (seg/coords not
-    run, or all-background) contribute 0 and are reported via n_with_coords.
+    Uses discover_coords (which strips TRIDENT's '_patches' suffix from the files that
+    actually exist) instead of building '{name}_patches.h5' from the labels CSV, so a
+    file_name that does not match any coord-file stem is reported explicitly rather than
+    silently counted as missing.
+
+    Returns (total_patches, found_names, missing_names).
     """
-    patches_dir = os.path.join(job_dir, coords_dir, "patches")
-    total, found = 0, 0
+    available = discover_coords(patches_dir(job_dir, coords_dir))
+    total = 0
+    found, missing = [], []
     for name in file_names:
-        h5_path = os.path.join(patches_dir, f"{name}_patches.h5")
-        if not os.path.isfile(h5_path):
+        path = available.get(name)
+        if path is None:
+            missing.append(name)
             continue
-        try:
-            with h5py.File(h5_path, "r") as f:
-                total += int(f["coords"].shape[0])
-                found += 1
-        except (OSError, KeyError):
-            continue
-    return total, found
+        total += count_patches(path)
+        found.append(name)
+    return total, found, missing
 
 
 def _clear_features(job_dir, coords_dir, enc_name, file_names):
     """Delete the benchmark feature .h5 for the subset so smart-resume recomputes them."""
-    feat_dir = os.path.join(job_dir, coords_dir, f"features_{enc_name}")
     for name in file_names:
-        fp = os.path.join(feat_dir, f"{name}.h5")
+        fp = feature_path(job_dir, coords_dir, enc_name, name)
         if os.path.isfile(fp):
             os.remove(fp)
 
@@ -262,8 +270,7 @@ def main():
 
     slide_ext = args.slide_ext if args.slide_ext.startswith(".") else f".{args.slide_ext}"
     device = f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
-    mag_str = f"{float(args.mag):g}"
-    coords_dir = f"{mag_str}x_{args.patch_size}px_{args.overlap}px_overlap"
+    coords_dir = coords_dir_name(args.mag, args.patch_size, args.overlap)
 
     df = pd.read_csv(args.labels_csv)
     if "file_name" not in df.columns or "stain" not in df.columns:
@@ -272,27 +279,45 @@ def main():
 
     df_subset = _select_subset(df, args.n_slides, args.seed)
     file_names = [str(r["file_name"]) for _, r in df_subset.iterrows()]
-    n_patches, n_with_coords = _count_patches(
-        args.job_dir, coords_dir, file_names, slide_ext
-    )
+    n_patches, found, missing = _count_patches(args.job_dir, coords_dir, file_names)
+    n_with_coords = len(found)
 
     print("=" * 70)
     print("STAIN NORMALISATION SPEED BENCHMARK — Macenko vs Vahadane")
     print("=" * 70)
     print(f"Device          : {device}")
     print(f"Backbone        : {args.backbone}")
+    print(f"Coords dir      : {coords_dir}")
     print(f"Subset          : {len(df_subset)} slide(s) across "
           f"{df_subset['stain'].nunique()} stain(s)")
     print(f"Coord files     : {n_with_coords}/{len(df_subset)} found  "
           f"({n_patches} patches total)")
     print(f"Batch size      : {args.batch_size}  |  repeats: {args.repeats}")
     for _, r in df_subset.iterrows():
-        print(f"   - {r['file_name']}  [{r['stain']}]")
+        flag = "" if str(r["file_name"]) in found else "   [no coord file]"
+        print(f"   - {r['file_name']}  [{r['stain']}]{flag}")
+
+    if missing:
+        pdir = patches_dir(args.job_dir, coords_dir)
+        present = sorted(discover_coords(pdir))
+        print(
+            f"\n[WARN] {len(missing)} of {len(df_subset)} subset slide(s) have no coord "
+            f"file in {pdir}."
+        )
+        print(
+            f"       {len(present)} coord file(s) exist there"
+            + (f"; e.g. {present[:3]}" if present else " (directory empty or missing)")
+            + "."
+        )
+        print(
+            "       Likely causes: seg+coords were run at a different "
+            "--mag/--patch_size/--overlap (the coords_dir must match exactly), or the "
+            "labels file_name does not match the WSI basename."
+        )
     if n_with_coords == 0:
         print(
-            "\n[ERROR] No coord files found for the subset under "
-            f"{os.path.join(args.job_dir, coords_dir, 'patches')}. "
-            "Run the seg + coords stages first."
+            "\n[ERROR] No coord files matched the subset — cannot benchmark. "
+            "Run seg + coords for these slides at this coords_dir first."
         )
         return 1
 
@@ -350,9 +375,7 @@ def main():
     # --- Cleanup ---------------------------------------------------------------
     if not args.keep_outputs:
         for method in _METHODS:
-            feat_dir = os.path.join(
-                args.job_dir, coords_dir, f"features_{enc_names[method]}"
-            )
+            feat_dir = features_dir(args.job_dir, coords_dir, enc_names[method])
             shutil.rmtree(feat_dir, ignore_errors=True)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         print("\nCleaned up throwaway benchmark outputs "

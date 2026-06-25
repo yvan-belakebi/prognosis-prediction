@@ -60,6 +60,7 @@ from trident import Processor  # noqa: E402
 from trident.patch_encoder_models.load import encoder_factory  # noqa: E402
 
 from stain_norm_encoder import build_stain_encoder  # noqa: E402
+from trident_io import coords_dir_name  # noqa: E402
 
 
 def _sanitize_stain_name(stain: str) -> str:
@@ -132,8 +133,7 @@ def main():
     device = (
         f"cuda:{args.gpu_index}" if torch.cuda.is_available() else "cpu"
     )
-    mag_str = f"{float(args.mag):g}"
-    coords_dir = f"{mag_str}x_{args.patch_size}px_{args.overlap}px_overlap"
+    coords_dir = coords_dir_name(args.mag, args.patch_size, args.overlap)
 
     # --- Group slides by stain --------------------------------------------------
     df = pd.read_csv(args.labels_csv)
