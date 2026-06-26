@@ -86,6 +86,10 @@ python python_scripts/prepare_for_MIL/benchmark_stain_norm.py --wsi_dir data/raw
 # Reorganize flat TRIDENT features into the biopsy-nested layout (recovers biopsy_nr from the raw WSI dir)
 python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --copy
 
+Or actually:
+
+python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --mapping_out followup_data/derived/renamed/slide_name_mapping_trident.csv --slide_dirs WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --apply
+
 4) MIL pooling
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
