@@ -29,6 +29,8 @@ python3.11 -m venv .trident_venv
 pip install -r requirements.txt
 cd python_scripts/external_repositories/TRIDENT-main/
 pip install -e .
+cd ../torchmil
+pip install -e .
 cd /data/yvan-files/prognosis_prediction
 If running on vm without internet access, the errors will guide you to allow you to run locally.
 In python_scripts/external_repositories/TRIDENT-main/trident/patch_encoder_models/local_ckpts.json change the paths to your local installation of the models, e.g. "hoptimus1": "/data/yvan-files/prognosis-prediction/models/hoptimus1/pytorch_model.bin",
@@ -48,12 +50,12 @@ biopsy-nested layout (WSI/IgA/UNI2-h_feats) consumed by the MIL stage.
 python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task seg --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --segmenter hest --gpus 0 --search_nested
 
 # Patch coordinates (20x, 224 px, no overlap)
-python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 224 --overlap 0 --search_nested
+python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 224 --overlap 0 --search_nested (--dump_patches)
 
 # Labels definition
-python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/labels --iga_date_filter None
+python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/trident/labels --iga_date_filter None
 
-python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/labels_regression --iga_date_filter None
+python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/trident/labels_regression --iga_date_filter None
 
 3) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
 
@@ -82,10 +84,10 @@ python python_scripts/prepare_for_MIL/benchmark_stain_norm.py --wsi_dir data/raw
 #   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 224 --overlap 0 --gpus 0 --search_nested
 
 # Reorganize flat TRIDENT features into the biopsy-nested layout (recovers biopsy_nr from the raw WSI dir)
-python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/UNI2-h_feats --copy
+python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --copy
 
 4) MIL pooling
-python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
+python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
 # Attention map
 python python_scripts/MIL/visualize_attention.py --features_paths WSI/IgA/UNI2-h_feats --checkpoint checkpoints_regression_transmil/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_IgA.csv
