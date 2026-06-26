@@ -8,7 +8,7 @@ Picks one biopsy from each of three strata:
 
 For each selected biopsy the script runs a trained MIL model with return_att=True,
 normalises the per-patch attention weights, and overlays them as a colour heatmap
-(green = low, red = high) on a spatial canvas reconstructed from patch coordinates.
+(blue = low → yellow = high) on a spatial canvas reconstructed from patch coordinates.
 
 Usage:
     # Survival ABMIL — coords auto-read from the features .h5 (no --coords_paths needed)
@@ -67,12 +67,41 @@ from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import dsmil as dsmil_module
 from torchmil.models import transmil as transmil_module
-from torchmil.utils import add_self_loops, build_adj, normalize_adj
-from torchmil.visualize.vis_wsi import draw_heatmap_wsi
+from matplotlib.colors import LinearSegmentedColormap
 
-# Deep blue (high attention) → Pink (low attention)
-_HIGH_COLOR = np.array([0.039, 0.118, 0.588])
-_LOW_COLOR = np.array([1.0, 0.588, 0.706])
+from torchmil.utils import add_self_loops, build_adj, normalize_adj
+
+# Attention colour gradient (low → high):
+#   Solid Blue → Scooter → Vibrant Blue Green → Tech Green → Vibrant Lime →
+#   Blaze Yellow
+_GRADIENT_HEX = ["#1C6FF8", "#27BBE0", "#31DB92", "#1BF118", "#9BFA24", "#FEF720"]
+_ATT_CMAP = LinearSegmentedColormap.from_list("attention", _GRADIENT_HEX)
+
+
+def _draw_heatmap_cmap(
+    canvas: np.ndarray,
+    values: np.ndarray,
+    cell_size: int,
+    row_array: np.ndarray,
+    col_array: np.ndarray,
+    cmap,
+    alpha: float,
+) -> np.ndarray:
+    """Blend a colormap-coloured heatmap onto canvas.
+
+    values must be normalised to [0, 1]; each entry is mapped through cmap to an
+    RGB colour and alpha-blended over the corresponding grid cell.
+    """
+    out = np.copy(canvas)
+    colors = cmap(values)[:, :3] * 255.0  # (N, 3) in [0, 255]
+    for i in range(len(row_array)):
+        y = row_array[i] * cell_size
+        x = col_array[i] * cell_size
+        out[y : y + cell_size, x : x + cell_size] = (
+            alpha * colors[i]
+            + (1.0 - alpha) * canvas[y : y + cell_size, x : x + cell_size]
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -508,15 +537,14 @@ def make_attention_canvas(
         vmin, vmax = att.min(), att.max()
     att = (att - vmin) / (vmax - vmin) if vmax > vmin else np.zeros_like(att)
 
-    canvas = draw_heatmap_wsi(
+    canvas = _draw_heatmap_cmap(
         canvas,
         att,
         display_cell_size,
         row_array,
         col_array,
+        cmap=_ATT_CMAP,
         alpha=alpha,
-        max_color=_HIGH_COLOR,
-        min_color=_LOW_COLOR,
     )
     return canvas
 
@@ -616,10 +644,9 @@ def plot_results(results: dict, model_type: str, task: str, output_dir: str):
 
     # Shared colourbar
     from matplotlib.cm import ScalarMappable
-    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.colors import Normalize
 
-    cmap = LinearSegmentedColormap.from_list("att", [_LOW_COLOR, _HIGH_COLOR])
-    sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+    sm = ScalarMappable(cmap=_ATT_CMAP, norm=Normalize(0, 1))
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=axes, fraction=0.015, pad=0.03, shrink=0.8)
     cbar.set_label("Attention (normalised)", fontsize=9)
