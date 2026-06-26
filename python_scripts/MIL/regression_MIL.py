@@ -61,6 +61,7 @@ from torchmil.models import patch_gcn as patch_gcn_module
 from mil_utils import (
     discover_bags,
     load_val_names,
+    load_authorized_slides,
     make_collate_fn,
     build_dataset,
     BiopsySampler,
@@ -376,6 +377,15 @@ def main():
              "Use .npy for the legacy pipeline.",
     )
     parser.add_argument("--val_csv", default=None)
+    parser.add_argument(
+        "--authorized_slides_csv",
+        default=None,
+        help=(
+            "CSV listing authorized slide basenames ('file_name' column or headerless). "
+            "When set, only bags whose file basename appears in this list are loaded "
+            "into the train/val dataloaders (applies to --features_paths, not pretrain)."
+        ),
+    )
     parser.add_argument("--stain_filter", default=None)
     parser.add_argument("--stain_csvs", nargs="+", default=None)
 
@@ -474,6 +484,7 @@ def main():
 
     # Build datasets
     val_names = load_val_names(args.val_csv)
+    authorized_slides = load_authorized_slides(args.authorized_slides_csv)
     train_dataset, val_dataset, train_labels, val_labels = build_dataset(
         args.features_paths,
         args.labels_paths,
@@ -486,6 +497,7 @@ def main():
         scan_labels_fn=scan_labels,
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
+        authorized_slides=authorized_slides,
     )
 
     print(

@@ -92,6 +92,28 @@ def load_val_names(val_csv):
     return set(col)
 
 
+def load_authorized_slides(authorized_csv):
+    """Load authorized slide basenames from a CSV/text file into a set.
+
+    Same format as load_val_names: a CSV with a 'file_name' column (header row)
+    or a headerless single-column file (one basename per row). Returns None when
+    authorized_csv is None, meaning no restriction is applied.
+    """
+    return load_val_names(authorized_csv)
+
+
+def _bag_authorized(bag_name, authorized_slides):
+    """True when a bag (flat 'slide' or nested 'biopsy/slide') is authorized.
+
+    Matches on either the full bag name or its file basename (the part after the
+    last '/'), so the authorized list may hold either form.
+    """
+    return (
+        bag_name in authorized_slides
+        or bag_name.rsplit("/", 1)[-1] in authorized_slides
+    )
+
+
 def _subsample_adj(adj, idx):
     """Subsample a 2D sparse or dense adjacency matrix to the given indices.
 
@@ -252,11 +274,16 @@ def build_dataset(
     scan_labels_fn=None,
     max_biopsies=None,
     file_ext=".h5",
+    authorized_slides=None,
 ):
     """Build train and (optionally) val datasets from lists of feature/label paths.
 
     Parameters
     ----------
+    authorized_slides : set[str], optional
+        When provided, only bags whose file basename (or full bag name) is in
+        this set are included in the train and val datasets. Pass ``None`` to
+        keep all discovered bags.
     scan_labels_fn : callable(labels_path, bag_names) -> np.ndarray, optional
         When provided, called on each train and val partition to collect scalar
         labels (e.g. class integers or regression targets) for use by samplers
@@ -285,6 +312,17 @@ def build_dataset(
     for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
         filtered = get_filtered_bag_names(fp, sc, stain_filter)
         available = filtered if filtered is not None else discover_bags(fp)
+
+        if authorized_slides is not None:
+            n_before = len(available)
+            available = [
+                n for n in available if _bag_authorized(n, authorized_slides)
+            ]
+            if len(available) < n_before:
+                print(
+                    f"  Excluded {n_before - len(available)} bags not in the "
+                    f"authorized slides list from {fp}"
+                )
 
         labelled = set(discover_bags(lp, extensions=(".npy",)))
         n_before = len(available)

@@ -79,6 +79,7 @@ from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
     load_val_names,
+    load_authorized_slides,
     make_collate_fn,
     build_dataset,
     BiopsySampler,
@@ -281,6 +282,15 @@ def main():
             "The same feature/label directories are used; bags are split at load time."
         ),
     )
+    parser.add_argument(
+        "--authorized_slides_csv",
+        default=None,
+        help=(
+            "CSV listing authorized slide basenames ('file_name' column or headerless). "
+            "When set, only bags whose file basename appears in this list are loaded "
+            "into the train/val dataloaders (applies to --features_paths, not pretrain)."
+        ),
+    )
 
     # --- Stain filtering (e.g. for IgA_light which contains multiple stains) -
     parser.add_argument(
@@ -473,6 +483,7 @@ def main():
 
     # --- Build datasets -------------------------------------------------------
     val_names = load_val_names(args.val_csv)
+    authorized_slides = load_authorized_slides(args.authorized_slides_csv)
     train_dataset, val_dataset, _, _ = build_dataset(
         args.features_paths,
         args.labels_paths,
@@ -484,6 +495,7 @@ def main():
         stain_filter=args.stain_filter,
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
+        authorized_slides=authorized_slides,
     )
 
     pretrain_dataset = None
