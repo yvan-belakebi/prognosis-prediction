@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from PIL import Image, ImageFilter
 
 # ---------------------------------------------------------------------------
 # Resolve the local torchmil package
@@ -520,6 +521,44 @@ def make_attention_canvas(
     return canvas
 
 
+def save_attention_tif(
+    coords: np.ndarray,
+    att_weights: np.ndarray,
+    category: str,
+    biopsy_short: str,
+    output_dir: str,
+    coords_in_pixels: bool,
+    patch_size: int,
+    alpha: float,
+    att_percentile: float,
+    blur_sigma: float,
+) -> None:
+    """Save a full-resolution TIFF of the attention map.
+
+    Unlike the PNG figures (which use --display_cell_size pixels per patch), the
+    TIFF renders each patch as a patch_size × patch_size square so the output
+    matches the original spatial scale of the extracted objects.  A Gaussian blur
+    of the given sigma (px) is applied to smooth the blocky per-patch appearance.
+    """
+    canvas = make_attention_canvas(
+        coords,
+        att_weights,
+        display_cell_size=patch_size,
+        coords_in_pixels=coords_in_pixels,
+        patch_size=patch_size,
+        alpha=alpha,
+        att_percentile=att_percentile,
+    )
+    img = Image.fromarray(canvas)
+    if blur_sigma > 0:
+        img = img.filter(ImageFilter.GaussianBlur(radius=blur_sigma))
+
+    safe_name = biopsy_short.replace("/", "_").replace("\\", "_")
+    tif_path = os.path.join(output_dir, f"attention_{category}_{safe_name}.tif")
+    img.save(tif_path, format="TIFF")
+    print(f"  Saved TIF → {tif_path}  ({img.width}×{img.height}px, blur σ={blur_sigma:g})")
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -759,8 +798,26 @@ def main():
             "outlier high-attention patches compressing the rest of the scale."
         ),
     )
+    parser.add_argument(
+        "--save_as_tif",
+        action="store_true",
+        help="In addition to the PNG, save a full-resolution TIFF per biopsy in "
+        "which each patch is rendered as a --patch_size × --patch_size square "
+        "(matching the original object scale).  A Gaussian blur "
+        "(--tif_blur_sigma) is applied to smooth the per-patch blocks.",
+    )
+    parser.add_argument(
+        "--tif_blur_sigma",
+        type=float,
+        default=None,
+        help="Gaussian blur radius (px) applied to the TIFF output.  "
+        "Default: patch_size / 4.  Set to 0 to disable blurring.",
+    )
 
     args = parser.parse_args()
+
+    if args.tif_blur_sigma is None:
+        args.tif_blur_sigma = args.patch_size / 4.0
 
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -834,6 +891,19 @@ def main():
                 alpha=args.alpha,
                 att_percentile=args.att_percentile,
             )
+            if args.save_as_tif:
+                save_attention_tif(
+                    coords,
+                    att,
+                    category,
+                    os.path.basename(str(biopsy_name)),
+                    args.output_dir,
+                    coords_in_pixels=args.coords_in_pixels,
+                    patch_size=args.patch_size,
+                    alpha=args.alpha,
+                    att_percentile=args.att_percentile,
+                    blur_sigma=args.tif_blur_sigma,
+                )
         else:
             print("  No coordinate file found — spatial map skipped.")
 
