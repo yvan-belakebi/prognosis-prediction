@@ -63,6 +63,12 @@ if (
 ):
     sys.path.insert(0, _torchmil_root)
 
+_mil_dir = os.path.join(_project_root, "python_scripts", "MIL")
+if os.path.isdir(_mil_dir) and _mil_dir not in sys.path:
+    sys.path.insert(0, _mil_dir)
+
+from mil_utils import load_authorized_slides, _bag_authorized
+
 from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import dsmil as dsmil_module
@@ -696,6 +702,13 @@ def main():
         "an embedded 'coords' key (produced by compute_feats_clam.py).",
     )
     parser.add_argument(
+        "--authorized_slides_csv",
+        default=None,
+        help="CSV listing authorized slide basenames ('file_name' column or "
+        "headerless). When set, only biopsies whose name appears in this list are "
+        "considered for stratification and visualisation.",
+    )
+    parser.add_argument(
         "--output_dir",
         default="attention_maps",
         help="Directory to save output PNG figures.",
@@ -853,6 +866,17 @@ def main():
     # 1. Labels
     print("\nLoading labels …")
     label_df = load_label_csv(args.label_csv)
+
+    authorized_slides = load_authorized_slides(args.authorized_slides_csv)
+    if authorized_slides is not None:
+        before = len(label_df)
+        label_df = label_df[
+            label_df["biopsy"]
+            .astype(str)
+            .map(lambda b: _bag_authorized(b, authorized_slides))
+        ].reset_index(drop=True)
+        print(f"  Authorized-slides filter: kept {len(label_df)}/{before} biopsies.")
+
     n_events = int(label_df["event"].sum())
     print(
         f"  {len(label_df)} biopsies total,  {n_events} events,  "
