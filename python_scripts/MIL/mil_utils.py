@@ -98,8 +98,26 @@ def load_authorized_slides(authorized_csv):
     Same format as load_val_names: a CSV with a 'file_name' column (header row)
     or a headerless single-column file (one basename per row). Returns None when
     authorized_csv is None, meaning no restriction is applied.
+
+    Entries are normalised to the bare slide stem so the list matches biopsy-
+    nested bags on disk: any directory/biopsy prefix is stripped and a trailing
+    slide/feature extension is removed (e.g. 'biopsy_3/slide1.svs' and
+    'slide1.h5' both become 'slide1'). Matching against nested bags is then
+    handled by _bag_authorized.
     """
-    return load_val_names(authorized_csv)
+    names = load_val_names(authorized_csv)
+    if names is None:
+        return None
+    slide_exts = {".svs", ".ndpi", ".tiff", ".tif", ".mrxs", ".scn", ".vms",
+                  ".vmu", ".npy", ".h5"}
+    normalised = set()
+    for n in names:
+        stem = os.path.basename(n.replace("\\", "/"))
+        root, ext = os.path.splitext(stem)
+        if ext.lower() in slide_exts:
+            stem = root
+        normalised.add(stem)
+    return normalised
 
 
 def _bag_authorized(bag_name, authorized_slides):
@@ -137,36 +155,46 @@ def _subsample_adj(adj, idx):
     )
 
 
+def _select_rows(bag, idx):
+    """Return a copy of bag keeping only patch rows `idx` (X, coords, adj)."""
+    new_bag = {}
+    for k, v in bag.items():
+        if k in ("X", "coords") and isinstance(v, torch.Tensor):
+            new_bag[k] = v[idx]
+        elif k == "adj" and isinstance(v, torch.Tensor):
+            new_bag[k] = _subsample_adj(v, idx)
+        else:
+            new_bag[k] = v
+    return new_bag
+
+
 def make_collate_fn(base_collate, max_patches=None):
-    """Wrap base_collate with random patch subsampling applied per bag.
+    """Wrap base_collate with per-bag NaN-row removal and optional subsampling.
 
-    ProcessedMILDataset pre-computes adj in __getitem__, so both adj and
-    the patch-level tensors (X, coords) must be subsampled here — before
-    collate_fn stacks and pads them — to keep the batched adj matrix at
-    (batch_size, max_patches, max_patches).
+    Some feature bags contain a handful of NaN patch rows (failed extractions);
+    a single NaN row turns the whole loss NaN, so rows with any non-finite
+    feature are dropped here. Then, when max_patches is set, bags larger than
+    that are randomly subsampled.
+
+    ProcessedMILDataset pre-computes adj in __getitem__, so both adj and the
+    patch-level tensors (X, coords) are filtered here — before collate_fn stacks
+    and pads them — to keep them aligned.
     """
-    if max_patches is None:
-        return base_collate
 
-    def _collate_and_subsample(bags):
-        subsampled = []
+    def _collate(bags):
+        out = []
         for bag in bags:
-            n = bag["X"].shape[0]
-            if n > max_patches:
-                idx = torch.randperm(n)[:max_patches]
-                new_bag = {}
-                for k, v in bag.items():
-                    if k in ("X", "coords") and isinstance(v, torch.Tensor):
-                        new_bag[k] = v[idx]
-                    elif k == "adj" and isinstance(v, torch.Tensor):
-                        new_bag[k] = _subsample_adj(v, idx)
-                    else:
-                        new_bag[k] = v
-                bag = new_bag
-            subsampled.append(bag)
-        return base_collate(subsampled)
+            x = bag["X"]
+            keep = torch.isfinite(x).all(dim=1)
+            if not bool(keep.all()) and bool(keep.any()):
+                bag = _select_rows(bag, keep.nonzero(as_tuple=True)[0])
+            if max_patches is not None and bag["X"].shape[0] > max_patches:
+                idx = torch.randperm(bag["X"].shape[0])[:max_patches]
+                bag = _select_rows(bag, idx)
+            out.append(bag)
+        return base_collate(out)
 
-    return _collate_and_subsample
+    return _collate
 
 
 def get_bag_names(dataset):
