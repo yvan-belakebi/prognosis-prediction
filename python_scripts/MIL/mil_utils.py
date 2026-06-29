@@ -109,7 +109,7 @@ def load_authorized_slides(authorized_csv):
     if names is None:
         return None
     slide_exts = {".svs", ".ndpi", ".tiff", ".tif", ".mrxs", ".scn", ".vms",
-                  ".vmu", ".npy", ".h5"}
+                  ".vmu", ".npy", ".h5", ".jpg", ".jpeg", ".png"}
     normalised = set()
     for n in names:
         stem = os.path.basename(n.replace("\\", "/"))
