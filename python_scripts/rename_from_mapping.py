@@ -14,11 +14,21 @@ unchanged. Result is written to output (default: overwrites names.csv).
 
 import argparse
 import csv
-import os
+import re
+
+# Strip a trailing extension only when it looks like a real one (contains a
+# letter), so numeric timestamps like "...21.31.46" are left intact even when
+# the other side carries no extension.
+_EXT_RE = re.compile(r"\.(?=[^.]*[A-Za-z])[A-Za-z0-9]{1,8}$")
 
 
 def stem(name):
-    return os.path.splitext(name)[0]
+    return _EXT_RE.sub("", name)
+
+
+def ext(name):
+    s = stem(name)
+    return name[len(s):]
 
 
 def main():
@@ -39,7 +49,7 @@ def main():
     for row in rows:
         new = mapping.get(stem(row[0]))
         if new is not None:
-            row[0] = stem(new) + os.path.splitext(row[0])[1]
+            row[0] = stem(new) + ext(row[0])
             renamed += 1
 
     out = args.output or args.names
