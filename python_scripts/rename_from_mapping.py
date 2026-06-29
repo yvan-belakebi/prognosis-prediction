@@ -6,13 +6,19 @@ Usage:
 names.csv   : no header, one name per row (first column used).
 mapping.csv : header row with columns `old_name` and `new_name`.
 
-Names found in `old_name` are replaced by the corresponding `new_name`;
-names not in the mapping are left unchanged. Result is written to output
-(default: overwrites names.csv).
+Matching is done on the basename without extension, so the extension may
+differ or be absent on either side. The original name's extension (if any)
+is preserved on the renamed result. Names not in the mapping are left
+unchanged. Result is written to output (default: overwrites names.csv).
 """
 
 import argparse
 import csv
+import os
+
+
+def stem(name):
+    return os.path.splitext(name)[0]
 
 
 def main():
@@ -24,15 +30,16 @@ def main():
     args = parser.parse_args()
 
     with open(args.mapping, newline="", encoding="utf-8-sig") as f:
-        mapping = {row["old_name"]: row["new_name"] for row in csv.DictReader(f)}
+        mapping = {stem(row["old_name"]): row["new_name"] for row in csv.DictReader(f)}
 
     with open(args.names, newline="", encoding="utf-8-sig") as f:
         rows = [row for row in csv.reader(f) if row]
 
     renamed = 0
     for row in rows:
-        if row[0] in mapping:
-            row[0] = mapping[row[0]]
+        new = mapping.get(stem(row[0]))
+        if new is not None:
+            row[0] = stem(new) + os.path.splitext(row[0])[1]
             renamed += 1
 
     out = args.output or args.names
