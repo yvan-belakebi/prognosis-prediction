@@ -42,6 +42,7 @@ columns — including the risk_scores.csv produced by evaluate_survival.py.
 import argparse
 import os
 import sys
+from functools import lru_cache
 
 import h5py
 import matplotlib.pyplot as plt
@@ -67,7 +68,7 @@ _mil_dir = os.path.join(_project_root, "python_scripts", "MIL")
 if os.path.isdir(_mil_dir) and _mil_dir not in sys.path:
     sys.path.insert(0, _mil_dir)
 
-from mil_utils import load_authorized_slides, _bag_authorized
+from mil_utils import load_authorized_slides, _bag_authorized, discover_bags
 
 from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
@@ -135,18 +136,50 @@ def load_label_csv(path: str) -> pd.DataFrame:
     return df.dropna(subset=["biopsy", "time", "event"]).reset_index(drop=True)
 
 
+@lru_cache(maxsize=None)
+def _slide_stem_index(base_path: str) -> dict:
+    """Map bare slide stems to their (path, "biopsy/slide") under base_path.
+
+    Built once per base_path (via discover_bags, which knows the biopsy-nested
+    layout).  Lets a label that stores only the slide stem ("32965911") resolve
+    to a slide nested under a biopsy directory with a *different* name
+    ("36074-06/32965911").  Stems that appear under more than one biopsy are
+    dropped as ambiguous so we never silently pick the wrong slide.
+    """
+    index: dict = {}
+    ambiguous: set = set()
+    for bag in discover_bags(base_path):
+        if "/" not in bag:  # flat layout already handled by direct lookup
+            continue
+        stem = bag.rsplit("/", 1)[-1]
+        if stem in index or stem in ambiguous:
+            index.pop(stem, None)
+            ambiguous.add(stem)
+            continue
+        for ext in (".h5", ".npy"):
+            p = os.path.join(base_path, bag + ext)
+            if os.path.isfile(p):
+                index[stem] = (p, bag)
+                break
+    return index
+
+
 def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
     """Search base_paths for bag_name, returning (file_path, resolved_bag_name).
 
-    Supports three layouts:
+    Supports four layouts:
       flat   : base_path/slide.h5           bag_name = "slide"
       nested : base_path/biopsy/slide.h5    bag_name = "biopsy/slide"
       biopsy : base_path/biopsy/slide.h5    bag_name = "biopsy"  (directory match:
                                              first slide inside is selected)
+      stem   : base_path/biopsy/slide.h5    bag_name = "slide"   (bare slide stem
+                                             nested under a differently-named
+                                             biopsy directory — resolved via
+                                             _slide_stem_index)
 
-    resolved_bag_name equals bag_name for the first two layouts.  For the third it
-    becomes "biopsy/slide" so that the coords directory can be searched with the
-    same specific slide path.
+    resolved_bag_name equals bag_name for the first two layouts.  For the biopsy
+    and stem layouts it becomes "biopsy/slide" so the coords directory can be
+    searched with the same specific slide path.
     """
     for base_path in base_paths:
         # Direct file: flat ("slide") or already-nested ("biopsy/slide")
@@ -165,6 +198,11 @@ def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
                     slide_stem = os.path.splitext(entry.name)[0]
                     resolved = f"{bag_name}/{slide_stem}"
                     return entry.path, resolved
+        # Bare slide stem nested under a differently-named biopsy directory
+        if "/" not in bag_name:
+            hit = _slide_stem_index(base_path).get(bag_name)
+            if hit is not None:
+                return hit
     return None, bag_name
 
 
