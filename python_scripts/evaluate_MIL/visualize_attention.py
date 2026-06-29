@@ -168,6 +168,22 @@ def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
     return None, bag_name
 
 
+def _biopsy_authorized(biopsy_name, features_paths: list, authorized_slides) -> bool:
+    """True when the biopsy — or the slide it resolves to — is authorized.
+
+    Handles flat ('slide'), nested ('biopsy/slide'), and biopsy-level ('biopsy')
+    IDs.  A flat/nested name is matched directly (or by its slide-stem basename).
+    A biopsy-level directory is resolved through _find_bag_file to the slide that
+    load_bag would actually load, then re-checked, so authorization matches what
+    is shown.
+    """
+    name = str(biopsy_name)
+    if _bag_authorized(name, authorized_slides):
+        return True
+    _, resolved = _find_bag_file(features_paths, name)
+    return resolved != name and _bag_authorized(resolved, authorized_slides)
+
+
 def _load_array(file_path: str, h5_key: str) -> np.ndarray:
     if file_path.endswith(".h5"):
         with h5py.File(file_path, "r") as f:
@@ -871,9 +887,11 @@ def main():
     if authorized_slides is not None:
         before = len(label_df)
         label_df = label_df[
-            label_df["biopsy"]
-            .astype(str)
-            .map(lambda b: _bag_authorized(b, authorized_slides))
+            label_df["biopsy"].map(
+                lambda b: _biopsy_authorized(
+                    b, args.features_paths, authorized_slides
+                )
+            )
         ].reset_index(drop=True)
         print(f"  Authorized-slides filter: kept {len(label_df)}/{before} biopsies.")
 
