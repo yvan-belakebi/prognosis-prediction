@@ -138,30 +138,19 @@ def load_label_csv(path: str) -> pd.DataFrame:
 
 @lru_cache(maxsize=None)
 def _slide_stem_index(base_path: str) -> dict:
-    """Map bare slide stems to their (path, "biopsy/slide") under base_path.
+    """Map an unambiguous bare slide stem to its "biopsy/slide" bag name.
 
     Built once per base_path (via discover_bags, which knows the biopsy-nested
     layout).  Lets a label that stores only the slide stem ("32965911") resolve
     to a slide nested under a biopsy directory with a *different* name
-    ("36074-06/32965911").  Stems that appear under more than one biopsy are
-    dropped as ambiguous so we never silently pick the wrong slide.
+    ("36074-06/32965911").  Stems found under more than one biopsy are dropped
+    so we never silently pick the wrong slide.
     """
-    index: dict = {}
-    ambiguous: set = set()
+    groups: dict = {}
     for bag in discover_bags(base_path):
-        if "/" not in bag:  # flat layout already handled by direct lookup
-            continue
-        stem = bag.rsplit("/", 1)[-1]
-        if stem in index or stem in ambiguous:
-            index.pop(stem, None)
-            ambiguous.add(stem)
-            continue
-        for ext in (".h5", ".npy"):
-            p = os.path.join(base_path, bag + ext)
-            if os.path.isfile(p):
-                index[stem] = (p, bag)
-                break
-    return index
+        if "/" in bag:  # flat layout already handled by direct lookup
+            groups.setdefault(bag.rsplit("/", 1)[-1], []).append(bag)
+    return {stem: bags[0] for stem, bags in groups.items() if len(bags) == 1}
 
 
 def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
@@ -199,10 +188,12 @@ def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
                     resolved = f"{bag_name}/{slide_stem}"
                     return entry.path, resolved
         # Bare slide stem nested under a differently-named biopsy directory
-        if "/" not in bag_name:
-            hit = _slide_stem_index(base_path).get(bag_name)
-            if hit is not None:
-                return hit
+        nested = _slide_stem_index(base_path).get(bag_name) if "/" not in bag_name else None
+        if nested:
+            for ext in (".h5", ".npy"):
+                p = os.path.join(base_path, nested + ext)
+                if os.path.isfile(p):
+                    return p, nested
     return None, bag_name
 
 

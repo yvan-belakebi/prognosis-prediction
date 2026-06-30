@@ -20,7 +20,6 @@ Usage:
         --epochs 50
 """
 
-import csv
 import os
 import sys
 import argparse
@@ -65,6 +64,7 @@ from mil_utils import (
     make_collate_fn,
     build_dataset,
     BiopsySampler,
+    LossLogger as _BaseLossLogger,
 )
 
 _GRAPH_MODELS = {"patchgcn"}
@@ -155,28 +155,22 @@ def scan_labels(labels_path: str, bag_names: list) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-class LossLogger:
+class LossLogger(_BaseLossLogger):
+    """Regression logger: adds val_mae / val_rmse columns and an MAE plot panel."""
+
     COLUMNS = ["epoch", "phase", "train_loss", "val_loss", "val_mae", "val_rmse"]
 
-    def __init__(self, log_dir: str):
-        os.makedirs(log_dir, exist_ok=True)
-        self.csv_path = os.path.join(log_dir, "loss_log.csv")
-        self.plot_path = os.path.join(log_dir, "loss_curves.png")
-        with open(self.csv_path, "w", newline="") as f:
-            csv.writer(f).writerow(self.COLUMNS)
-
     def log(self, epoch, phase, train_loss, val_loss=None, val_mae=None, val_rmse=None):
-        with open(self.csv_path, "a", newline="") as f:
-            csv.writer(f).writerow(
-                [
-                    epoch,
-                    phase,
-                    f"{train_loss:.6f}",
-                    "" if val_loss is None else f"{val_loss:.6f}",
-                    "" if val_mae is None else f"{val_mae:.4f}",
-                    "" if val_rmse is None else f"{val_rmse:.4f}",
-                ]
-            )
+        self._append(
+            [
+                epoch,
+                phase,
+                f"{train_loss:.6f}",
+                "" if val_loss is None else f"{val_loss:.6f}",
+                "" if val_mae is None else f"{val_mae:.4f}",
+                "" if val_rmse is None else f"{val_rmse:.4f}",
+            ]
+        )
 
     def save_plot(self, pretrain_epochs=0):
         if not _HAS_MATPLOTLIB:

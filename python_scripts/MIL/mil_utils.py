@@ -6,6 +6,7 @@ biopsy-level sampling, and dataset construction — used by MIL.py,
 classification_MIL.py, regression_MIL.py, and evaluate_survival.py.
 """
 
+import csv
 import os
 import random
 import sys
@@ -430,3 +431,71 @@ def build_dataset(
     val_labels = np.concatenate(val_labels_parts) if val_labels_parts else None
 
     return train_ds, val_ds, train_labels, val_labels
+
+
+# ---------------------------------------------------------------------------
+# Loss logging
+# ---------------------------------------------------------------------------
+class LossLogger:
+    """CSV loss log + loss-curve plot, shared by the MIL training scripts.
+
+    Writes a header on construction and one row per log() call.  This base
+    handles the survival case (train/val loss, single plot panel); subclasses
+    set COLUMNS and override log()/save_plot() to add metrics (regression adds
+    val_mae / val_rmse and a second panel).
+    """
+
+    COLUMNS = ["epoch", "phase", "train_loss", "val_loss"]
+
+    def __init__(self, log_dir: str):
+        os.makedirs(log_dir, exist_ok=True)
+        self.csv_path = os.path.join(log_dir, "loss_log.csv")
+        self.plot_path = os.path.join(log_dir, "loss_curves.png")
+        with open(self.csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(self.COLUMNS)
+
+    def _append(self, row):
+        with open(self.csv_path, "a", newline="") as f:
+            csv.writer(f).writerow(row)
+
+    def log(self, epoch, phase, train_loss, val_loss=None):
+        self._append(
+            [
+                epoch,
+                phase,
+                f"{train_loss:.6f}",
+                "" if val_loss is None else f"{val_loss:.6f}",
+            ]
+        )
+
+    def save_plot(self, pretrain_epochs: int = 0):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available — skipping loss plot.")
+            return
+        df = pd.read_csv(self.csv_path)
+        df["val_loss"] = pd.to_numeric(df["val_loss"], errors="coerce")
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(df["epoch"], df["train_loss"], label="train loss")
+        val_rows = df["val_loss"].notna()
+        if val_rows.any():
+            ax.plot(
+                df.loc[val_rows, "epoch"],
+                df.loc[val_rows, "val_loss"],
+                linestyle="--",
+                label="val loss",
+            )
+        if pretrain_epochs > 0:
+            ax.axvspan(
+                0.5, pretrain_epochs + 0.5, alpha=0.08, color="gray", label="pretrain"
+            )
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend()
+        ax.grid(True, linestyle=":", alpha=0.6)
+        fig.tight_layout()
+        fig.savefig(self.plot_path, dpi=150)
+        plt.close(fig)
+        print(f"Loss plot saved to {self.plot_path}")

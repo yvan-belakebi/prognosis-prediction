@@ -94,7 +94,7 @@ python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
 # Attention map
-python python_scripts/evaluate_MIL/visualize_attention.py --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --checkpoint checkpoints_regression_transmil/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_unfiltered.csv
+python python_scripts/evaluate_MIL/visualize_attention.py --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --checkpoint checkpoints_regression_transmil/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_unfiltered.csv --authorized_slides_csv ok_slides.csv --save_as_tif 
 
 5) Survival model
 python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1

@@ -42,7 +42,6 @@ Usage (single-repo, no pretraining):
 Labels (.npy, shape (2,)): [time_to_first_event, censoring_indicator]
 """
 
-import csv
 import os
 import sys
 import argparse
@@ -52,13 +51,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-
-try:
-    import matplotlib.pyplot as plt
-
-    _HAS_MATPLOTLIB = True
-except ImportError:
-    _HAS_MATPLOTLIB = False
 
 # ---------------------------------------------------------------------------
 # Resolve local torchmil package
@@ -83,6 +75,7 @@ from mil_utils import (
     make_collate_fn,
     build_dataset,
     BiopsySampler,
+    LossLogger,
 )
 
 
@@ -148,65 +141,6 @@ def val_epoch(model, loader, device, model_type: str) -> float:
             loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
             total_loss += loss.item()
     return total_loss / len(loader)
-
-
-# ---------------------------------------------------------------------------
-# Loss logger
-# ---------------------------------------------------------------------------
-class LossLogger:
-    """Writes loss values to a CSV and saves a loss-curve plot at the end."""
-
-    COLUMNS = ["epoch", "phase", "train_loss", "val_loss"]
-
-    def __init__(self, log_dir: str):
-        os.makedirs(log_dir, exist_ok=True)
-        self.csv_path = os.path.join(log_dir, "loss_log.csv")
-        self.plot_path = os.path.join(log_dir, "loss_curves.png")
-        with open(self.csv_path, "w", newline="") as f:
-            csv.writer(f).writerow(self.COLUMNS)
-
-    def log(
-        self, epoch: int, phase: str, train_loss: float, val_loss: float | None = None
-    ):
-        with open(self.csv_path, "a", newline="") as f:
-            csv.writer(f).writerow(
-                [
-                    epoch,
-                    phase,
-                    f"{train_loss:.6f}",
-                    "" if val_loss is None else f"{val_loss:.6f}",
-                ]
-            )
-
-    def save_plot(self, pretrain_epochs: int = 0):
-        if not _HAS_MATPLOTLIB:
-            print("matplotlib not available — skipping loss plot.")
-            return
-        df = pd.read_csv(self.csv_path)
-        df["val_loss"] = pd.to_numeric(df["val_loss"], errors="coerce")
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(df["epoch"], df["train_loss"], label="train loss")
-        val_rows = df["val_loss"].notna()
-        if val_rows.any():
-            ax.plot(
-                df.loc[val_rows, "epoch"],
-                df.loc[val_rows, "val_loss"],
-                linestyle="--",
-                label="val loss",
-            )
-        if pretrain_epochs > 0:
-            ax.axvspan(
-                0.5, pretrain_epochs + 0.5, alpha=0.08, color="gray", label="pretrain"
-            )
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.legend()
-        ax.grid(True, linestyle=":", alpha=0.6)
-        fig.tight_layout()
-        fig.savefig(self.plot_path, dpi=150)
-        plt.close(fig)
-        print(f"Loss plot saved to {self.plot_path}")
 
 
 # ---------------------------------------------------------------------------
