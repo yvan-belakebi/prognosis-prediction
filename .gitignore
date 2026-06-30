@@ -34,7 +34,6 @@ stain_refs*/
 *.pdf
 # Ignore imported code
 torchmil/
-CLAM-master/
 torchstain-main/
 StainStyleSampler-remove-histomicstk-dependency/
 torch-staintools-main/

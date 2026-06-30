@@ -17,7 +17,7 @@ The studied events are:
 The foundation models tested for feature extraction are: Virchow2, UNI2-h, Hibou-L, Hibou-B, H-optimus-1.
 
 
-torchMIL, CLAM, StainStyleSampler and torchstain should be downloaded and included in the python_scripts folder.
+torchMIL, StainStyleSampler and torchstain should be downloaded and included in the python_scripts folder.
 
 
 Latest version now uses the TRIDENT repository, also from Mahmood lab
@@ -98,23 +98,3 @@ python python_scripts/evaluate_MIL/visualize_attention.py --features_paths WSI/I
 
 5) Survival model
 python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1
-
-
----
-
-### Legacy CLAM pipeline (pre-TRIDENT)
-
-Kept for reference. Tiling + feature extraction via CLAM instead of TRIDENT:
-
-# Tiling
-python python_scripts/prepare_for_MIL/run_clam_tiling.py --wsi_dir data/raw_wsi --output_dir WSI/IgA --step_size 112 --stitch store_false
-
-# Reorganize and rename
-python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/patches --apply
-python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs WSI/IgA/patches data/unlabeled/IgA --apply
-
-# Stain normalization (Vahadane or Macenko)
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output stain_refs/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs/IgA/qc --n_save_patches 20 --method macenko
-
-# Feature extraction
-python python_scripts/prepare_for_MIL/compute_feats_clam.py --patches_dir WSI/IgA/patches --wsi_dir data/unlabeled/IgA --output_dir WSI/IgA/UNI2-h_feats --backbone UNI2-h --batch_size 128 --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA

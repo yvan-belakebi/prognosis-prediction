@@ -60,10 +60,6 @@ _staintools_dir = os.path.abspath(
 if _staintools_dir not in sys.path:
     sys.path.insert(0, _staintools_dir)
 
-_clam_dir = os.path.abspath(os.path.join(_script_dir, "..", "CLAM-master"))
-if _clam_dir not in sys.path:
-    sys.path.insert(0, _clam_dir)
-
 import openslide  # noqa: E402
 from torch_staintools.constants import CONFIG  # noqa: E402
 from torch_staintools.functional.tissue_mask import get_tissue_mask  # noqa: E402
