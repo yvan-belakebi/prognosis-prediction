@@ -166,9 +166,12 @@ def collect_config():
     cfg["backbone"] = BACKBONES.get(choice, BACKBONES["1"])
     cfg["patch_size"] = int(ask("Patch size (px)", str(cfg["backbone"]["patch_size"])))
 
+    # Single source of truth for biopsy nesting (file_name,biopsy_number) and for
+    # the per-stain extractor's stain column — used by both step_features and step_reorganize.
+    cfg["labels_csv"] = ask("Labels CSV (file_name,biopsy_number,stain[,mpp])", "label_csvs/labels_unfiltered.csv")
+
     cfg["use_stain"] = ask_yes("Apply per-stain stain normalisation?", "y")
     if cfg["use_stain"]:
-        cfg["labels_csv"] = ask("Labels CSV (file_name,stain[,mpp])", "label_csvs/labels_unfiltered.csv")
         cfg["stain_refs_dir"] = ask("Stain references dir (.pt per stain)", "stain_refs/IgA")
 
     cfg["coords_dir"] = coords_dir_name(cfg["mag"], cfg["patch_size"], cfg["overlap"])
@@ -260,7 +263,7 @@ def step_reorganize(cfg):
     cmd = [
         sys.executable, REORG,
         "--features_dir", cfg["features_subdir"],
-        "--wsi_dir", cfg["wsi_dir"],
+        "--labels_csv", cfg["labels_csv"],
         "--output_dir", cfg["reorg_output"],
         "--copy",  # keep the original TRIDENT output in place
     ]

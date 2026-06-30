@@ -7,17 +7,17 @@ TRIDENT writes one .h5 per slide (keys 'features' (N,D) and 'coords' (N,2)) in a
 ProcessedMILDataset (the CLAM-path layout) expects biopsy-nested files:
     {output_dir}/{biopsy_nr}/{slide_id}.h5
 
-Each slide's biopsy_nr is recovered from the nested raw-WSI directory — the same discovery
-logic run_clam_tiling.py uses:
-    {wsi_dir}/{biopsy_nr}/{slide_id}.{ext}   (nested)
-    {wsi_dir}/{slide_id}.{ext}              (flat → biopsy_nr = "")
+Each slide's biopsy_nr comes from the labels CSV (labels_unfiltered.csv from
+define_labels.py), which carries file_name (slide stem) and biopsy_number (the
+directory name) as separate columns. That CSV is the single source of truth for
+nesting, so features fold into the same layout define_labels.py used for labels.
 
 The h5 schema is identical, so this only relocates files (move, or copy with --copy).
 
 Usage:
     python python_scripts/prepare_for_MIL/reorganize_trident_feats.py \\
         --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
-        --wsi_dir      data/raw_wsi/IgA \\
+        --labels_csv   label_csvs/labels_unfiltered.csv \\
         --output_dir   WSI/IgA/UNI2-h_feats
 """
 
@@ -26,34 +26,18 @@ import os
 import shutil
 import sys
 
+import pandas as pd
 
-def build_biopsy_lookup(wsi_dir: str, slide_exts: tuple) -> dict:
-    """Map slide_id -> biopsy_nr by scanning the nested raw-WSI directory.
 
-    Mirrors discover_slides() in run_clam_tiling.py: nested dirs take priority; if any
-    subdirectory holds slide files, top-level files in wsi_dir are ignored.
+def build_biopsy_lookup(labels_csv: str) -> dict:
+    """Map slide_id (file_name) -> biopsy_nr (biopsy_number) from the labels CSV.
+
+    biopsy_number is already the directory name produced by define_labels.py's
+    biopsy_to_dirname; a missing/empty value means the slide nests at the root.
     """
-
-    def _matches(name: str) -> bool:
-        return any(name.lower().endswith(ext) for ext in slide_exts)
-
-    lookup = {}
-    has_nested = False
-    for entry in sorted(os.scandir(wsi_dir), key=lambda e: e.name):
-        if entry.is_dir():
-            for sub in sorted(os.scandir(entry.path), key=lambda e: e.name):
-                if sub.is_file() and _matches(sub.name):
-                    slide_id = os.path.splitext(sub.name)[0]
-                    lookup[slide_id] = entry.name
-                    has_nested = True
-
-    if not has_nested:
-        for entry in sorted(os.scandir(wsi_dir), key=lambda e: e.name):
-            if entry.is_file() and _matches(entry.name):
-                slide_id = os.path.splitext(entry.name)[0]
-                lookup[slide_id] = ""
-
-    return lookup
+    df = pd.read_csv(labels_csv, dtype=str)
+    lookup = dict(zip(df["file_name"], df["biopsy_number"].fillna("")))
+    return {k: ("" if v in ("", "nan", "None") else v) for k, v in lookup.items()}
 
 
 def main():
@@ -67,20 +51,14 @@ def main():
         help="Flat TRIDENT features_{enc} dir of {slide_id}.h5 files.",
     )
     parser.add_argument(
-        "--wsi_dir",
+        "--labels_csv",
         required=True,
-        help="Nested raw-WSI dir ({wsi_dir}/{biopsy_nr}/{slide_id}.ext) used to recover biopsy_nr.",
+        help="labels_unfiltered.csv (from define_labels.py) mapping file_name -> biopsy_number.",
     )
     parser.add_argument(
         "--output_dir",
         required=True,
         help="Destination root for {biopsy_nr}/{slide_id}.h5.",
-    )
-    parser.add_argument(
-        "--slide_ext",
-        nargs="+",
-        default=[".svs", ".ndpi"],
-        help="WSI extension(s) used to scan --wsi_dir.",
     )
     parser.add_argument(
         "--copy",
@@ -94,14 +72,9 @@ def main():
     )
     args = parser.parse_args()
 
-    slide_exts = tuple(
-        ext.lower() if ext.startswith(".") else f".{ext.lower()}"
-        for ext in args.slide_ext
-    )
-
-    lookup = build_biopsy_lookup(args.wsi_dir, slide_exts)
+    lookup = build_biopsy_lookup(args.labels_csv)
     if not lookup:
-        print(f"[ERROR] No slides found in {args.wsi_dir} (exts: {slide_exts}).")
+        print(f"[ERROR] No slides found in {args.labels_csv}.")
         sys.exit(1)
 
     feat_files = [
@@ -112,7 +85,7 @@ def main():
     if not feat_files:
         print(f"[ERROR] No .h5 files in {args.features_dir}.")
         sys.exit(1)
-    print(f"Found {len(feat_files)} feature file(s); {len(lookup)} slides in WSI dir.")
+    print(f"Found {len(feat_files)} feature file(s); {len(lookup)} slides in labels CSV.")
 
     counts = {"done": 0, "skipped": 0, "unmatched": 0}
     op = shutil.copy2 if args.copy else shutil.move
@@ -120,7 +93,7 @@ def main():
     for name in sorted(feat_files):
         slide_id = os.path.splitext(name)[0]
         if slide_id not in lookup:
-            print(f"  [WARN] {slide_id}: no matching WSI under {args.wsi_dir} — left in place.")
+            print(f"  [WARN] {slide_id}: not in {args.labels_csv} — left in place.")
             counts["unmatched"] += 1
             continue
 

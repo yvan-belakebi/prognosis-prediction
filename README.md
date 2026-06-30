@@ -83,12 +83,14 @@ python python_scripts/prepare_for_MIL/benchmark_stain_norm.py --wsi_dir data/raw
 #   Without stain normalization, use stock TRIDENT instead:
 #   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 224 --overlap 0 --gpus 0 --search_nested
 
-# Reorganize flat TRIDENT features into the biopsy-nested layout (recovers biopsy_nr from the raw WSI dir)
-python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --wsi_dir data/raw_wsi/IgA --output_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --copy
+# Reorganize flat TRIDENT features into the biopsy-nested layout
+# (biopsy_nr read from the labels CSV — same source define_labels.py used for the .npy labels)
+python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_csv label_csvs/labels_unfiltered.csv --output_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --copy
 
-Or actually:
-
-python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --iga_dirs WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --mapping_out followup_data/derived/renamed/slide_name_mapping_trident.csv --slide_dirs WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --apply
+# Migration (one-time): if you have legacy *flat* WSI/feature/label/coord dirs predating
+# the biopsy-nested layout, reorganize_wsi_dirs.py migrates them in place (and can rename
+# slides with unsafe names). Dry-run by default; --apply to execute. Not part of the per-run
+# flow — only needed once to convert old data. See the script's docstring for usage.
 
 4) MIL pooling
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
