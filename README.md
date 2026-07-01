@@ -24,13 +24,10 @@ Latest version now uses the TRIDENT repository, also from Mahmood lab
 
 1) Installation
 
+Download trident and torchmil under the path specified in requirements.txt or change this path
 sudo dnf install python3.11-devel
 python3.11 -m venv .trident_venv
 pip install -r requirements.txt
-cd python_scripts/external_repositories/TRIDENT-main/
-pip install -e .
-cd ../torchmil
-pip install -e .
 cd /data/yvan-files/prognosis_prediction
 If running on vm without internet access, the errors will guide you to allow you to run locally.
 In python_scripts/external_repositories/TRIDENT-main/trident/patch_encoder_models/local_ckpts.json change the paths to your local installation of the models, e.g. "hoptimus1": "/data/yvan-files/prognosis-prediction/models/hoptimus1/pytorch_model.bin",
