@@ -12,7 +12,7 @@ einops==0.8.2
 openslide-python==1.4.6
 openslide-bin==4.0.1.2
 scikit-image==0.26.0
-opencv-python==4.13.0.92
+opencv-python-headless==4.13.0.92
 torch-staintools==1.0.7
 # torch-staintools (vendored in python_scripts/torch-staintools-main) needs kornia;
 # it also requires torch>=2.10.0.
