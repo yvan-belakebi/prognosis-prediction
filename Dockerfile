@@ -6,6 +6,7 @@ COPY requirements.txt .
 COPY python_scripts/external_repositories/ python_scripts/external_repositories/
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY models/ models/
 COPY data/ data/
 COPY label_csvs/ label_csvs/
 COPY stain_refs/ stain_refs/
