@@ -27,5 +27,5 @@ scikit-learn==1.9.0
 matplotlib==3.11.0
 h5py==3.16.0
 # External repositories
--e ./python_scripts/TRIDENT-main
--e ./python_scripts/torchmil
+-e ./python_scripts/external_repositories/TRIDENT-main
+-e ./python_scripts/external_repositories/torchmil
