@@ -1,5 +1,11 @@
 FROM python:3.11-slim
 
+# Required for the NVIDIA Container Toolkit to mount CUDA driver libs when
+# the container is run with `--gpus`; torch's pip wheel already bundles the
+# CUDA runtime, so no nvidia/cuda base image is needed.
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends micro
