@@ -43,6 +43,14 @@ biopsy-nested layout (WSI/IgA/UNI2-h_feats) consumed by the MIL stage.
 
 2) Tiling  (tissue segmentation + patch coordinates, TRIDENT)
 
+# (One-time, if any raw slides have filesystem-unsafe names — e.g. scanner timestamps
+# with spaces.) Normalize them FIRST, before tiling/labels/features, so every downstream
+# step is generated with safe names. --rename builds one global plan and rewrites the
+# source metadata CSVs into --csv_out_dir (the same dir define_labels.py reads), so
+# labels_unfiltered.csv is born with safe file_name values and reorganize_trident_feats.py
+# needs no rename of its own. Dry-run by default; add --apply. Skip if names are already safe.
+python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs data/raw_wsi/IgA --slide_exts .svs --csv_out_dir followup_data/derived/renamed --apply
+
 # Tissue segmentation (HEST; use --segmenter otsu for a weights-free CPU fallback)
 python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task seg --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --segmenter hest --gpus 0 --search_nested
 
