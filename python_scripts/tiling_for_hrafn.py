@@ -40,23 +40,42 @@ TRIDENT = os.path.join(
 )
 
 
+def year_dir(value):
+    """Return the "{year}_anon" dir for a CSV year cell, or None if unusable.
+
+    year is written as a float ("2014.0") but is a directory name. Cells are
+    occasionally blank, which is a slide we cannot place rather than a fatal
+    error.
+    """
+    try:
+        return f"{int(float(value))}_anon"
+    except (TypeError, ValueError):
+        return None
+
+
 def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
     """Return [(slide, [candidate rel paths])] for every slide listed in csv_path.
 
-    `slide` is the collection- and extension-independent "{year}/{name}" stem,
-    so a slide keeps one identity across the places it might be stored.
+    `slide` is the collection- and extension-independent "{year}_anon/{name}"
+    stem, so a slide keeps one identity across the places it might be stored. A
+    row with no usable year gets no candidates, so it reports as unresolved
+    instead of derailing the whole CSV.
     """
     slides = []
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            # year is written as a float ("2014.0") but is a directory name.
-            year = int(float(row["year"]))
-            name = row["wsi_anon_name"]
+            name = (row.get("wsi_anon_name") or "").strip()
+            if not name:
+                continue
+            year = year_dir(row.get("year"))
+            if year is None:
+                slides.append((f"?/{name}", []))
+                continue
             slides.append(
                 (
-                    f"{year}_anon/{name}",
+                    f"{year}/{name}",
                     [
-                        f"{collection}/{year}_anon/{name}{extension}"
+                        f"{collection}/{year}/{name}{extension}"
                         for collection in collections
                         for extension in extensions
                     ],
@@ -208,7 +227,9 @@ def main():
             f"{len(found)} slides found, {len(missing)} missing -> {out_dir}"
         )
         for slide in missing:
-            print(f"  missing: {slide} (in no collection, under any extension)")
+            reason = ("no year in CSV" if slide.startswith("?/")
+                      else "in no collection, under any extension")
+            print(f"  missing: {slide} ({reason})")
         if not found:
             print("  no slides on disk, skipping")
             continue
