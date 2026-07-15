@@ -41,3 +41,7 @@ TRIDENT-main/
 WSI/
 # Ignore venv
 *trident_venv/
+# Qupath files
+*.qpproj
+*.qpdata
+*.qpproj.backup
