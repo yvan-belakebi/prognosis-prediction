@@ -54,9 +54,9 @@ def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
             name = row["wsi_anon_name"]
             slides.append(
                 (
-                    f"{year}/{name}",
+                    f"{year}_anon/{name}",
                     [
-                        f"{collection}/{year}_ANON/{name}{extension}"
+                        f"{collection}/{year}_anon/{name}{extension}"
                         for collection in collections
                         for extension in extensions
                     ],
