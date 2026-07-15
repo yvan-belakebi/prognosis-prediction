@@ -32,8 +32,12 @@ REGISTRY_ROOT = "/forskning/hbe/2023-517496/RegistryWSIs"
 COLLECTIONS = ("The Norwegian Kidney Biopsy Registry", "Kidney biopsies")
 EXTENSIONS = (".svs", ".ndpi")
 
-TRIDENT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "external_repositories", "TRIDENT-main", "run_batch_of_slides.py")
+TRIDENT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "external_repositories",
+    "TRIDENT-main",
+    "run_batch_of_slides.py",
+)
 
 
 def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
@@ -48,31 +52,51 @@ def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
             # year is written as a float ("2014.0") but is a directory name.
             year = int(float(row["year"]))
             name = row["wsi_anon_name"]
-            slides.append((f"{year}/{name}",
-                           [f"{collection}/{year}/{name}{extension}"
-                            for collection in collections for extension in extensions]))
+            slides.append(
+                (
+                    f"{year}/{name}",
+                    [
+                        f"{collection}/{year}_ANON/{name}{extension}"
+                        for collection in collections
+                        for extension in extensions
+                    ],
+                )
+            )
     return slides
 
 
 def candidate_rel_paths(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
     """Return the candidate registry paths, relative to the root, for one CSV."""
-    return [rel for _, rel_paths in slide_candidates(csv_path, collections, extensions)
-            for rel in rel_paths]
+    return [
+        rel
+        for _, rel_paths in slide_candidates(csv_path, collections, extensions)
+        for rel in rel_paths
+    ]
 
 
-def candidate_paths(csv_path, root=REGISTRY_ROOT, collections=COLLECTIONS, extensions=EXTENSIONS):
+def candidate_paths(
+    csv_path, root=REGISTRY_ROOT, collections=COLLECTIONS, extensions=EXTENSIONS
+):
     """Return the candidate registry paths for every slide listed in csv_path."""
-    return [f"{root}/{rel}" for rel in candidate_rel_paths(csv_path, collections, extensions)]
+    return [
+        f"{root}/{rel}"
+        for rel in candidate_rel_paths(csv_path, collections, extensions)
+    ]
 
 
 def find_csvs(csv_dir):
     """Return every CSV below csv_dir, sorted."""
-    return sorted(os.path.join(dirpath, name)
-                  for dirpath, _, names in os.walk(csv_dir)
-                  for name in names if name.lower().endswith(".csv"))
+    return sorted(
+        os.path.join(dirpath, name)
+        for dirpath, _, names in os.walk(csv_dir)
+        for name in names
+        if name.lower().endswith(".csv")
+    )
 
 
-def resolve_slides(csv_path, root=REGISTRY_ROOT, collections=COLLECTIONS, extensions=EXTENSIONS):
+def resolve_slides(
+    csv_path, root=REGISTRY_ROOT, collections=COLLECTIONS, extensions=EXTENSIONS
+):
     """Resolve the slides listed in csv_path against the registry.
 
     Returns (found, missing): `found` holds the deduplicated relative paths of
@@ -84,8 +108,9 @@ def resolve_slides(csv_path, root=REGISTRY_ROOT, collections=COLLECTIONS, extens
     for slide, rel_paths in slide_candidates(csv_path, collections, extensions):
         if resolved.get(slide) is not None:
             continue
-        resolved[slide] = next((rel for rel in rel_paths
-                                if os.path.exists(os.path.join(root, rel))), None)
+        resolved[slide] = next(
+            (rel for rel in rel_paths if os.path.exists(os.path.join(root, rel))), None
+        )
     found = [rel for rel in resolved.values() if rel is not None]
     missing = [slide for slide, rel in resolved.items() if rel is None]
     return found, missing
@@ -107,35 +132,66 @@ def write_custom_list(rel_paths, out_csv):
     return out_csv
 
 
-def tiling_commands(list_csv, job_dir, root=REGISTRY_ROOT, mag=20, patch_size=224,
-                    overlap=0, segmenter="hest", gpus=0):
+def tiling_commands(
+    list_csv,
+    job_dir,
+    root=REGISTRY_ROOT,
+    mag=20,
+    patch_size=224,
+    overlap=0,
+    segmenter="hest",
+    gpus=0,
+):
     """Return the TRIDENT seg and coords commands for the slides in list_csv."""
-    common = [sys.executable, TRIDENT,
-              "--wsi_dir", root,
-              "--job_dir", job_dir,
-              "--custom_list_of_wsis", list_csv]
+    common = [
+        sys.executable,
+        TRIDENT,
+        "--wsi_dir",
+        root,
+        "--job_dir",
+        job_dir,
+        "--custom_list_of_wsis",
+        list_csv,
+    ]
     seg = common + ["--task", "seg", "--segmenter", segmenter, "--gpus", str(gpus)]
-    coords = common + ["--task", "coords",
-                       "--mag", str(mag),
-                       "--patch_size", str(patch_size),
-                       "--overlap", str(overlap)]
+    coords = common + [
+        "--task",
+        "coords",
+        "--mag",
+        str(mag),
+        "--patch_size",
+        str(patch_size),
+        "--overlap",
+        str(overlap),
+    ]
     return [seg, coords]
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("csv_dir", help="folder of subfolders containing slide-list CSVs")
-    parser.add_argument("--job_dir", required=True, help="TRIDENT output root; the csv_dir "
-                                                         "tree is mirrored underneath it")
-    parser.add_argument("--root", default=REGISTRY_ROOT, help="registry root (TRIDENT --wsi_dir)")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "csv_dir", help="folder of subfolders containing slide-list CSVs"
+    )
+    parser.add_argument(
+        "--job_dir",
+        required=True,
+        help="TRIDENT output root; the csv_dir " "tree is mirrored underneath it",
+    )
+    parser.add_argument(
+        "--root", default=REGISTRY_ROOT, help="registry root (TRIDENT --wsi_dir)"
+    )
     parser.add_argument("--mag", type=float, default=20)
     parser.add_argument("--patch_size", type=int, default=224)
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--segmenter", default="hest")
     parser.add_argument("--gpus", type=int, default=0)
-    parser.add_argument("--run", action="store_true",
-                        help="run TRIDENT (default: print the commands and exit)")
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="run TRIDENT (default: print the commands and exit)",
+    )
     args = parser.parse_args()
 
     csv_paths = find_csvs(args.csv_dir)
@@ -147,8 +203,10 @@ def main():
         found, missing = resolve_slides(csv_path, args.root)
         total_found += len(found)
         out_dir = job_dir_for(csv_path, args.csv_dir, args.job_dir)
-        print(f"\n{os.path.relpath(csv_path, args.csv_dir)}: "
-              f"{len(found)} slides found, {len(missing)} missing -> {out_dir}")
+        print(
+            f"\n{os.path.relpath(csv_path, args.csv_dir)}: "
+            f"{len(found)} slides found, {len(missing)} missing -> {out_dir}"
+        )
         for slide in missing:
             print(f"  missing: {slide} (in no collection, under any extension)")
         if not found:
@@ -156,15 +214,28 @@ def main():
             continue
 
         list_csv = write_custom_list(found, os.path.join(out_dir, "slide_list.csv"))
-        commands = tiling_commands(list_csv, out_dir, args.root, args.mag,
-                                   args.patch_size, args.overlap, args.segmenter, args.gpus)
+        commands = tiling_commands(
+            list_csv,
+            out_dir,
+            args.root,
+            args.mag,
+            args.patch_size,
+            args.overlap,
+            args.segmenter,
+            args.gpus,
+        )
         for command in commands:
-            print("  " + " ".join(f'"{part}"' if " " in part else part for part in command))
+            print(
+                "  "
+                + " ".join(f'"{part}"' if " " in part else part for part in command)
+            )
             if args.run:
                 subprocess.run(command, check=True)
 
     if not total_found:
-        parser.error(f"no slides resolved under {args.root} -- is the registry mounted?")
+        parser.error(
+            f"no slides resolved under {args.root} -- is the registry mounted?"
+        )
 
 
 if __name__ == "__main__":
