@@ -9,9 +9,12 @@ Usage:
 <csv_dir> is a folder of subfolders, each holding slide-list CSVs with header
 columns `wsi_anon_name`, `year` and `lab_name` (see file_for_hrafn.csv). Every
 CSV found below <csv_dir> is read, and each slide is looked up in the registry
-under {root}/{collection}/{year}/{wsi_anon_name}{.svs,.ndpi}. The CSVs record
-neither the collection a slide lives in nor the format it was scanned in, so
-every combination is tried and the first one on disk wins.
+under {root}/{collection}/{year}_anon/{wsi_anon_name}{.svs,.ndpi}, where {year}
+is the prefix of the slide name ("{year}_{id}_ANON"). The CSV's own `year`
+column is ignored: it disagrees with the name prefix for a good share of slides,
+and the prefix is the one that matches the registry. The CSVs record neither the
+collection a slide lives in nor the format it was scanned in, so every
+combination is tried and the first one on disk wins.
 
 Each CSV is tiled into its own job dir, mirroring the CSV tree under --job_dir:
 <csv_dir>/labA/a.csv is tiled into <job_dir>/labA/a/. A slide listed in two CSVs
@@ -40,17 +43,15 @@ TRIDENT = os.path.join(
 )
 
 
-def year_dir(value):
-    """Return the "{year}_anon" dir for a CSV year cell, or None if unusable.
+def year_dir(name):
+    """Return the "{year}_anon" dir for a slide name, or None if it has no year.
 
-    year is written as a float ("2014.0") but is a directory name. Cells are
-    occasionally blank, which is a slide we cannot place rather than a fatal
-    error.
+    Slide names are "{year}_{id}_ANON". The year prefix -- not the CSV's `year`
+    column, which disagrees with it for a good share of slides -- is what
+    matches the registry layout.
     """
-    try:
-        return f"{int(float(value))}_anon"
-    except (TypeError, ValueError):
-        return None
+    year = name.split("_", 1)[0]
+    return f"{year}_anon" if year.isdigit() else None
 
 
 def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
@@ -58,8 +59,8 @@ def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
 
     `slide` is the collection- and extension-independent "{year}_anon/{name}"
     stem, so a slide keeps one identity across the places it might be stored. A
-    row with no usable year gets no candidates, so it reports as unresolved
-    instead of derailing the whole CSV.
+    row whose name carries no year gets no candidates, so it reports as
+    unresolved instead of derailing the whole CSV.
     """
     slides = []
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
@@ -67,7 +68,7 @@ def slide_candidates(csv_path, collections=COLLECTIONS, extensions=EXTENSIONS):
             name = (row.get("wsi_anon_name") or "").strip()
             if not name:
                 continue
-            year = year_dir(row.get("year"))
+            year = year_dir(name)
             if year is None:
                 slides.append((f"?/{name}", []))
                 continue
@@ -227,7 +228,7 @@ def main():
             f"{len(found)} slides found, {len(missing)} missing -> {out_dir}"
         )
         for slide in missing:
-            reason = ("no year in CSV" if slide.startswith("?/")
+            reason = ("no year prefix in the slide name" if slide.startswith("?/")
                       else "in no collection, under any extension")
             print(f"  missing: {slide} ({reason})")
         if not found:
