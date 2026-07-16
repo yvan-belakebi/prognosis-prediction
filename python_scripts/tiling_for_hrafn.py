@@ -34,6 +34,9 @@ import sys
 REGISTRY_ROOT = "/forskning/hbe/2023-517496/RegistryWSIs"
 COLLECTIONS = ("The Norwegian Kidney Biopsy Registry", "Kidney biopsies")
 EXTENSIONS = (".svs", ".ndpi")
+# Keep a patch only if at least this much of it sits under the segmentation
+# mask. TRIDENT compares inclusively (>=), so 0.7 keeps a patch at exactly 70%.
+MIN_TISSUE_PROPORTION = 0.7
 
 TRIDENT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -161,6 +164,7 @@ def tiling_commands(
     overlap=0,
     segmenter="hest",
     gpus=0,
+    min_tissue_proportion=MIN_TISSUE_PROPORTION,
 ):
     """Return the TRIDENT seg and coords commands for the slides in list_csv."""
     common = [
@@ -183,6 +187,8 @@ def tiling_commands(
         str(patch_size),
         "--overlap",
         str(overlap),
+        "--min_tissue_proportion",
+        str(min_tissue_proportion),
     ]
     return [seg, coords]
 
@@ -207,6 +213,13 @@ def main():
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--segmenter", default="hest")
     parser.add_argument("--gpus", type=int, default=0)
+    parser.add_argument(
+        "--min_tissue_proportion",
+        type=float,
+        default=MIN_TISSUE_PROPORTION,
+        help="minimum proportion of a patch under tissue to keep it, 0.0-1.0 "
+        f"(default: {MIN_TISSUE_PROPORTION}); 0 keeps every patch",
+    )
     parser.add_argument(
         "--run",
         action="store_true",
@@ -245,6 +258,7 @@ def main():
             args.overlap,
             args.segmenter,
             args.gpus,
+            args.min_tissue_proportion,
         )
         for command in commands:
             print(
