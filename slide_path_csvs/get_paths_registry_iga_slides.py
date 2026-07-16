@@ -34,7 +34,9 @@ def main():
         "--registry", default=DEFAULT_REGISTRY, help="anonymized registry CSV"
     )
     parser.add_argument(
-        "-o", "--out", default=os.path.join(HERE, "iga_slides.csv"),
+        "-o",
+        "--out",
+        default=os.path.join(HERE, "iga_slides_from_registry.csv"),
         help="output slide-list CSV",
     )
     args = parser.parse_args()
