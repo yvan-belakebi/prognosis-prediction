@@ -39,7 +39,7 @@ EXTENSIONS = (".svs", ".ndpi")
 MIN_TISSUE_PROPORTION = 0.7
 
 TRIDENT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "external_repositories",
     "TRIDENT-main",
     "run_batch_of_slides.py",
