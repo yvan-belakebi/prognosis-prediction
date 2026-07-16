@@ -165,6 +165,7 @@ def tiling_commands(
     segmenter="hest",
     gpus=0,
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
+    dump_patches=True,
 ):
     """Return the TRIDENT seg and coords commands for the slides in list_csv."""
     common = [
@@ -190,6 +191,8 @@ def tiling_commands(
         "--min_tissue_proportion",
         str(min_tissue_proportion),
     ]
+    if dump_patches:
+        coords.append("--dump_patches")
     return [seg, coords]
 
 
@@ -219,6 +222,13 @@ def main():
         default=MIN_TISSUE_PROPORTION,
         help="minimum proportion of a patch under tissue to keep it, 0.0-1.0 "
         f"(default: {MIN_TISSUE_PROPORTION}); 0 keeps every patch",
+    )
+    parser.add_argument(
+        "--dump_patches",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="also write the patch images to disk, not just their coordinates "
+        "(default: on; --no-dump_patches for coordinates only)",
     )
     parser.add_argument(
         "--run",
@@ -259,6 +269,7 @@ def main():
             args.segmenter,
             args.gpus,
             args.min_tissue_proportion,
+            args.dump_patches,
         )
         for command in commands:
             print(
