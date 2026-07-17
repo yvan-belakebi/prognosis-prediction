@@ -4,7 +4,19 @@ Usage:
     # What would run (dry-run):
     python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident
     # Actually run segmentation + patch coordinates:
-    python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident --run
+    python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident \
+        --staging_dir /local/scratch/staging --run
+    # Bypass staging and read the registry directly (the old, NAS-bound path):
+    python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident \
+        --no_staging --run
+
+Reading the registry WSIs straight off the mounted NAS makes TRIDENT's random
+per-tile reads slow. With --staging_dir, slides are copied to local disk in
+chunks and tiled from there, then deleted; a background thread stages the next
+chunk while the current one is tiled, so the NAS copy overlaps with the GPU
+work. --chunk_size and --prefetch bound how much local disk is used at once
+(roughly (prefetch + 1) chunks). A chunk is tiled by a single TRIDENT
+invocation, so a larger chunk also amortizes TRIDENT's per-run model loading.
 
 <csv_dir> is a folder of subfolders, each holding slide-list CSVs with header
 columns `wsi_anon_name`, `year` and `lab_name` (see file_for_hrafn.csv). Every
@@ -28,8 +40,12 @@ TRIDENT errors out on a list entry it cannot find.
 import argparse
 import csv
 import os
+import queue
+import shutil
 import subprocess
 import sys
+import threading
+from collections import namedtuple
 
 REGISTRY_ROOT = "/forskning/hbe/2023-517496/RegistryWSIs"
 COLLECTIONS = ("The Norwegian Kidney Biopsy Registry", "Kidney biopsies")
@@ -196,6 +212,125 @@ def tiling_commands(
     return [seg, coords]
 
 
+# One chunk of slides to tile: `seq` is a run-wide id used to give the chunk its
+# own staging subdir (so a slide listed in two CSVs never has one chunk's copy
+# clobber another's), `index` is the chunk's position within its CSV (used to
+# name the chunk's TRIDENT list), and `rel_paths` are its registry-relative WSIs.
+WorkUnit = namedtuple("WorkUnit", "seq csv_rel out_dir index rel_paths")
+
+
+def format_command(command):
+    """Render a command list for printing, quoting the parts that hold spaces."""
+    return " ".join(f'"{part}"' if " " in part else part for part in command)
+
+
+def chunked(seq, size):
+    """Yield successive size-length slices of seq."""
+    for start in range(0, len(seq), size):
+        yield seq[start : start + size]
+
+
+def copy_into_staging(rel_paths, root, dest_root):
+    """Copy each registry-relative slide into dest_root, keeping its rel path."""
+    for rel in rel_paths:
+        dst = os.path.join(dest_root, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(os.path.join(root, rel), dst)
+
+
+def resolve_all(csv_paths, csv_dir, job_dir, root):
+    """Resolve every CSV against the registry, print the per-CSV report, and
+    return [(csv_rel, out_dir, found)] for the CSVs with slides on disk."""
+    results = []
+    for csv_path in csv_paths:
+        found, missing = resolve_slides(csv_path, root)
+        out_dir = job_dir_for(csv_path, csv_dir, job_dir)
+        csv_rel = os.path.relpath(csv_path, csv_dir)
+        print(
+            f"\n{csv_rel}: {len(found)} slides found, {len(missing)} missing "
+            f"-> {out_dir}"
+        )
+        for slide in missing:
+            reason = ("no year prefix in the slide name" if slide.startswith("?/")
+                      else "in no collection, under any extension")
+            print(f"  missing: {slide} ({reason})")
+        if not found:
+            print("  no slides on disk, skipping")
+            continue
+        results.append((csv_rel, out_dir, found))
+    return results
+
+
+def run_direct(results, root, run, tiling_kwargs):
+    """Tile each CSV in one shot, pointing TRIDENT straight at the registry.
+
+    Used for dry runs and --no_staging; `run` gates whether the commands are
+    actually executed or only printed.
+    """
+    for _csv_rel, out_dir, found in results:
+        list_csv = write_custom_list(found, os.path.join(out_dir, "slide_list.csv"))
+        for command in tiling_commands(list_csv, out_dir, root, **tiling_kwargs):
+            print("  " + format_command(command))
+            if run:
+                subprocess.run(command, check=True)
+
+
+def run_pipeline(results, root, staging_dir, chunk_size, prefetch, tiling_kwargs):
+    """Tile every resolved slide, staging chunks on local disk off the NAS.
+
+    A background thread copies the next chunk into its own staging subdir while
+    the current chunk is tiled from local disk; each chunk is deleted once its
+    slides are done. The ready queue's bound keeps at most `prefetch` chunks
+    staged ahead of the one being tiled, capping local disk use.
+    """
+    units = []
+    for csv_rel, out_dir, found in results:
+        for index, chunk in enumerate(chunked(found, chunk_size)):
+            units.append(WorkUnit(len(units), csv_rel, out_dir, index, chunk))
+
+    ready = queue.Queue(maxsize=max(1, prefetch))
+    done = object()
+
+    def copier():
+        for unit in units:
+            dest = os.path.join(staging_dir, str(unit.seq))
+            try:
+                copy_into_staging(unit.rel_paths, root, dest)
+            except Exception as error:  # transient NAS/read error: skip the chunk
+                shutil.rmtree(dest, ignore_errors=True)
+                ready.put((unit, error))
+                continue
+            ready.put((unit, None))
+        ready.put(done)
+
+    thread = threading.Thread(target=copier, daemon=True)
+    thread.start()
+
+    while True:
+        item = ready.get()
+        if item is done:
+            break
+        unit, error = item
+        label = f"{unit.csv_rel} chunk {unit.index}"
+        if error is not None:
+            print(f"  {label}: copy failed, skipping ({error})")
+            continue
+        dest = os.path.join(staging_dir, str(unit.seq))
+        try:
+            list_csv = write_custom_list(
+                unit.rel_paths,
+                os.path.join(unit.out_dir, f"slide_list_{unit.index:04d}.csv"),
+            )
+            print(f"  {label}: {len(unit.rel_paths)} slides staged -> {dest}")
+            for command in tiling_commands(
+                list_csv, unit.out_dir, dest, **tiling_kwargs
+            ):
+                print("    " + format_command(command))
+                subprocess.run(command, check=True)
+        finally:
+            shutil.rmtree(dest, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -235,54 +370,74 @@ def main():
         action="store_true",
         help="run TRIDENT (default: print the commands and exit)",
     )
+    parser.add_argument(
+        "--staging_dir",
+        help="local scratch dir; slides are copied here in chunks before tiling "
+        "and deleted after, keeping the slow NAS off the tiling path. Required "
+        "with --run unless --no_staging is given.",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=8,
+        help="slides copied and tiled per chunk (default: 8). Larger amortizes "
+        "TRIDENT's per-run model loading but uses more local disk.",
+    )
+    parser.add_argument(
+        "--prefetch",
+        type=int,
+        default=1,
+        help="chunks staged ahead of the one being tiled (default: 1); local "
+        "disk holds up to ~(prefetch + 1) chunks at once.",
+    )
+    parser.add_argument(
+        "--no_staging",
+        action="store_true",
+        help="read slides straight from the registry instead of staging them "
+        "locally (the old, NAS-bound behavior)",
+    )
     args = parser.parse_args()
+
+    if args.run and not args.no_staging and not args.staging_dir:
+        parser.error(
+            "--run needs --staging_dir (or pass --no_staging to read the "
+            "registry directly)"
+        )
+    if args.chunk_size < 1:
+        parser.error("--chunk_size must be at least 1")
 
     csv_paths = find_csvs(args.csv_dir)
     if not csv_paths:
         parser.error(f"no CSVs found under {args.csv_dir}")
 
-    total_found = 0
-    for csv_path in csv_paths:
-        found, missing = resolve_slides(csv_path, args.root)
-        total_found += len(found)
-        out_dir = job_dir_for(csv_path, args.csv_dir, args.job_dir)
-        print(
-            f"\n{os.path.relpath(csv_path, args.csv_dir)}: "
-            f"{len(found)} slides found, {len(missing)} missing -> {out_dir}"
-        )
-        for slide in missing:
-            reason = ("no year prefix in the slide name" if slide.startswith("?/")
-                      else "in no collection, under any extension")
-            print(f"  missing: {slide} ({reason})")
-        if not found:
-            print("  no slides on disk, skipping")
-            continue
-
-        list_csv = write_custom_list(found, os.path.join(out_dir, "slide_list.csv"))
-        commands = tiling_commands(
-            list_csv,
-            out_dir,
-            args.root,
-            args.mag,
-            args.patch_size,
-            args.overlap,
-            args.segmenter,
-            args.gpus,
-            args.min_tissue_proportion,
-            args.dump_patches,
-        )
-        for command in commands:
-            print(
-                "  "
-                + " ".join(f'"{part}"' if " " in part else part for part in command)
-            )
-            if args.run:
-                subprocess.run(command, check=True)
-
+    results = resolve_all(csv_paths, args.csv_dir, args.job_dir, args.root)
+    total_found = sum(len(found) for _, _, found in results)
     if not total_found:
         parser.error(
             f"no slides resolved under {args.root} -- is the registry mounted?"
         )
+
+    tiling_kwargs = dict(
+        mag=args.mag,
+        patch_size=args.patch_size,
+        overlap=args.overlap,
+        segmenter=args.segmenter,
+        gpus=args.gpus,
+        min_tissue_proportion=args.min_tissue_proportion,
+        dump_patches=args.dump_patches,
+    )
+
+    if args.run and not args.no_staging:
+        run_pipeline(
+            results,
+            args.root,
+            args.staging_dir,
+            args.chunk_size,
+            args.prefetch,
+            tiling_kwargs,
+        )
+    else:
+        run_direct(results, args.root, args.run, tiling_kwargs)
 
 
 if __name__ == "__main__":
