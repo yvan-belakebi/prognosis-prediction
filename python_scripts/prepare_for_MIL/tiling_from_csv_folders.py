@@ -315,6 +315,21 @@ def run_direct(results, root, run, tiling_kwargs):
                 subprocess.run(command, check=True, env=env)
 
 
+def coords_dirname(mag, patch_size, overlap):
+    """The subdir TRIDENT writes patch coords into, matching its own naming
+    (`{mag:g}x_{patch}px_{overlap}px_overlap`, e.g. `5x_224px_0px_overlap`)."""
+    return f"{float(mag):g}x_{patch_size}px_{overlap}px_overlap"
+
+
+def already_tiled(rel_path, out_dir, coords_subdir):
+    """True if this slide's patch-coords .h5 already exists under out_dir, i.e.
+    it was tiled on an earlier run and TRIDENT would only skip it again."""
+    stem = os.path.splitext(os.path.basename(rel_path))[0]
+    return os.path.exists(
+        os.path.join(out_dir, coords_subdir, "patches", f"{stem}_patches.h5")
+    )
+
+
 def run_pipeline(
     results, root, staging_dir, chunk_size, prefetch, retries, retry_wait, tiling_kwargs
 ):
@@ -325,15 +340,29 @@ def run_pipeline(
     slides are done. The ready queue's bound keeps at most `prefetch` chunks
     staged ahead of the one being tiled, capping local disk use.
 
+    Slides already tiled on an earlier run (their patch-coords .h5 is on disk)
+    are dropped up front, so a resumed run never copies them from the NAS just
+    for TRIDENT to skip them.
+
     A chunk that fails (e.g. a transient shared-GPU OOM) is retried in place,
     then skipped rather than aborting the whole run; skipped chunks are reported
     at the end, and the run exits non-zero so a re-run can mop them up (finished
     slides are skipped by TRIDENT's own resume).
     """
+    coords_subdir = coords_dirname(
+        tiling_kwargs["mag"], tiling_kwargs["patch_size"], tiling_kwargs["overlap"]
+    )
     units = []
+    skipped = 0
     for csv_rel, out_dir, found in results:
-        for index, chunk in enumerate(chunked(found, chunk_size)):
+        pending = [
+            rel for rel in found if not already_tiled(rel, out_dir, coords_subdir)
+        ]
+        skipped += len(found) - len(pending)
+        for index, chunk in enumerate(chunked(pending, chunk_size)):
             units.append(WorkUnit(len(units), csv_rel, out_dir, index, chunk))
+    if skipped:
+        print(f"\nAlready tiled on a previous run, not re-copying: {skipped} slides.")
 
     ready = queue.Queue(maxsize=max(1, prefetch))
     done = object()
