@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections import namedtuple
 
 REGISTRY_ROOT = "/forskning/hbe/2023-517496/RegistryWSIs"
@@ -183,6 +184,7 @@ def tiling_commands(
     gpus=0,
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
     dump_patches=True,
+    seg_batch_size=None,
 ):
     """Return the TRIDENT seg and coords commands for the slides in list_csv."""
     common = [
@@ -196,6 +198,8 @@ def tiling_commands(
         list_csv,
     ]
     seg = common + ["--task", "seg", "--segmenter", segmenter, "--gpus", str(gpus)]
+    if seg_batch_size is not None:
+        seg += ["--seg_batch_size", str(seg_batch_size)]
     coords = common + [
         "--task",
         "coords",
@@ -262,27 +266,69 @@ def resolve_all(csv_paths, csv_dir, job_dir, root):
     return results
 
 
+def child_env():
+    """Environment for TRIDENT subprocesses.
+
+    Sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (unless already set) to
+    reduce CUDA fragmentation; retries handle the transient shared-GPU contention
+    that fragmentation alone does not explain.
+    """
+    env = os.environ.copy()
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    return env
+
+
+def run_with_retries(command, env, retries, retry_wait):
+    """Run command, retrying on a non-zero exit. Return True if it ever succeeds.
+
+    A retried TRIDENT call re-scans the job dir and skips slides it already
+    finished, so retrying a partly-done chunk only redoes the slide it died on.
+    """
+    for attempt in range(retries + 1):
+        try:
+            subprocess.run(command, check=True, env=env)
+            return True
+        except subprocess.CalledProcessError as error:
+            if attempt < retries:
+                print(
+                    f"    failed (attempt {attempt + 1}/{retries + 1}), "
+                    f"retrying in {retry_wait}s: {error}"
+                )
+                time.sleep(retry_wait)
+            else:
+                print(f"    failed after {retries + 1} attempts: {error}")
+    return False
+
+
 def run_direct(results, root, run, tiling_kwargs):
     """Tile each CSV in one shot, pointing TRIDENT straight at the registry.
 
     Used for dry runs and --no_staging; `run` gates whether the commands are
     actually executed or only printed.
     """
+    env = child_env()
     for _csv_rel, out_dir, found in results:
         list_csv = write_custom_list(found, os.path.join(out_dir, "slide_list.csv"))
         for command in tiling_commands(list_csv, out_dir, root, **tiling_kwargs):
             print("  " + format_command(command))
             if run:
-                subprocess.run(command, check=True)
+                subprocess.run(command, check=True, env=env)
 
 
-def run_pipeline(results, root, staging_dir, chunk_size, prefetch, tiling_kwargs):
+def run_pipeline(
+    results, root, staging_dir, chunk_size, prefetch, retries, retry_wait, tiling_kwargs
+):
     """Tile every resolved slide, staging chunks on local disk off the NAS.
 
     A background thread copies the next chunk into its own staging subdir while
     the current chunk is tiled from local disk; each chunk is deleted once its
     slides are done. The ready queue's bound keeps at most `prefetch` chunks
     staged ahead of the one being tiled, capping local disk use.
+
+    A chunk that fails (e.g. a transient shared-GPU OOM) is retried in place,
+    then skipped rather than aborting the whole run; skipped chunks are reported
+    at the end, and the run exits non-zero so a re-run can mop them up (finished
+    slides are skipped by TRIDENT's own resume).
     """
     units = []
     for csv_rel, out_dir, found in results:
@@ -291,6 +337,8 @@ def run_pipeline(results, root, staging_dir, chunk_size, prefetch, tiling_kwargs
 
     ready = queue.Queue(maxsize=max(1, prefetch))
     done = object()
+    env = child_env()
+    failed = []
 
     def copier():
         for unit in units:
@@ -315,6 +363,7 @@ def run_pipeline(results, root, staging_dir, chunk_size, prefetch, tiling_kwargs
         label = f"{unit.csv_rel} chunk {unit.index}"
         if error is not None:
             print(f"  {label}: copy failed, skipping ({error})")
+            failed.append(label)
             continue
         dest = os.path.join(staging_dir, str(unit.seq))
         try:
@@ -327,9 +376,17 @@ def run_pipeline(results, root, staging_dir, chunk_size, prefetch, tiling_kwargs
                 list_csv, unit.out_dir, dest, **tiling_kwargs
             ):
                 print("    " + format_command(command))
-                subprocess.run(command, check=True)
+                if not run_with_retries(command, env, retries, retry_wait):
+                    print(f"  {label}: giving up, leaving its slides for a re-run")
+                    failed.append(label)
+                    break
         finally:
             shutil.rmtree(dest, ignore_errors=True)
+
+    if failed:
+        print(f"\n{len(failed)} chunk(s) failed: {', '.join(failed)}")
+        print("Re-run the same command to retry them (finished slides are skipped).")
+        sys.exit(1)
 
 
 def main():
@@ -397,6 +454,28 @@ def main():
         help="read slides straight from the registry instead of staging them "
         "locally (the old, NAS-bound behavior)",
     )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="times to retry a chunk that fails, e.g. on a transient shared-GPU "
+        "OOM, before skipping it (default: 2); a retry reuses the staged slides "
+        "and skips ones already finished",
+    )
+    parser.add_argument(
+        "--retry_wait",
+        type=int,
+        default=60,
+        help="seconds to wait before retrying a failed chunk (default: 60), "
+        "giving transient GPU contention time to clear",
+    )
+    parser.add_argument(
+        "--seg_batch_size",
+        type=int,
+        default=None,
+        help="TRIDENT segmentation batch size (default: TRIDENT's own, 64); "
+        "lower it to shrink the GPU footprint on a busy shared card",
+    )
     args = parser.parse_args()
 
     if args.run and not args.no_staging and not args.staging_dir:
@@ -426,6 +505,7 @@ def main():
         gpus=args.gpus,
         min_tissue_proportion=args.min_tissue_proportion,
         dump_patches=args.dump_patches,
+        seg_batch_size=args.seg_batch_size,
     )
 
     if args.run and not args.no_staging:
@@ -435,6 +515,8 @@ def main():
             args.staging_dir,
             args.chunk_size,
             args.prefetch,
+            args.retries,
+            args.retry_wait,
             tiling_kwargs,
         )
     else:
