@@ -2,12 +2,13 @@
 
 Usage:
     # What would run (dry-run):
-    python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident
-    # Actually run segmentation + patch coordinates:
-    python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident \
-        --staging_dir /local/scratch/staging --run
+    python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident
+    # Actually run segmentation + patch coordinates, keeping only patches at
+    # least 70% under the tissue mask:
+    python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
+        --staging_dir /local/scratch/staging --min_tissue_proportion 0.7 --run
     # Bypass staging and read the registry directly (the old, NAS-bound path):
-    python tiling_for_hrafn.py <csv_dir> --job_dir WSI/hrafn/trident \
+    python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
         --no_staging --run
 
 Reading the registry WSIs straight off the mounted NAS makes TRIDENT's random
