@@ -256,8 +256,11 @@ def resolve_all(csv_paths, csv_dir, job_dir, root):
             f"-> {out_dir}"
         )
         for slide in missing:
-            reason = ("no year prefix in the slide name" if slide.startswith("?/")
-                      else "in no collection, under any extension")
+            reason = (
+                "no year prefix in the slide name"
+                if slide.startswith("?/")
+                else "in no collection, under any extension"
+            )
             print(f"  missing: {slide} ({reason})")
         if not found:
             print("  no slides on disk, skipping")
@@ -486,16 +489,16 @@ def main():
     parser.add_argument(
         "--retries",
         type=int,
-        default=2,
+        default=1,
         help="times to retry a chunk that fails, e.g. on a transient shared-GPU "
-        "OOM, before skipping it (default: 2); a retry reuses the staged slides "
+        "OOM, before skipping it (default: 1); a retry reuses the staged slides "
         "and skips ones already finished",
     )
     parser.add_argument(
         "--retry_wait",
         type=int,
-        default=60,
-        help="seconds to wait before retrying a failed chunk (default: 60), "
+        default=20,
+        help="seconds to wait before retrying a failed chunk (default: 20), "
         "giving transient GPU contention time to clear",
     )
     parser.add_argument(
