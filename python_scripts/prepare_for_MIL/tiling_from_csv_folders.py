@@ -287,13 +287,13 @@ def resolve_all(csv_paths, csv_dir, job_dir, root):
 def child_env():
     """Environment for TRIDENT subprocesses.
 
-    Sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (unless already set) to
-    reduce CUDA fragmentation; retries handle the transient shared-GPU contention
-    that fragmentation alone does not explain.
+    We do NOT force PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True: that uses
+    CUDA virtual-memory APIs that are unsupported on this L40S vGPU and made even
+    the first model-to-GPU allocation fail with a deterministic "CUDA error: out
+    of memory". The environment is passed through untouched, so anyone who wants
+    that allocator can still export it themselves.
     """
-    env = os.environ.copy()
-    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    return env
+    return os.environ.copy()
 
 
 def gpu_free_gib(gpu):
