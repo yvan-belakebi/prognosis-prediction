@@ -186,6 +186,7 @@ def tiling_commands(
     dump_patches=True,
     seg_batch_size=None,
     skip_errors=True,
+    clear_dead_locks=True,
 ):
     """Return the TRIDENT seg and coords commands for the slides in list_csv."""
     common = [
@@ -203,6 +204,14 @@ def tiling_commands(
         # _logs_{segmentation,coords}.txt) and carry on with the rest of the
         # chunk, instead of aborting the whole invocation on the first failure.
         common += ["--skip_errors"]
+    if clear_dead_locks:
+        # A slide that errors under --skip_errors leaves its {name}.jpg.lock
+        # behind (TRIDENT only removes it on KeyboardInterrupt), and a later run
+        # then skips that slide as "locked by another worker" -- producing only
+        # .jpg.lock files and no patches. Clear such orphaned locks from crashed
+        # runs first; locks held by a live PID are kept, so this is safe here
+        # where only one TRIDENT runs at a time.
+        common += ["--clear_dead_locks"]
     seg = common + ["--task", "seg", "--segmenter", segmenter, "--gpus", str(gpus)]
     if seg_batch_size is not None:
         seg += ["--seg_batch_size", str(seg_batch_size)]
@@ -640,6 +649,14 @@ def main():
         "the chunk on the first slide error)",
     )
     parser.add_argument(
+        "--clear_dead_locks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="clear orphaned TRIDENT .lock files from earlier crashed/OOM'd "
+        "runs before tiling (default: on); without this, slides left locked by "
+        "a dead run are skipped forever and yield only .jpg.lock files",
+    )
+    parser.add_argument(
         "--failed_log",
         help="file to append failed slide names to, as `csv\\tslide` lines "
         "(default: <job_dir>/failed_slides.txt); rewritten fresh each run",
@@ -675,6 +692,7 @@ def main():
         dump_patches=args.dump_patches,
         seg_batch_size=args.seg_batch_size,
         skip_errors=args.skip_errors,
+        clear_dead_locks=args.clear_dead_locks,
     )
 
     if args.run and not args.no_staging:
