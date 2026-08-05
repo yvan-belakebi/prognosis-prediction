@@ -185,6 +185,7 @@ def tiling_commands(
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
     dump_patches=True,
     seg_batch_size=None,
+    skip_errors=True,
 ):
     """Return the TRIDENT seg and coords commands for the slides in list_csv."""
     common = [
@@ -197,6 +198,11 @@ def tiling_commands(
         "--custom_list_of_wsis",
         list_csv,
     ]
+    if skip_errors:
+        # Let TRIDENT skip a slide that errors (recording it in its own
+        # _logs_{segmentation,coords}.txt) and carry on with the rest of the
+        # chunk, instead of aborting the whole invocation on the first failure.
+        common += ["--skip_errors"]
     seg = common + ["--task", "seg", "--segmenter", segmenter, "--gpus", str(gpus)]
     if seg_batch_size is not None:
         seg += ["--seg_batch_size", str(seg_batch_size)]
@@ -333,8 +339,29 @@ def already_tiled(rel_path, out_dir, coords_subdir):
     )
 
 
+def record_failed_slides(failed_log, csv_rel, rel_paths):
+    """Append the failed slides to failed_log as `{csv_rel}\\t{rel_path}` lines.
+
+    A zero-tissue slide still writes an (empty) _patches.h5, so a slide left
+    without one after a --skip_errors run genuinely errored -- that absence is
+    what marks it failed here.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(failed_log)), exist_ok=True)
+    with open(failed_log, "a", encoding="utf-8") as f:
+        for rel in rel_paths:
+            f.write(f"{csv_rel}\t{rel}\n")
+
+
 def run_pipeline(
-    results, root, staging_dir, chunk_size, prefetch, retries, retry_wait, tiling_kwargs
+    results,
+    root,
+    staging_dir,
+    chunk_size,
+    prefetch,
+    retries,
+    retry_wait,
+    failed_log,
+    tiling_kwargs,
 ):
     """Tile every resolved slide, staging chunks on local disk off the NAS.
 
@@ -347,10 +374,13 @@ def run_pipeline(
     are dropped up front, so a resumed run never copies them from the NAS just
     for TRIDENT to skip them.
 
-    A chunk that fails (e.g. a transient shared-GPU OOM) is retried in place,
-    then skipped rather than aborting the whole run; skipped chunks are reported
-    at the end, and the run exits non-zero so a re-run can mop them up (finished
-    slides are skipped by TRIDENT's own resume).
+    An individual slide that errors is skipped by TRIDENT (via --skip_errors)
+    and its name written to failed_log, while the rest of the chunk is still
+    tiled. A chunk that fails outright (e.g. a whole-process crash that
+    --skip_errors cannot catch, like a transient shared-GPU OOM) is retried in
+    place, then skipped rather than aborting the whole run; such chunks are
+    reported at the end and the run exits non-zero so a re-run can mop them up
+    (finished slides are skipped by TRIDENT's own resume).
     """
     coords_subdir = coords_dirname(
         tiling_kwargs["mag"], tiling_kwargs["patch_size"], tiling_kwargs["overlap"]
@@ -367,10 +397,16 @@ def run_pipeline(
     if skipped:
         print(f"\nAlready tiled on a previous run, not re-copying: {skipped} slides.")
 
+    # Start each run with a fresh failed-slides log; resume re-attempts the
+    # slides listed here (they still lack a .h5), so a stale list would mislead.
+    if os.path.exists(failed_log):
+        os.remove(failed_log)
+
     ready = queue.Queue(maxsize=max(1, prefetch))
     done = object()
     env = child_env()
     failed = []
+    failed_slides = 0
 
     def copier():
         for unit in units:
@@ -404,6 +440,7 @@ def run_pipeline(
                 os.path.join(unit.out_dir, f"slide_list_{unit.index:04d}.csv"),
             )
             print(f"  {label}: {len(unit.rel_paths)} slides staged -> {dest}")
+            chunk_ok = True
             for command in tiling_commands(
                 list_csv, unit.out_dir, dest, **tiling_kwargs
             ):
@@ -411,10 +448,28 @@ def run_pipeline(
                 if not run_with_retries(command, env, retries, retry_wait):
                     print(f"  {label}: giving up, leaving its slides for a re-run")
                     failed.append(label)
+                    chunk_ok = False
                     break
+            if chunk_ok:
+                # The chunk ran to completion; any slide still without its .h5
+                # was skipped by --skip_errors. Log it, keep the rest.
+                errored = [
+                    rel
+                    for rel in unit.rel_paths
+                    if not already_tiled(rel, unit.out_dir, coords_subdir)
+                ]
+                if errored:
+                    record_failed_slides(failed_log, unit.csv_rel, errored)
+                    failed_slides += len(errored)
+                    print(
+                        f"  {label}: {len(errored)} slide(s) failed and were "
+                        f"skipped, logged to {failed_log}"
+                    )
         finally:
             shutil.rmtree(dest, ignore_errors=True)
 
+    if failed_slides:
+        print(f"\n{failed_slides} slide(s) failed and were skipped; see {failed_log}")
     if failed:
         print(f"\n{len(failed)} chunk(s) failed: {', '.join(failed)}")
         print("Re-run the same command to retry them (finished slides are skipped).")
@@ -508,6 +563,19 @@ def main():
         help="TRIDENT segmentation batch size (default: TRIDENT's own, 64); "
         "lower it to shrink the GPU footprint on a busy shared card",
     )
+    parser.add_argument(
+        "--skip_errors",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="skip a slide that errors and keep tiling the rest of its chunk, "
+        "logging the failed slide names (default: on; --no-skip_errors stops "
+        "the chunk on the first slide error)",
+    )
+    parser.add_argument(
+        "--failed_log",
+        help="file to append failed slide names to, as `csv\\tslide` lines "
+        "(default: <job_dir>/failed_slides.txt); rewritten fresh each run",
+    )
     args = parser.parse_args()
 
     if args.run and not args.no_staging and not args.staging_dir:
@@ -538,9 +606,11 @@ def main():
         min_tissue_proportion=args.min_tissue_proportion,
         dump_patches=args.dump_patches,
         seg_batch_size=args.seg_batch_size,
+        skip_errors=args.skip_errors,
     )
 
     if args.run and not args.no_staging:
+        failed_log = args.failed_log or os.path.join(args.job_dir, "failed_slides.txt")
         run_pipeline(
             results,
             args.root,
@@ -549,6 +619,7 @@ def main():
             args.prefetch,
             args.retries,
             args.retry_wait,
+            failed_log,
             tiling_kwargs,
         )
     else:
