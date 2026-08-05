@@ -287,6 +287,54 @@ def child_env():
     return env
 
 
+def gpu_free_gib(gpu):
+    """Free memory (GiB) on GPU `gpu` via nvidia-smi, or None if it can't be read
+    (nvidia-smi missing, a CPU run, etc.), in which case callers skip the gate."""
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free",
+                "--format=csv,noheader,nounits",
+                "-i",
+                str(gpu),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return int(out.stdout.strip().splitlines()[0]) / 1024
+    except (OSError, ValueError, IndexError, subprocess.CalledProcessError):
+        return None
+
+
+def wait_for_gpu(gpu, min_free_gib, max_wait, poll=15):
+    """Block until GPU `gpu` has `min_free_gib` free, or `max_wait` seconds pass.
+
+    Guards against launching a chunk into a momentarily-full shared vGPU (where
+    it would OOM, or -- under --skip_errors -- silently mass-skip). If nvidia-smi
+    is unreadable the gate is a no-op; if the GPU never frees up within max_wait
+    it proceeds anyway, leaving the retry/skip paths to handle the fallout.
+    """
+    waited = 0
+    while True:
+        free = gpu_free_gib(gpu)
+        if free is None or free >= min_free_gib:
+            return
+        if waited >= max_wait:
+            print(
+                f"    GPU {gpu}: only {free:.1f} GiB free after {waited}s, "
+                f"proceeding anyway"
+            )
+            return
+        print(
+            f"    GPU {gpu}: {free:.1f} GiB free (< {min_free_gib}), "
+            f"waiting {poll}s for it to clear"
+        )
+        time.sleep(poll)
+        waited += poll
+
+
 def run_with_retries(command, env, retries, retry_wait):
     """Run command, retrying on a non-zero exit. Return True if it ever succeeds.
 
@@ -360,6 +408,8 @@ def run_pipeline(
     prefetch,
     retries,
     retry_wait,
+    min_free_gib,
+    gpu_wait,
     failed_log,
     tiling_kwargs,
 ):
@@ -405,6 +455,7 @@ def run_pipeline(
     ready = queue.Queue(maxsize=max(1, prefetch))
     done = object()
     env = child_env()
+    gpu = tiling_kwargs["gpus"]  # index the preflight gate polls; < 0 means CPU
     failed = []
     failed_slides = 0
 
@@ -440,6 +491,8 @@ def run_pipeline(
                 os.path.join(unit.out_dir, f"slide_list_{unit.index:04d}.csv"),
             )
             print(f"  {label}: {len(unit.rel_paths)} slides staged -> {dest}")
+            if gpu >= 0:
+                wait_for_gpu(gpu, min_free_gib, gpu_wait)
             chunk_ok = True
             for command in tiling_commands(
                 list_csv, unit.out_dir, dest, **tiling_kwargs
@@ -564,6 +617,21 @@ def main():
         "lower it to shrink the GPU footprint on a busy shared card",
     )
     parser.add_argument(
+        "--min_free_gib",
+        type=float,
+        default=4.0,
+        help="before tiling a chunk, wait until the GPU has at least this many "
+        "GiB free (default: 4.0), so a chunk never launches into a momentarily-"
+        "full shared vGPU; 0 disables the wait",
+    )
+    parser.add_argument(
+        "--gpu_wait",
+        type=int,
+        default=600,
+        help="max seconds to wait for the GPU to free up before tiling a chunk "
+        "(default: 600); after this it proceeds anyway",
+    )
+    parser.add_argument(
         "--skip_errors",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -619,6 +687,8 @@ def main():
             args.prefetch,
             args.retries,
             args.retry_wait,
+            args.min_free_gib,
+            args.gpu_wait,
             failed_log,
             tiling_kwargs,
         )
