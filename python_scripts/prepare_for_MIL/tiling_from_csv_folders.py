@@ -41,13 +41,21 @@ TRIDENT errors out on a list entry it cannot find.
 import argparse
 import csv
 import os
-import queue
-import shutil
 import subprocess
 import sys
-import threading
-import time
 from collections import namedtuple
+
+from nas_staging import (
+    ChunkResult,
+    StagedUnit,
+    child_env,
+    chunked,
+    format_command,
+    run_with_retries,
+    stage_and_process,
+    wait_for_gpu,
+)
+from trident_io import coords_dir_name
 
 REGISTRY_ROOT = "/forskning/hbe/2023-517496/RegistryWSIs"
 COLLECTIONS = ("The Norwegian Kidney Biopsy Registry", "Kidney biopsies")
@@ -232,30 +240,10 @@ def tiling_commands(
     return [seg, coords]
 
 
-# One chunk of slides to tile: `seq` is a run-wide id used to give the chunk its
-# own staging subdir (so a slide listed in two CSVs never has one chunk's copy
-# clobber another's), `index` is the chunk's position within its CSV (used to
-# name the chunk's TRIDENT list), and `rel_paths` are its registry-relative WSIs.
-WorkUnit = namedtuple("WorkUnit", "seq csv_rel out_dir index rel_paths")
-
-
-def format_command(command):
-    """Render a command list for printing, quoting the parts that hold spaces."""
-    return " ".join(f'"{part}"' if " " in part else part for part in command)
-
-
-def chunked(seq, size):
-    """Yield successive size-length slices of seq."""
-    for start in range(0, len(seq), size):
-        yield seq[start : start + size]
-
-
-def copy_into_staging(rel_paths, root, dest_root):
-    """Copy each registry-relative slide into dest_root, keeping its rel path."""
-    for rel in rel_paths:
-        dst = os.path.join(dest_root, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(os.path.join(root, rel), dst)
+# What each staged chunk carries through nas_staging into tile_chunk():
+# `csv_rel` names the CSV it came from, `out_dir` is that CSV's job dir, and
+# `index` is the chunk's position within the CSV (used to name its TRIDENT list).
+ChunkInfo = namedtuple("ChunkInfo", "csv_rel out_dir index")
 
 
 def resolve_all(csv_paths, csv_dir, job_dir, root):
@@ -284,86 +272,6 @@ def resolve_all(csv_paths, csv_dir, job_dir, root):
     return results
 
 
-def child_env():
-    """Environment for TRIDENT subprocesses.
-
-    We do NOT force PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True: that uses
-    CUDA virtual-memory APIs that are unsupported on this L40S vGPU and made even
-    the first model-to-GPU allocation fail with a deterministic "CUDA error: out
-    of memory". The environment is passed through untouched, so anyone who wants
-    that allocator can still export it themselves.
-    """
-    return os.environ.copy()
-
-
-def gpu_free_gib(gpu):
-    """Free memory (GiB) on GPU `gpu` via nvidia-smi, or None if it can't be read
-    (nvidia-smi missing, a CPU run, etc.), in which case callers skip the gate."""
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.free",
-                "--format=csv,noheader,nounits",
-                "-i",
-                str(gpu),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return int(out.stdout.strip().splitlines()[0]) / 1024
-    except (OSError, ValueError, IndexError, subprocess.CalledProcessError):
-        return None
-
-
-def wait_for_gpu(gpu, min_free_gib, max_wait, poll=15):
-    """Block until GPU `gpu` has `min_free_gib` free, or `max_wait` seconds pass.
-
-    Guards against launching a chunk into a momentarily-full shared vGPU (where
-    it would OOM, or -- under --skip_errors -- silently mass-skip). If nvidia-smi
-    is unreadable the gate is a no-op; if the GPU never frees up within max_wait
-    it proceeds anyway, leaving the retry/skip paths to handle the fallout.
-    """
-    waited = 0
-    while True:
-        free = gpu_free_gib(gpu)
-        if free is None or free >= min_free_gib:
-            return
-        if waited >= max_wait:
-            print(
-                f"    GPU {gpu}: only {free:.1f} GiB free after {waited}s, "
-                f"proceeding anyway"
-            )
-            return
-        print(
-            f"    GPU {gpu}: {free:.1f} GiB free (< {min_free_gib}), "
-            f"waiting {poll}s for it to clear"
-        )
-        time.sleep(poll)
-        waited += poll
-
-
-def run_with_retries(command, env, retries, retry_wait):
-    """Run command, retrying on a non-zero exit. Return True if it ever succeeds.
-
-    A retried TRIDENT call re-scans the job dir and skips slides it already
-    finished, so retrying a partly-done chunk only redoes the slide it died on.
-    """
-    for attempt in range(retries + 1):
-        try:
-            subprocess.run(command, check=True, env=env)
-            return True
-        except subprocess.CalledProcessError as error:
-            if attempt < retries:
-                print(
-                    f"    failed (attempt {attempt + 1}/{retries + 1}), "
-                    f"retrying in {retry_wait}s: {error}"
-                )
-                time.sleep(retry_wait)
-            else:
-                print(f"    failed after {retries + 1} attempts: {error}")
-    return False
 
 
 def run_direct(results, root, run, tiling_kwargs):
@@ -379,12 +287,6 @@ def run_direct(results, root, run, tiling_kwargs):
             print("  " + format_command(command))
             if run:
                 subprocess.run(command, check=True, env=env)
-
-
-def coords_dirname(mag, patch_size, overlap):
-    """The subdir TRIDENT writes patch coords into, matching its own naming
-    (`{mag:g}x_{patch}px_{overlap}px_overlap`, e.g. `5x_224px_0px_overlap`)."""
-    return f"{float(mag):g}x_{patch_size}px_{overlap}px_overlap"
 
 
 def already_tiled(rel_path, out_dir, coords_subdir):
@@ -441,7 +343,7 @@ def run_pipeline(
     reported at the end and the run exits non-zero so a re-run can mop them up
     (finished slides are skipped by TRIDENT's own resume).
     """
-    coords_subdir = coords_dirname(
+    coords_subdir = coords_dir_name(
         tiling_kwargs["mag"], tiling_kwargs["patch_size"], tiling_kwargs["overlap"]
     )
     units = []
@@ -452,7 +354,14 @@ def run_pipeline(
         ]
         skipped += len(found) - len(pending)
         for index, chunk in enumerate(chunked(pending, chunk_size)):
-            units.append(WorkUnit(len(units), csv_rel, out_dir, index, chunk))
+            units.append(
+                StagedUnit(
+                    seq=len(units),
+                    label=f"{csv_rel} chunk {index}",
+                    rel_paths=chunk,
+                    payload=ChunkInfo(csv_rel, out_dir, index),
+                )
+            )
     if skipped:
         print(f"\nAlready tiled on a previous run, not re-copying: {skipped} slides.")
 
@@ -461,79 +370,52 @@ def run_pipeline(
     if os.path.exists(failed_log):
         os.remove(failed_log)
 
-    ready = queue.Queue(maxsize=max(1, prefetch))
-    done = object()
     env = child_env()
     gpu = tiling_kwargs["gpus"]  # index the preflight gate polls; < 0 means CPU
-    failed = []
-    failed_slides = 0
 
-    def copier():
-        for unit in units:
-            dest = os.path.join(staging_dir, str(unit.seq))
-            try:
-                copy_into_staging(unit.rel_paths, root, dest)
-            except Exception as error:  # transient NAS/read error: skip the chunk
-                shutil.rmtree(dest, ignore_errors=True)
-                ready.put((unit, error))
-                continue
-            ready.put((unit, None))
-        ready.put(done)
-
-    thread = threading.Thread(target=copier, daemon=True)
-    thread.start()
-
-    while True:
-        item = ready.get()
-        if item is done:
-            break
-        unit, error = item
-        label = f"{unit.csv_rel} chunk {unit.index}"
-        if error is not None:
-            print(f"  {label}: copy failed, skipping ({error})")
-            failed.append(label)
-            continue
-        dest = os.path.join(staging_dir, str(unit.seq))
-        try:
-            list_csv = write_custom_list(
-                unit.rel_paths,
-                os.path.join(unit.out_dir, f"slide_list_{unit.index:04d}.csv"),
+    def tile_chunk(unit, staged_dir):
+        """Tile one staged chunk: seg then coords, against the local copy."""
+        info = unit.payload
+        list_csv = write_custom_list(
+            unit.rel_paths,
+            os.path.join(info.out_dir, f"slide_list_{info.index:04d}.csv"),
+        )
+        if gpu >= 0:
+            wait_for_gpu(gpu, min_free_gib, gpu_wait)
+        for command in tiling_commands(
+            list_csv, info.out_dir, staged_dir, **tiling_kwargs
+        ):
+            print("    " + format_command(command))
+            if not run_with_retries(command, env, retries, retry_wait):
+                print(f"  {unit.label}: giving up, leaving its slides for a re-run")
+                return ChunkResult(ok=False, failed_slides=[])
+        # The chunk ran to completion; any slide still without its .h5 was
+        # skipped by --skip_errors. Log it, keep the rest.
+        errored = [
+            rel
+            for rel in unit.rel_paths
+            if not already_tiled(rel, info.out_dir, coords_subdir)
+        ]
+        if errored:
+            record_failed_slides(failed_log, info.csv_rel, errored)
+            print(
+                f"  {unit.label}: {len(errored)} slide(s) failed and were "
+                f"skipped, logged to {failed_log}"
             )
-            print(f"  {label}: {len(unit.rel_paths)} slides staged -> {dest}")
-            if gpu >= 0:
-                wait_for_gpu(gpu, min_free_gib, gpu_wait)
-            chunk_ok = True
-            for command in tiling_commands(
-                list_csv, unit.out_dir, dest, **tiling_kwargs
-            ):
-                print("    " + format_command(command))
-                if not run_with_retries(command, env, retries, retry_wait):
-                    print(f"  {label}: giving up, leaving its slides for a re-run")
-                    failed.append(label)
-                    chunk_ok = False
-                    break
-            if chunk_ok:
-                # The chunk ran to completion; any slide still without its .h5
-                # was skipped by --skip_errors. Log it, keep the rest.
-                errored = [
-                    rel
-                    for rel in unit.rel_paths
-                    if not already_tiled(rel, unit.out_dir, coords_subdir)
-                ]
-                if errored:
-                    record_failed_slides(failed_log, unit.csv_rel, errored)
-                    failed_slides += len(errored)
-                    print(
-                        f"  {label}: {len(errored)} slide(s) failed and were "
-                        f"skipped, logged to {failed_log}"
-                    )
-        finally:
-            shutil.rmtree(dest, ignore_errors=True)
+        return ChunkResult(ok=True, failed_slides=errored)
 
-    if failed_slides:
-        print(f"\n{failed_slides} slide(s) failed and were skipped; see {failed_log}")
-    if failed:
-        print(f"\n{len(failed)} chunk(s) failed: {', '.join(failed)}")
+    outcome = stage_and_process(units, root, staging_dir, prefetch, tile_chunk)
+
+    if outcome.failed_slides:
+        print(
+            f"\n{len(outcome.failed_slides)} slide(s) failed and were skipped; "
+            f"see {failed_log}"
+        )
+    if outcome.failed_chunks:
+        print(
+            f"\n{len(outcome.failed_chunks)} chunk(s) failed: "
+            f"{', '.join(outcome.failed_chunks)}"
+        )
         print("Re-run the same command to retry them (finished slides are skipped).")
         sys.exit(1)
 

@@ -4,9 +4,9 @@ Feature extraction re-reads WSI pixels at every patch coordinate, so running it
 straight off the mounted NAS is dominated by random network reads. This script
 drives run_trident_stain_feats.py over slides staged on local disk instead: a
 background thread copies the next chunk of slides while the current one is being
-encoded, then each chunk is deleted. It is the staging strategy from
-tiling_from_csv_folders.py (whose copier, GPU gate and retry helpers it reuses)
-applied to the `feat` stage.
+encoded, then each chunk is deleted. That staging engine lives in nas_staging.py
+and is shared with the tiling pipeline; this script applies it to the `feat`
+stage.
 
 Usage:
     # What would run (dry-run):
@@ -37,21 +37,17 @@ the NAS just for TRIDENT to skip them.
 import argparse
 import csv
 import os
-import queue
-import shutil
-import subprocess
 import sys
-import threading
 from collections import namedtuple
 
-# The staging engine (copier, GPU preflight gate, retrying runner) already lives
-# in the tiling script; reuse it rather than growing a second copy.
-from tiling_from_csv_folders import (
+from nas_staging import (
+    ChunkResult,
+    StagedUnit,
     child_env,
     chunked,
-    copy_into_staging,
     format_command,
     run_with_retries,
+    stage_and_process,
     wait_for_gpu,
 )
 from trident_io import coords_dir_name, discover_coords, patches_dir
@@ -63,11 +59,11 @@ FEATS_SCRIPT = os.path.join(
 # Extensions the registry WSIs are scanned in, mirroring tiling_from_csv_folders.
 EXTENSIONS = (".svs", ".ndpi")
 
-# One chunk of slides to encode: `seq` gives the chunk its own staging subdir,
-# `stain` and `ext` are shared by every slide in it (one stain group, one
-# --slide_ext per run_trident_stain_feats.py invocation), and `slides` are
-# (slide_id, rel_path) pairs relative to the WSI root.
-WorkUnit = namedtuple("WorkUnit", "seq stain ext index slides")
+# What each staged chunk carries through nas_staging into encode_chunk():
+# `stain` and `ext` are shared by every slide in the chunk (one stain group and
+# one --slide_ext per run_trident_stain_feats.py invocation), and `slides` are
+# the (slide_id, rel_path) pairs it holds.
+ChunkInfo = namedtuple("ChunkInfo", "stain ext index slides")
 
 
 def load_stain_map(registry_csv, name_column="ANON_name", stain_column="Stain"):
@@ -175,7 +171,14 @@ def plan_units(tiled, stain_map, wsi_index, feats_dir, chunk_size):
     units = []
     for (stain, ext), slides in sorted(groups.items()):
         for index, chunk in enumerate(chunked(slides, chunk_size)):
-            units.append(WorkUnit(len(units), stain, ext, index, chunk))
+            units.append(
+                StagedUnit(
+                    seq=len(units),
+                    label=f"{stain} chunk {index}",
+                    rel_paths=[rel for _slide_id, rel in chunk],
+                    payload=ChunkInfo(stain, ext, index, chunk),
+                )
+            )
     return units, skipped
 
 
@@ -237,76 +240,56 @@ def run_pipeline(units, args, coords_dir, failed_log):
     outright is retried, then skipped rather than aborting the run; slides left
     without a feature .h5 afterwards are logged individually.
     """
-    ready = queue.Queue(maxsize=max(1, args.prefetch))
-    done = object()
     env = child_env()
-    failed_chunks = []
-    failed_slides = 0
 
     if os.path.exists(failed_log):
         os.remove(failed_log)
 
-    def copier():
-        for unit in units:
-            dest = os.path.join(args.staging_dir, str(unit.seq))
-            try:
-                copy_into_staging([rel for _sid, rel in unit.slides], args.wsi_dir, dest)
-            except Exception as error:  # transient NAS/read error: skip the chunk
-                shutil.rmtree(dest, ignore_errors=True)
-                ready.put((unit, error))
-                continue
-            ready.put((unit, None))
-        ready.put(done)
-
-    threading.Thread(target=copier, daemon=True).start()
-
-    while True:
-        item = ready.get()
-        if item is done:
-            break
-        unit, error = item
-        label = f"{unit.stain} chunk {unit.index}"
-        if error is not None:
-            print(f"  {label}: copy failed, skipping ({error})")
-            failed_chunks.append(label)
-            continue
-        dest = os.path.join(args.staging_dir, str(unit.seq))
-        try:
-            labels_csv = write_labels_csv(
-                unit.slides,
-                unit.stain,
-                os.path.join(
-                    args.job_dir, "_staged_feat_lists", f"{unit.seq:04d}.csv"
-                ),
+    def encode_chunk(unit, staged_dir):
+        """Extract features for one staged chunk (a single stain group)."""
+        info = unit.payload
+        labels_csv = write_labels_csv(
+            info.slides,
+            info.stain,
+            os.path.join(args.job_dir, "_staged_feat_lists", f"{unit.seq:04d}.csv"),
+        )
+        if args.gpu_index >= 0:
+            wait_for_gpu(args.gpu_index, args.min_free_gib, args.gpu_wait)
+        command = feats_command(labels_csv, staged_dir, args.job_dir, info.ext, args)
+        print("    " + format_command(command))
+        if not run_with_retries(command, env, args.retries, args.retry_wait):
+            print(f"  {unit.label}: giving up, leaving its slides for a re-run")
+            return ChunkResult(ok=False, failed_slides=[])
+        # The chunk ran to completion; any slide still without its feature .h5
+        # errored inside TRIDENT (--skip_errors) and is logged here.
+        feats_dir = resolve_features_dir(args.job_dir, coords_dir, args.enc_name)
+        errored = [
+            slide_id
+            for slide_id, _rel in info.slides
+            if not already_encoded(slide_id, feats_dir)
+        ]
+        if errored:
+            record_failed(failed_log, info.stain, errored)
+            print(
+                f"  {unit.label}: {len(errored)} slide(s) failed, "
+                f"logged to {failed_log}"
             )
-            print(f"  {label}: {len(unit.slides)} slides staged -> {dest}")
-            if args.gpu_index >= 0:
-                wait_for_gpu(args.gpu_index, args.min_free_gib, args.gpu_wait)
-            command = feats_command(labels_csv, dest, args.job_dir, unit.ext, args)
-            print("    " + format_command(command))
-            if not run_with_retries(command, env, args.retries, args.retry_wait):
-                print(f"  {label}: giving up, leaving its slides for a re-run")
-                failed_chunks.append(label)
-                continue
-            # The chunk ran to completion; any slide still without its feature
-            # .h5 errored inside TRIDENT (--skip_errors) and is logged here.
-            feats_dir = resolve_features_dir(args.job_dir, coords_dir, args.enc_name)
-            errored = [
-                slide_id
-                for slide_id, _rel in unit.slides
-                if not already_encoded(slide_id, feats_dir)
-            ]
-            if errored:
-                record_failed(failed_log, unit.stain, errored)
-                failed_slides += len(errored)
-                print(f"  {label}: {len(errored)} slide(s) failed, logged to {failed_log}")
-        finally:
-            shutil.rmtree(dest, ignore_errors=True)
+        return ChunkResult(ok=True, failed_slides=errored)
 
-    if failed_slides:
-        print(f"\n{failed_slides} slide(s) failed and were skipped; see {failed_log}")
-    if failed_chunks:
-        print(f"\n{len(failed_chunks)} chunk(s) failed: {', '.join(failed_chunks)}")
+    outcome = stage_and_process(
+        units, args.wsi_dir, args.staging_dir, args.prefetch, encode_chunk
+    )
+
+    if outcome.failed_slides:
+        print(
+            f"\n{len(outcome.failed_slides)} slide(s) failed and were skipped; "
+            f"see {failed_log}"
+        )
+    if outcome.failed_chunks:
+        print(
+            f"\n{len(outcome.failed_chunks)} chunk(s) failed: "
+            f"{', '.join(outcome.failed_chunks)}"
+        )
         print("Re-run the same command to retry them (encoded slides are skipped).")
         sys.exit(1)
 
