@@ -57,6 +57,7 @@ from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import discover_bags, load_val_names, make_collate_fn, get_bag_names
+from late_fusion import LateFusionSurv
 
 # ---------------------------------------------------------------------------
 # Dataset loading (val-only)
@@ -141,15 +142,20 @@ def _forward(model, batch, model_type):
 # ---------------------------------------------------------------------------
 
 
-def get_risk_scores(model, loader, device, model_type):
-    """Return (risk_scores, times, events) as float arrays, one entry per slide."""
+def get_risk_scores(model, loader, device, model_type, use_diagnosis=False):
+    """Return (risk_scores, times, events) as float arrays, one entry per slide.
+
+    When ``use_diagnosis`` is True, ``model`` is a LateFusionSurv wrapper whose
+    forward reads the diagnosis code from ``batch["Y"][:, 2]``.
+    """
     model.eval()
     risks, times, events = [], [], []
     # inference_mode disables autograd bookkeeping entirely — lower memory than no_grad
     with torch.inference_mode():
         for i, batch in enumerate(loader):
             batch = batch.to(device)
-            risk = _forward(model, batch, model_type).cpu().numpy()
+            out = model(batch) if use_diagnosis else _forward(model, batch, model_type)
+            risk = out.cpu().numpy()
             t = batch["Y"][:, 0].cpu().numpy()
             e = batch["Y"][:, 1].cpu().numpy()
             risks.extend(risk.tolist())
@@ -561,6 +567,22 @@ def main():
     parser.add_argument("--n_gcn_layers", type=int, default=4)
     parser.add_argument("--mlp_depth", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.0)
+    # Diagnosis-code late fusion (must match the trained checkpoint).
+    parser.add_argument(
+        "--use_diagnosis",
+        action="store_true",
+        help="Evaluate a late-fusion checkpoint conditioned on a diagnosis code. "
+        "Reads the code from the 3-element labels (Y[:, 2]); requires "
+        "--diagnosis_codes_json.",
+    )
+    parser.add_argument(
+        "--diagnosis_codes_json",
+        default="label_csvs/diagnosis_codes.json",
+        help="JSON vocabulary written by define_labels.py --with_diagnosis.",
+    )
+    parser.add_argument(
+        "--diag_dim", type=int, default=16, help="Diagnosis embedding dim (must match training)."
+    )
     args = parser.parse_args()
 
     is_graph = args.model_type in ("deepgraphsurv", "patchgcn")
@@ -630,6 +652,24 @@ def main():
             dropout=args.dropout,
         )
 
+    if args.use_diagnosis:
+        import json
+
+        n_label = int(val_dataset[0]["Y"].numel())
+        if n_label < 3:
+            parser.error(
+                "--use_diagnosis requires 3-element labels [time, event, code_idx], "
+                f"but the label files hold {n_label} values. Regenerate labels with "
+                "define_labels.py --with_diagnosis."
+            )
+        with open(args.diagnosis_codes_json, encoding="utf-8") as f:
+            codes_meta = json.load(f)
+        n_codes = codes_meta.get("n_codes") or (max(codes_meta["codes"].values()) + 1)
+        model = LateFusionSurv(
+            model, args.model_type, n_codes=n_codes, diag_dim=args.diag_dim
+        )
+        print(f"Late fusion enabled: {n_codes} diagnosis codes, diag_dim={args.diag_dim}")
+
     state = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state)
     model = model.to(device)
@@ -639,7 +679,9 @@ def main():
 
     # --- Inference -----------------------------------------------------------
     bag_names = get_bag_names(val_dataset)
-    risks, times, events = get_risk_scores(model, loader, device, args.model_type)
+    risks, times, events = get_risk_scores(
+        model, loader, device, args.model_type, use_diagnosis=args.use_diagnosis
+    )
     # Release the model from GPU as soon as inference is done
     model.cpu()
     del model

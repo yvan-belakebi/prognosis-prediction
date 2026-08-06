@@ -39,11 +39,25 @@ Usage (single-repo, no pretraining):
         --labels_paths   WSI/IgA/labels \\
         --val_csv validation_files_csvs/survival_validation_files.csv
 
-Labels (.npy, shape (2,)): [time_to_first_event, censoring_indicator]
+Usage (diagnosis-code late fusion): first regenerate labels with the code +
+vocabulary, then pass --use_diagnosis (works with any --model_type):
+    python python_scripts/prepare_for_MIL/define_labels.py --with_diagnosis
+    python MIL.py --model_type abmil --use_diagnosis \\
+        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
+        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
+        --val_csv validation_files_csvs/survival_validation_files.csv \\
+        --diagnosis_codes_json label_csvs/diagnosis_codes.json --diag_dim 16
+    # A learned code embedding is concatenated to the pooled bag vector before
+    # the risk head. --diag_dim must match at eval/inference time.
+
+Labels (.npy): [time_to_first_event, censoring_indicator], with an optional
+third element [.., .., diagnosis_code] when trained with --use_diagnosis
+(written by define_labels.py --with_diagnosis).
 """
 
 import os
 import sys
+import json
 import argparse
 from functools import partial
 
@@ -77,6 +91,7 @@ from mil_utils import (
     BiopsySampler,
     LossLogger,
 )
+from late_fusion import LateFusionSurv
 
 
 # ---------------------------------------------------------------------------
@@ -111,14 +126,14 @@ def _forward(model, batch, model_type: str) -> torch.Tensor:
 # Train / validation loops
 # ---------------------------------------------------------------------------
 def train_epoch(
-    model, loader, optimizer, device, model_type: str, accumulation_steps: int = 1
+    model, loader, optimizer, device, risk_fn, accumulation_steps: int = 1
 ) -> float:
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
     for i, batch in enumerate(loader):
         batch = batch.to(device)
-        risk = _forward(model, batch, model_type)
+        risk = risk_fn(model, batch)
         loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
         # Scale so that accumulated gradients match a single full-batch step.
         # Note: for Cox PH the risk set is per micro-batch, which is approximate
@@ -131,13 +146,13 @@ def train_epoch(
     return total_loss / len(loader)
 
 
-def val_epoch(model, loader, device, model_type: str) -> float:
+def val_epoch(model, loader, device, risk_fn) -> float:
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            risk = _forward(model, batch, model_type)
+            risk = risk_fn(model, batch)
             loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
             total_loss += loss.item()
     return total_loss / len(loader)
@@ -240,6 +255,30 @@ def main():
             "Path to labels_combined.csv for each entry in --features_paths, "
             "in the same order. Use 'none' for repos that need no filtering."
         ),
+    )
+
+    # --- Diagnosis-code late fusion -----------------------------------------
+    parser.add_argument(
+        "--use_diagnosis",
+        action="store_true",
+        help=(
+            "Condition the model on a per-bag diagnosis code via late fusion "
+            "(concat a learned code embedding to the pooled bag vector before "
+            "the risk head). Requires 3-element labels [time, event, code_idx] "
+            "and --diagnosis_codes_json (see define_labels.py --with_diagnosis)."
+        ),
+    )
+    parser.add_argument(
+        "--diagnosis_codes_json",
+        default="label_csvs/diagnosis_codes.json",
+        help="JSON mapping produced by define_labels.py; provides the code "
+             "vocabulary size (n_codes) for the diagnosis embedding.",
+    )
+    parser.add_argument(
+        "--diag_dim",
+        type=int,
+        default=16,
+        help="Diagnosis code embedding dimension (default: 16).",
     )
 
     parser.add_argument(
@@ -518,6 +557,29 @@ def main():
                 dropout=args.dropout,
             )
 
+    # --- Optional diagnosis-code late fusion ---------------------------------
+    if args.use_diagnosis:
+        ref_dataset = (
+            pretrain_dataset if pretrain_dataset is not None else train_dataset
+        )
+        n_label = int(ref_dataset[0]["Y"].numel())
+        if n_label < 3:
+            parser.error(
+                "--use_diagnosis requires 3-element labels [time, event, code_idx], "
+                f"but the label files hold {n_label} values. Regenerate labels with "
+                "define_labels.py --with_diagnosis."
+            )
+        with open(args.diagnosis_codes_json) as f:
+            codes_meta = json.load(f)
+        n_codes = codes_meta.get("n_codes") or (max(codes_meta["codes"].values()) + 1)
+        model = LateFusionSurv(
+            model, args.model_type, n_codes=n_codes, diag_dim=args.diag_dim
+        )
+        print(f"Late fusion enabled: {n_codes} diagnosis codes, diag_dim={args.diag_dim}")
+        risk_fn = lambda m, batch: m(batch)  # noqa: E731
+    else:
+        risk_fn = lambda m, batch: _forward(m, batch, args.model_type)  # noqa: E731
+
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -537,7 +599,7 @@ def main():
                 pretrain_loader,
                 optimizer,
                 device,
-                args.model_type,
+                risk_fn,
                 accumulation_steps=args.accumulation_steps,
             )
             logger.log(epoch, "pretrain", train_loss)
@@ -561,12 +623,12 @@ def main():
             train_loader,
             optimizer,
             device,
-            args.model_type,
+            risk_fn,
             accumulation_steps=args.accumulation_steps,
         )
 
         if val_loader is not None:
-            val_loss = val_epoch(model, val_loader, device, args.model_type)
+            val_loss = val_epoch(model, val_loader, device, risk_fn)
             logger.log(global_epoch, "finetune", train_loss, val_loss)
             print(
                 f"[Epoch {global_epoch:>3d}/{args.epochs}]"

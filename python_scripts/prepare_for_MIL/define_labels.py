@@ -42,6 +42,7 @@ Parameters
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -123,8 +124,38 @@ def make_bag_name(df, nest_biopsy):
     return df["file_name"].astype(str)
 
 
-def write_npy_labels(df, output_dir):
-    """Write one .npy per slide containing [time, event] (shape (2,), float64).
+def normalize_diagnosis(val):
+    """Strip a free-text diagnosis to a canonical string, or None if missing."""
+    if pd.isna(val):
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
+def build_diagnosis_code_map(diagnoses):
+    """Map distinct diagnosis strings to integer codes 1..N (0 = unknown/missing).
+
+    Index 0 is reserved for missing/unseen diagnoses (a neutral zero embedding in
+    the model via padding_idx=0), so the first real category starts at 1.
+
+    Returns
+    -------
+    (code_map, n_codes)
+        code_map : dict[str, int] mapping each diagnosis string to its index.
+        n_codes  : total vocabulary size including the reserved 0 slot.
+    """
+    uniq = sorted({d for d in map(normalize_diagnosis, diagnoses) if d is not None})
+    code_map = {name: i + 1 for i, name in enumerate(uniq)}
+    return code_map, len(uniq) + 1
+
+
+def write_npy_labels(df, output_dir, code_map=None):
+    """Write one .npy per slide with the survival label (float64).
+
+    Without ``code_map`` each file holds ``[time, event]`` (shape (2,)).  When a
+    ``code_map`` is provided, a third element is appended — the integer diagnosis
+    code from the row's ``diagnosis`` column, or 0 when missing/unseen — giving
+    ``[time, event, code_idx]`` (shape (3,)) consumed by MIL.py --use_diagnosis.
 
     Mirrors define_regression_labels._write_cohort: rows with a missing time or
     event are dropped, and the bag_name path (biopsy_number/file_name when
@@ -136,10 +167,11 @@ def write_npy_labels(df, output_dir):
     for _, row in df.iterrows():
         path = os.path.join(output_dir, f"{row['bag_name']}.npy")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        np.save(
-            path,
-            np.array([float(row["time"]), float(row["event"])], dtype=np.float64),
-        )
+        values = [float(row["time"]), float(row["event"])]
+        if code_map is not None:
+            code = code_map.get(normalize_diagnosis(row.get("diagnosis")), 0)
+            values.append(float(code))
+        np.save(path, np.array(values, dtype=np.float64))
     return len(df)
 
 
@@ -281,6 +313,16 @@ def main():
         help="Directory for all other CSV outputs.",
     )
 
+    # Diagnosis-code late fusion (opt-in). When set, .npy labels get a third
+    # element [time, event, code_idx] and a diagnosis_codes.json vocabulary is
+    # written for MIL.py --use_diagnosis. Default off keeps (2,) labels.
+    parser.add_argument(
+        "--with_diagnosis",
+        action="store_true",
+        help="Append an integer diagnosis code to each .npy label and write "
+        "<output_dir>/diagnosis_codes.json (for MIL.py --use_diagnosis).",
+    )
+
     # Biopsy-nesting layout for the written .npy labels and validation lists.
     # The CSVs always carry biopsy_number and file_name as separate columns;
     # this flag only controls the on-disk bag-name form (see make_bag_name).
@@ -368,6 +410,26 @@ def main():
     non_iga_df["bag_name"] = make_bag_name(non_iga_df, args.nest_biopsy)
     non_iga_df["split"] = "train"
 
+    # ── Diagnosis code column + vocabulary (opt-in) ───────────────────────────
+    # The IgA cohort CSV has no Diagnosis column; those slides are IgA
+    # nephropathy by construction, so they share the registry's is_IgA code.
+    # Registry/non-IgA slides carry the free-text Diagnosis from the CSV.
+    iga_df["diagnosis"] = "IgA nefropati"
+    registry_df["diagnosis"] = registry_df["Diagnosis"].apply(normalize_diagnosis)
+    non_iga_df["diagnosis"] = non_iga_df["Diagnosis"].apply(normalize_diagnosis)
+
+    code_map = None
+    if args.with_diagnosis:
+        all_diag = pd.concat(
+            [iga_df["diagnosis"], registry_df["diagnosis"], non_iga_df["diagnosis"]]
+        )
+        code_map, n_codes = build_diagnosis_code_map(all_diag)
+        codes_path = os.path.join(args.output_dir, "diagnosis_codes.json")
+        with open(codes_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"n_codes": n_codes, "codes": code_map}, f, ensure_ascii=False, indent=2
+            )
+
     # ── Assign train / val splits ─────────────────────────────────────────────
 
     split_kwargs = dict(
@@ -399,9 +461,11 @@ def main():
     # Per-slide .npy survival labels ([time, event]) — consumed by
     # MIL.py --labels_paths.  Split membership lives in the CSVs only; the .npy
     # files hold the label regardless of split (MIL.py splits at load time).
-    n_iga_npy = write_npy_labels(iga_df, args.iga_output_dir)
-    n_reg_npy = write_npy_labels(registry_df, args.registry_output_dir)
-    n_non_iga_npy = write_npy_labels(non_iga_df, args.non_iga_output_dir)
+    n_iga_npy = write_npy_labels(iga_df, args.iga_output_dir, code_map=code_map)
+    n_reg_npy = write_npy_labels(registry_df, args.registry_output_dir, code_map=code_map)
+    n_non_iga_npy = write_npy_labels(
+        non_iga_df, args.non_iga_output_dir, code_map=code_map
+    )
 
     # IgA full cohort (all clinical columns, useful for downstream analysis)
     iga_df.to_csv(os.path.join(args.output_dir, "full_data.csv"), index=False)
@@ -414,9 +478,13 @@ def main():
     # Combined label file (all three cohorts).  biopsy_number and file_name are
     # separate columns so downstream can match either the flat (file_name) or
     # nested (biopsy_number/file_name) WSI layout.
-    _label_cols = ["biopsy_number", "file_name", "time", "event", "stain", "source", "split"]
+    _label_cols = [
+        "biopsy_number", "file_name", "time", "event", "stain", "source", "split",
+        "diagnosis",
+    ]
     iga_labels = iga_df[
-        ["biopsy_number", "file_name", "time", "event", "Stain", "source", "split"]
+        ["biopsy_number", "file_name", "time", "event", "Stain", "source", "split",
+         "diagnosis"]
     ].rename(columns={"Stain": "stain"})
     registry_labels = registry_df[_label_cols]
     non_iga_labels = non_iga_df[_label_cols]
@@ -469,6 +537,11 @@ def main():
     print(f"  {os.path.join(args.output_dir, 'labels_unfiltered.csv')}")
     print(f"  {os.path.join(args.output_dir, 'full_data.csv')}")
     print(f"  {excluded_path}  ({len(iga_excluded)} slides excluded by date filter)")
+    if code_map is not None:
+        print(
+            f"  {codes_path}  ({n_codes} diagnosis codes incl. 0=unknown; "
+            f"labels written as [time, event, code_idx])"
+        )
 
 
 if __name__ == "__main__":

@@ -171,10 +171,42 @@ def main():
         action="store_true",
         help="Print per-patch attention weights (top 10).",
     )
+    # --- Diagnosis-code late fusion (must match the trained checkpoint) -------
+    parser.add_argument(
+        "--use_diagnosis",
+        action="store_true",
+        help="Load a late-fusion checkpoint that was conditioned on a diagnosis "
+        "code. Requires --diagnosis or --diagnosis_code and --diagnosis_codes_json.",
+    )
+    parser.add_argument(
+        "--diagnosis",
+        default=None,
+        help="Diagnosis string for this WSI (mapped to its code via "
+        "--diagnosis_codes_json; unknown/unlisted maps to 0).",
+    )
+    parser.add_argument(
+        "--diagnosis_code",
+        type=int,
+        default=None,
+        help="Diagnosis code index for this WSI (overrides --diagnosis).",
+    )
+    parser.add_argument(
+        "--diagnosis_codes_json",
+        default="label_csvs/diagnosis_codes.json",
+        help="JSON vocabulary written by define_labels.py --with_diagnosis.",
+    )
+    parser.add_argument(
+        "--diag_dim", type=int, default=16, help="Diagnosis embedding dim (must match training)."
+    )
     args = parser.parse_args()
 
     if args.model_type == "deepgraphsurv" and args.coords_folder is None:
         parser.error("--coords_folder is required for deepgraphsurv.")
+
+    if args.use_diagnosis and not _TORCHMIL_AVAILABLE:
+        parser.error("torchmil is required for --use_diagnosis late fusion.")
+    if args.use_diagnosis and args.diagnosis is None and args.diagnosis_code is None:
+        parser.error("--use_diagnosis requires --diagnosis or --diagnosis_code.")
 
     if not _TORCHMIL_AVAILABLE and args.model_type == "deepgraphsurv":
         parser.error("torchmil is required for deepgraphsurv but could not be imported.")
@@ -209,6 +241,31 @@ def main():
             compute_lambda_max=False,
         )
 
+    # --- Wrap for diagnosis-code late fusion (matches trained checkpoint) -----
+    diag_code = None
+    if args.use_diagnosis:
+        import json
+
+        from late_fusion import LateFusionSurv
+
+        with open(args.diagnosis_codes_json, encoding="utf-8") as f:
+            codes_meta = json.load(f)
+        n_codes = codes_meta.get("n_codes") or (max(codes_meta["codes"].values()) + 1)
+        if args.diagnosis_code is not None:
+            diag_code = args.diagnosis_code
+        else:
+            diag_code = codes_meta["codes"].get(args.diagnosis.strip(), 0)
+            if diag_code == 0:
+                print(
+                    f"Warning: diagnosis '{args.diagnosis}' not in vocabulary — "
+                    "using code 0 (unknown).",
+                    file=sys.stderr,
+                )
+        model = LateFusionSurv(
+            model, args.model_type, n_codes=n_codes, diag_dim=args.diag_dim
+        )
+        print(f"Late fusion: diagnosis code {diag_code} of {n_codes}.")
+
     # --- Load checkpoint -----------------------------------------------------
     if not os.path.isfile(args.checkpoint):
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
@@ -233,7 +290,19 @@ def main():
 
     # --- Inference -----------------------------------------------------------
     with torch.no_grad():
-        if args.model_type == "abmil":
+        if args.use_diagnosis:
+            # The wrapper reads the code from batch["Y"][:, 2]; time/event are
+            # unused at inference so are left as zeros.
+            batch = {
+                "X": x,
+                "mask": mask,
+                "Y": torch.tensor([[0.0, 0.0, float(diag_code)]], device=device),
+            }
+            if adj is not None:
+                batch["adj"] = adj
+            out = model(batch, return_att=args.return_att)
+            output, att = out if args.return_att else (out, None)
+        elif args.model_type == "abmil":
             if args.return_att and _TORCHMIL_AVAILABLE:
                 output, att = model(x, mask, return_att=True)
             else:
