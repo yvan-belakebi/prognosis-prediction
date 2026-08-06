@@ -385,7 +385,7 @@ def main():
             sample = ", ".join(slide_ids[:5])
             more = " …" if len(slide_ids) > 5 else ""
             print(f"  skipped, {reason}: {len(slide_ids)} ({sample}{more})")
-    total = sum(len(unit.slides) for unit in units)
+    total = sum(len(unit.rel_paths) for unit in units)
     print(f"{total} slide(s) to encode in {len(units)} chunk(s)")
     if not units:
         print("nothing to do")
@@ -393,10 +393,7 @@ def main():
 
     if not args.run:
         for unit in units:
-            print(
-                f"  {unit.stain} chunk {unit.index} ({unit.ext}): "
-                f"{len(unit.slides)} slides"
-            )
+            print(f"  {unit.label} ({unit.payload.ext}): {len(unit.rel_paths)} slides")
         print("\n(dry run; pass --run to execute)")
         return
 
