@@ -377,7 +377,8 @@ def main():
 
     print(
         f"{len(tiled)} tiled slide(s) in {coords_dir}; "
-        f"{len(stain_map)} stain(s) in the registry; "
+        f"{len(stain_map)} slide(s) in the registry "
+        f"({len(set(stain_map.values()))} distinct stains); "
         f"{len(wsi_index)} WSI(s) under {args.wsi_dir}"
     )
     for reason, slide_ids in skipped.items():
