@@ -19,15 +19,16 @@ work. --chunk_size and --prefetch bound how much local disk is used at once
 (roughly (prefetch + 1) chunks). A chunk is tiled by a single TRIDENT
 invocation, so a larger chunk also amortizes TRIDENT's per-run model loading.
 
-<csv_dir> is a folder of subfolders, each holding slide-list CSVs with header
-columns `wsi_anon_name`, `year` and `lab_name` (see file_for_hrafn.csv). Every
-CSV found below <csv_dir> is read, and each slide is looked up in the registry
-under {root}/{collection}/{year}_anon/{wsi_anon_name}{.svs,.ndpi}, where {year}
-is the prefix of the slide name ("{year}_{id}_ANON"). The CSV's own `year`
-column is ignored: it disagrees with the name prefix for a good share of slides,
-and the prefix is the one that matches the registry. The CSVs record neither the
-collection a slide lives in nor the format it was scanned in, so every
-combination is tried and the first one on disk wins.
+<csv_dir> is a folder of subfolders, each holding slide-list CSVs. The only
+column required is `wsi_anon_name` (see file_for_hrafn.csv); any other columns
+are ignored, so CSVs from different sources need not agree beyond that one
+header. Every CSV found below <csv_dir> is read, and each slide is looked up in
+the registry under {root}/{collection}/{year}_anon/{wsi_anon_name}{.svs,.ndpi},
+where {year} is the prefix of the slide name ("{year}_{id}_ANON"). A `year`
+column, where present, is ignored: it disagrees with the name prefix for a good
+share of slides, and the prefix is the one that matches the registry. The CSVs
+record neither the collection a slide lives in nor the format it was scanned in,
+so every combination is tried and the first one on disk wins.
 
 Each CSV is tiled into its own job dir, mirroring the CSV tree under --job_dir:
 <csv_dir>/labA/a.csv is tiled into <job_dir>/labA/a/. A slide listed in two CSVs
