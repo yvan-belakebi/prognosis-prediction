@@ -98,8 +98,13 @@ def index_wsis(wsi_dir, extensions=EXTENSIONS):
     what gets kept.
     """
     index = {}
-    for dirpath, _dirs, names in os.walk(wsi_dir):
-        for name in names:
+    for dirpath, dirs, names in os.walk(wsi_dir):
+        # ponytail: sorted walk makes "first wins" deterministic instead of
+        # filesystem order. Falls out of it: "2016_anon" sorts before
+        # "2016_anon_problem", so the clean copy wins. Add an explicit
+        # preference rule only if a duplicate ever needs the later path.
+        dirs.sort()
+        for name in sorted(names):
             stem, ext = os.path.splitext(name)
             if ext.lower() not in extensions:
                 continue
