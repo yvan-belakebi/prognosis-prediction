@@ -105,3 +105,34 @@ python python_scripts/evaluate_MIL/visualize_attention.py --features_paths WSI/I
 
 5) Survival model
 python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1
+
+6) Multi-stain fusion (UNICORN-style)
+
+Predicts at the *biopsy* level instead of the slide level: the biopsy's slides are grouped by
+stain, each stain is encoded by its own 2-layer transformer + attention pooling into one token,
+a 2-layer transformer aggregates the stain tokens, and a single linear head outputs a Cox risk
+score (--task survival) or a continuous target (--task regression). Stains a biopsy does not
+have are masked out, so biopsies with different stain panels train together.
+
+    python_scripts/MIL/multistain_data.py   biopsy-level, multi-stain bags
+    python_scripts/MIL/multistain_model.py  MultiStainFusion (per-stain encoders + aggregator)
+    python_scripts/MIL/multistain_MIL.py    training script (both tasks)
+
+Inputs are the same as the single-stain scripts: the biopsy-nested features from
+reorganize_trident_feats.py, the .npy labels from define_labels.py / define_regression_labels.py,
+and labels_unfiltered.csv for the per-slide stain. A stain argument may merge source names with
+'|' ("HES|HE"); matching ignores case and punctuation.
+
+# Survival
+python python_scripts/MIL/multistain_MIL.py --task survival --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels --stain_csvs label_csvs/labels_unfiltered.csv --stains PAS PASM "HES|HE" Congo AFOG --val_csv validation_files_csvs/survival_validation_20pct_both.csv --patches_per_stain 512 --batch_size 8 --epochs 50 --checkpoint_dir checkpoints_multistain --log_dir results/losses_multistain
+
+# Regression (eGFR)
+python python_scripts/MIL/multistain_MIL.py --task regression --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --stain_csvs label_csvs/labels_unfiltered.csv --stains PAS PASM "HES|HE" Congo AFOG --val_csv validation_files_csvs/regression_validation_files.csv --patches_per_stain 512 --batch_size 8 --epochs 50 --checkpoint_dir checkpoints_multistain_regression --log_dir results/losses_multistain_regression
+
+# GPU memory scales as batch_size x n_stains x patches_per_stain x feat_dim; lower
+# --patches_per_stain first if it does not fit. Prefer that over lowering --batch_size for
+# survival: the Cox risk set is the micro-batch, so a small batch weakens the loss and
+# --accumulation_steps does not compensate for it. --share_stain_encoder uses one patch
+# encoder for all stains, which helps when the rarer stains cover few biopsies.
+# The stain vocabulary and architecture are written to
+# {checkpoint_dir}/multistain_config.json so evaluation can rebuild the same model.
