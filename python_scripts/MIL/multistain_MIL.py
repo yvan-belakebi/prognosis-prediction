@@ -33,6 +33,11 @@ A stain argument may list aliases separated by '|' ("HES|HE"); the first name is
 one reported.  Stains absent from --stains are ignored, and biopsies keep whichever
 of the selected stains they happen to have — missing stains are masked out.
 
+Regression labels are z-scored on the training biopsies before training; the reported
+MAE and the residual plot (``residuals.png`` in the log dir) are converted back to raw
+label units, and ``label_mean`` / ``label_std`` go into the config so inference can
+invert the model output with ``raw = pred * label_std + label_mean``.
+
 Alongside the checkpoints, ``multistain_config.json`` records the stain vocabulary and
 the architecture, so evaluation and inference can rebuild the exact same model.
 """
@@ -121,7 +126,13 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
 
 @torch.no_grad()
 def val_epoch(model, loader, device, task, criterion):
-    """Return (avg_loss, metric) — metric is the C-index (survival) or the MAE."""
+    """Return (avg_loss, metric, preds, targets).
+
+    ``metric`` is the C-index (survival) or the MAE (regression, in whatever units
+    the labels were fed in — see the normalisation block in main()).  ``preds`` and
+    ``targets`` are returned so the caller can build the residual plot without a
+    second pass over the validation set.
+    """
     model.eval()
     total_loss = 0.0
     preds, targets = [], []
@@ -142,7 +153,60 @@ def val_epoch(model, loader, device, task, criterion):
         metric = concordance_index(preds, targets[:, 0], targets[:, 1])
     else:
         metric = float(np.abs(preds - targets[:, 0]).mean())
-    return total_loss / max(len(loader), 1), metric
+    return total_loss / max(len(loader), 1), metric, preds, targets
+
+
+# ---------------------------------------------------------------------------
+# Residual diagnostics
+# ---------------------------------------------------------------------------
+def save_residual_plot(y_true, y_pred, path, label_name="label"):
+    """Two-panel regression diagnostic, in raw label units.
+
+    Left: predicted vs observed against the identity line — shows the regression-to-
+    the-mean flattening that MIL models on small cohorts tend to produce.
+    Right: residual vs predicted — a spread that widens with the prediction means the
+    errors are multiplicative, which is the signal to model log(label) instead.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not available — skipping residual plot.")
+        return
+
+    resid = y_pred - y_true
+    mae = float(np.abs(resid).mean())
+    rmse = float(np.sqrt((resid**2).mean()))
+    ss_tot = float(((y_true - y_true.mean()) ** 2).sum())
+    r2 = 1.0 - float((resid**2).sum()) / ss_tot if ss_tot > 0 else float("nan")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
+
+    lo = float(min(y_true.min(), y_pred.min()))
+    hi = float(max(y_true.max(), y_pred.max()))
+    pad = 0.05 * (hi - lo) if hi > lo else 1.0
+    ax1.scatter(y_true, y_pred, s=20, alpha=0.6, edgecolor="none")
+    ax1.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=1, label="identity")
+    ax1.set_xlabel(f"Observed {label_name}")
+    ax1.set_ylabel(f"Predicted {label_name}")
+    ax1.set_title(f"MAE {mae:.1f} | RMSE {rmse:.1f} | R² {r2:.2f}")
+    ax1.legend()
+
+    ax2.scatter(y_pred, resid, s=20, alpha=0.6, edgecolor="none")
+    ax2.axhline(0, color="k", ls="--", lw=1)
+    ax2.axhline(
+        resid.mean(), color="tab:red", ls=":", lw=1, label=f"bias {resid.mean():+.1f}"
+    )
+    ax2.set_xlabel(f"Predicted {label_name}")
+    ax2.set_ylabel("Residual (pred − obs)")
+    ax2.set_title("Residuals")
+    ax2.legend()
+
+    for ax in (ax1, ax2):
+        ax.grid(True, linestyle=":", alpha=0.6)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Residual plot saved to {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +315,11 @@ def main():
         choices=["mse", "mae"],
         help="Regression loss (ignored when --task survival).",
     )
+    parser.add_argument(
+        "--label_name",
+        default="eGFR",
+        help="Display name of the regression target, used on the residual plot axes.",
+    )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint_dir", default="checkpoints_multistain")
@@ -306,6 +375,32 @@ def main():
 
     train_records, val_records = split_records(records, load_val_names(args.val_csv))
     print(f"Biopsies — train: {len(train_records)} | val: {len(val_records)}")
+
+    # --- Label normalisation (regression only) --------------------------------
+    # The head is LayerNorm -> Linear with default init, so it starts predicting ~0
+    # while raw eGFR sits around 60: the first epochs are spent walking the head bias
+    # up to the mean, against a weight decay that pulls it back to 0.  Z-scoring puts
+    # the target on the scale the head already predicts on, and makes the loss
+    # magnitude (and hence the shared --lr / --weight_decay defaults) comparable with
+    # the scale-free Cox objective.
+    #
+    # Statistics come from the *training* biopsies only — including val would leak,
+    # and one value per biopsy rather than per slide keeps multi-slide biopsies from
+    # getting extra weight.  A single pooled scaler is used across cohorts: per-cohort
+    # scaling would erase genuine cohort differences and is not invertible at
+    # inference, where the cohort is unknown.
+    label_mean, label_std = 0.0, 1.0
+    if args.task == "regression":
+        y = np.array([r["label"][0] for r in train_records], dtype=np.float64)
+        label_mean, label_std = float(y.mean()), float(y.std())
+        if label_std == 0:
+            parser.error("Training labels have zero variance — nothing to regress on.")
+        for rec in train_records + val_records:
+            rec["label"] = (rec["label"] - label_mean) / label_std
+        print(
+            f"Train {args.label_name}: {label_mean:.1f} ± {label_std:.1f} "
+            f"(range {y.min():.1f}–{y.max():.1f}) — labels z-scored"
+        )
 
     train_ds = MultiStainBiopsyDataset(
         train_records,
@@ -369,7 +464,7 @@ def main():
     checkpoint_name = args.checkpoint_name or f"multistain_{args.task}.pth"
     log_dir = args.log_dir or args.checkpoint_dir
     logger = MultiStainLogger(log_dir)
-    metric_name = "c-index" if args.task == "survival" else "MAE"
+    metric_name = "c-index" if args.task == "survival" else f"MAE({args.label_name})"
     print(f"Loss log: {logger.csv_path}  |  val metric: {metric_name}")
 
     with open(os.path.join(args.checkpoint_dir, "multistain_config.json"), "w") as f:
@@ -388,6 +483,11 @@ def main():
                 "pool_att_dim": args.pool_att_dim,
                 "gated": not args.no_gated_pool,
                 "share_stain_encoder": args.share_stain_encoder,
+                # Inverse transform for the model output: raw = pred * std + mean.
+                # Identity (0, 1) for survival, where the Cox score has no units.
+                "label_name": args.label_name,
+                "label_mean": label_mean,
+                "label_std": label_std,
             },
             f,
             indent=2,
@@ -407,7 +507,13 @@ def main():
         )
 
         if val_loader is not None:
-            val_loss, metric = val_epoch(model, val_loader, device, args.task, criterion)
+            val_loss, metric, _, _ = val_epoch(
+                model, val_loader, device, args.task, criterion
+            )
+            # The MAE comes back in z-score units; report it in raw label units so the
+            # log reads in mL/min/1.73m². Monotone, so best-model selection is unaffected.
+            if args.task == "regression":
+                metric *= label_std
             logger.log(epoch, "train", train_loss, val_loss, metric)
             print(
                 f"[Epoch {epoch:>3d}/{args.epochs}] train_loss={train_loss:.4f}"
@@ -439,6 +545,22 @@ def main():
         print(f"Best val {metric_name}: {best_metric:.4f}")
 
     logger.save_plot()
+
+    # --- Residual diagnostics on the best checkpoint ---------------------------
+    if args.task == "regression" and best_metric is not None:
+        best_path = os.path.join(
+            args.checkpoint_dir, f"multistain_{args.task}_best.pth"
+        )
+        model.load_state_dict(torch.load(best_path, map_location=device))
+        _, _, preds, targets = val_epoch(
+            model, val_loader, device, args.task, criterion
+        )
+        save_residual_plot(
+            targets[:, 0] * label_std + label_mean,
+            preds * label_std + label_mean,
+            os.path.join(log_dir, "residuals.png"),
+            label_name=args.label_name,
+        )
 
 
 if __name__ == "__main__":
