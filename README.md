@@ -136,3 +136,29 @@ python python_scripts/MIL/multistain_MIL.py --task regression --features_paths W
 # encoder for all stains, which helps when the rarer stains cover few biopsies.
 # The stain vocabulary and architecture are written to
 # {checkpoint_dir}/multistain_config.json so evaluation can rebuild the same model.
+
+# Stain-weight analysis — which stain drove which prediction, and can you trust it
+python python_scripts/evaluate_MIL/analyze_stain_weights.py --checkpoint checkpoints_multistain/multistain_survival_best.pth --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels --stain_csvs label_csvs/labels_unfiltered.csv --val_csv validation_files_csvs/survival_validation_files.csv --split val --output_dir results/stain_analysis
+
+# Reads the stain vocabulary and architecture from multistain_config.json next to the
+# checkpoint, so the flags only describe the data. Writes, into --output_dir:
+#   stain_contributions.csv          per biopsy: prediction, label, and each stain's
+#                                    signed contribution / attention weight / lift
+#   stain_contribution_heatmap.png   biopsies (sorted by prediction) x stains
+#   stain_contribution_by_stain.png  cohort distribution per stain
+#   stain_waterfall.png              three example biopsies, low / median / high
+#   stain_ablation.csv/.png          leave-one-stain-out change in C-index (or MAE)
+#   panel_baseline.csv               is the stain panel prognostic on its own?
+#
+# Report the *contribution*, not the attention weight: attention is renormalised over
+# whichever stains a biopsy happens to have, so 0.33 means "uniform" in a 3-stain panel
+# and "strongly upweighted" in a 10-stain one, and it carries no direction. The
+# contribution is signed and reconstructs the prediction exactly (the script asserts
+# this every batch). Use --lift_* in the CSV if you want the panel-size-corrected
+# attention instead.
+#
+# Read panel_baseline.csv before making any claim about a stain: if the availability
+# pattern alone is prognostic (Congo gets ordered when amyloid is suspected), part of
+# what looks like stain importance is really panel-composition signal.
+# The ablation is most meaningful when the model was trained with --stain_dropout > 0,
+# which makes a masked stain in-distribution rather than a distribution shift.
