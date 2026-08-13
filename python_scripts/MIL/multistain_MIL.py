@@ -105,6 +105,18 @@ def _predict(model, batch, device):
     return model(batch["X"].to(device), batch["stain_mask"].to(device))
 
 
+def _seed_worker(worker_id):
+    """Give each DataLoader worker its own numpy stream.
+
+    The dataset draws patch subsets and stain-dropout masks with ``np.random``, but
+    PyTorch only reseeds ``torch`` per worker — numpy is left alone, so every worker
+    would otherwise replay the identical sequence of draws.  ``torch.initial_seed()``
+    is already ``base_seed + worker_id`` with a fresh base seed per epoch, so keying
+    off it varies the stream across both workers and epochs.
+    """
+    np.random.seed(torch.initial_seed() % 2**32)
+
+
 def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_steps=1):
     model.train()
     total_loss = 0.0
@@ -279,6 +291,15 @@ def main():
         help="Patches sampled per stain per biopsy. Drives memory: one sample costs "
              "n_stains x patches_per_stain x feat_dim floats.",
     )
+    parser.add_argument(
+        "--stain_dropout",
+        type=float,
+        default=0.0,
+        help="Training augmentation: probability of masking out each available stain, "
+             "drawn independently per stain per epoch. Teaches the model to predict "
+             "from partial stain sets instead of leaning on the most available stain. "
+             "At least one stain always survives. 0 disables; try 0.2-0.3.",
+    )
 
     # --- Model ---------------------------------------------------------------
     parser.add_argument("--d_model", type=int, default=256, help="Token dimension.")
@@ -407,7 +428,10 @@ def main():
         n_stains=len(vocab),
         patches_per_stain=args.patches_per_stain,
         random_subsample=True,
+        stain_dropout=args.stain_dropout,
     )
+    # Validation keeps every stain (and the deterministic patch selection) so the
+    # metric measures the model, not the draw.
     val_ds = (
         MultiStainBiopsyDataset(
             val_records,
@@ -426,6 +450,7 @@ def main():
         shuffle=True,
         num_workers=args.num_workers,
         drop_last=(args.task == "survival" and len(train_ds) > args.batch_size),
+        worker_init_fn=_seed_worker,
     )
     val_loader = (
         DataLoader(
@@ -475,6 +500,7 @@ def main():
                 "stain_names": vocab.names,
                 "feat_dim": train_ds.feat_dim,
                 "patches_per_stain": args.patches_per_stain,
+                "stain_dropout": args.stain_dropout,
                 "d_model": args.d_model,
                 "stain_layers": args.stain_layers,
                 "agg_layers": args.agg_layers,

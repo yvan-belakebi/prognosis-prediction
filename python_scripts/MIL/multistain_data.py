@@ -26,6 +26,9 @@ identical copies of a patch set gives the same softmax-weighted output as attend
 over the set once (each weight is simply split across its copies).  Only the stain
 axis is masked, via ``stain_mask``.
 
+``stain_dropout`` optionally masks out available stains at random during training, so
+the model sees stain combinations other than the one each biopsy happens to carry.
+
 Returned sample (all tensors, so torch's default collate stacks them):
 
     X          (n_stains, patches_per_stain, D)  float32, zeros where the stain is absent
@@ -318,6 +321,9 @@ class MultiStainBiopsyDataset(Dataset):
         random_subsample: Draw a fresh random patch subset on every access. Set True
             for training, False for validation / inference.
         feat_dim: Feature dimension. Read from the first record when None.
+        stain_dropout: Probability of masking out each *available* stain, drawn
+            independently per stain on every access (see ``__getitem__``). Training-time
+            augmentation only — leave at 0.0 for validation / inference.
     """
 
     def __init__(
@@ -327,11 +333,15 @@ class MultiStainBiopsyDataset(Dataset):
         patches_per_stain: int = 512,
         random_subsample: bool = True,
         feat_dim: int = None,
+        stain_dropout: float = 0.0,
     ) -> None:
         self.records = list(records)
         self.n_stains = n_stains
         self.patches_per_stain = patches_per_stain
         self.random_subsample = random_subsample
+        self.stain_dropout = float(stain_dropout)
+        if not 0.0 <= self.stain_dropout < 1.0:
+            raise ValueError(f"stain_dropout must be in [0, 1), got {stain_dropout}.")
         self.feat_dim = feat_dim if feat_dim is not None else self._peek_feat_dim()
 
     def _peek_feat_dim(self) -> int:
@@ -343,6 +353,26 @@ class MultiStainBiopsyDataset(Dataset):
     def __len__(self) -> int:
         return len(self.records)
 
+    def _keep_stains(self, rec) -> list:
+        """Stain indices to load for this access, after stain dropout.
+
+        Each available stain is dropped independently with probability
+        ``stain_dropout``.  Biopsies vary in which stains they have, so without this
+        the model never sees a stain combination other than the one each biopsy
+        happens to carry, and the aggregator is free to lean on whichever stain is
+        near-universal.  Dropping is decided *before* the features are read, so a
+        dropped stain costs no disk I/O.
+
+        At least one stain always survives — an empty mask would make the
+        aggregator's attention softmax undefined — so single-stain biopsies are never
+        emptied, and an all-dropped draw falls back to one randomly kept stain.
+        """
+        stain_ids = list(rec["slides"])
+        if self.stain_dropout <= 0.0 or len(stain_ids) <= 1:
+            return stain_ids
+        keep = [s for s in stain_ids if np.random.rand() >= self.stain_dropout]
+        return keep or [stain_ids[np.random.randint(len(stain_ids))]]
+
     def __getitem__(self, i):
         rec = self.records[i]
         X = torch.zeros(
@@ -350,7 +380,8 @@ class MultiStainBiopsyDataset(Dataset):
         )
         stain_mask = torch.zeros(self.n_stains, dtype=torch.bool)
 
-        for stain_idx, paths in rec["slides"].items():
+        for stain_idx in self._keep_stains(rec):
+            paths = rec["slides"][stain_idx]
             bag = _read_stain_bag(paths, self.patches_per_stain, self.random_subsample)
             if bag is None:
                 continue
