@@ -12,6 +12,11 @@ Two cohorts are processed in parallel, mirroring define_labels.py:
 
 .npy files contain a scalar float64 (the eGFR value).
 
+Outlier filter: slides with eGFR above --max_label (default 200) get no .npy at all,
+which is what keeps them out of both training and validation — index_biopsies drops
+slides with no label file, so nothing has to be passed at training time.  The filter
+runs before the validation split, so the quantile strata are built on plausible values.
+
 Validation split: stratified by eGFR quantile so the value distribution is
 preserved across train/val.  All slides from the same patient stay in the
 same split.  Use --val_source to control which cohort(s) contribute val slides.
@@ -41,6 +46,45 @@ from define_labels import (
     make_bag_name,
 )  # noqa: E402
 from val_split import select_val_patients, write_val_csvs  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Outlier filtering
+# ---------------------------------------------------------------------------
+
+
+def _drop_outliers(df, label_col, max_label, source):
+    """Drop rows whose label exceeds ``max_label``, reporting what went.
+
+    Must be called *before* ``select_val_patients`` and before the .npy files are
+    written, for two reasons:
+
+      * the quantile strata in select_val_patients are then computed on plausible
+        values only, instead of putting 130 and 20411 in the same top stratum;
+      * not writing a label file is what excludes a biopsy from training *and*
+        validation — index_biopsies drops slides that have no .npy — so no flag has
+        to be remembered at training, evaluation or inference time.
+
+    eGFR above ~200 is not physiologically reachable (normal adult 90-120,
+    hyperfiltration up to ~180), and the offending values are computed ones that
+    recur identically across unrelated biopsies — the signature of a bad creatinine
+    fed through the estimating equation.
+    """
+    if max_label is None:
+        return df
+    # NaN > x is False, so missing labels are preserved here and handled as before
+    # by the dropna in _write_cohort.
+    keep = ~(df[label_col] > max_label)
+    dropped = df.loc[~keep]
+    if len(dropped):
+        print(
+            f"  {source}: dropped {len(dropped)} slides / "
+            f"{dropped['biopsy_number'].nunique()} biopsies / "
+            f"{dropped['patient'].nunique()} patients "
+            f"with {label_col} > {max_label:g} "
+            f"(range {dropped[label_col].min():.1f}-{dropped[label_col].max():.1f})"
+        )
+    return df[keep].copy()
+
 
 # ---------------------------------------------------------------------------
 # Per-cohort label writing
@@ -105,6 +149,17 @@ def main():
         default="2006-01-01",
         help="Exclude IgA biopsies before this date (same filter as "
         "define_labels.py). Pass 'none' to disable.",
+    )
+
+    # Outlier filter
+    parser.add_argument(
+        "--max_label",
+        type=float,
+        default=200.0,
+        help="Drop slides whose eGFR exceeds this, before the val split and before "
+        "any .npy is written. eGFR above ~200 is not physiologically reachable, and "
+        "the registry cohorts carry computed values up to 20411 that otherwise "
+        "dominate the label variance. Pass 'inf' to disable.",
     )
 
     # Validation split
@@ -190,6 +245,7 @@ def main():
     iga_df = iga_df.rename(columns={args.iga_label_col: "eGFR", "PERSON_NR": "patient"})
     iga_df["source"] = "IgA"
     iga_df["bag_name"] = make_bag_name(iga_df, args.nest_biopsy)
+    iga_df = _drop_outliers(iga_df, "eGFR", args.max_label, "IgA")
 
     iga_val_patients = (
         select_val_patients(iga_df, "patient", "eGFR", agg="mean", **split_kwargs)
@@ -226,6 +282,7 @@ def main():
     reg_df = reg_df.rename(columns={args.registry_label_col: "eGFR", "stain": "Stain"})
     reg_df["source"] = "registry"
     reg_df["bag_name"] = make_bag_name(reg_df, args.nest_biopsy)
+    reg_df = _drop_outliers(reg_df, "eGFR", args.max_label, "registry")
 
     reg_val_patients = (
         select_val_patients(reg_df, "patient", "eGFR", agg="mean", **split_kwargs)
@@ -275,6 +332,7 @@ def main():
         )
         non_iga_df["source"] = "non_IgA"
         non_iga_df["bag_name"] = make_bag_name(non_iga_df, args.nest_biopsy)
+        non_iga_df = _drop_outliers(non_iga_df, "eGFR", args.max_label, "non_IgA")
         # val_patients=[] → all rows get split="train"
         non_iga_df = _write_cohort(
             non_iga_df, "eGFR", "patient", args.non_iga_output_dir, [], split_kwargs
