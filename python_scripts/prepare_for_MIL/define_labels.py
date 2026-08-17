@@ -225,9 +225,20 @@ def _parse_registry_time_event(df):
     # file_name is the slide stem; biopsy_number is the biopsy directory name
     # (kept separate so downstream can pick flat or nested layout — see make_bag_name).
     df["file_name"] = df["ANON_name"].astype(str)
-    df["biopsy_number"] = (
-        df["biop_number"].astype(str).apply(transform_label).apply(biopsy_to_dirname)
-    )
+    # The raw biop_number is used verbatim, NOT via transform_label/biopsy_to_dirname.
+    # That pair matches the leading lab code without capturing it, so 'B1310959' and
+    # 'BG1310959' — two different patients' biopsies from two different labs — both
+    # normalise to '10959-13' and get merged into one directory (23 such collisions;
+    # see build_biopsy_name_mapping.py).  The registry WSI/feature/label directories are
+    # named with the raw form by apply_biopsy_rename.py, so this must match it exactly.
+    #
+    # The raw values are safe to use as directory names: all of them match
+    # ^[A-Za-z]{1,2}\d{2}\d+$ with no whitespace, separators or nulls.
+    #
+    # The IgA cohort (load_iga_cohort) still goes through transform_label, because its
+    # directories are not renamed — its only normalisation clash ('B14 1974' with
+    # 'B1401974') is one biopsy written two ways, which should stay merged.
+    df["biopsy_number"] = df["biop_number"].astype(str).str.strip()
     df.rename(
         columns={"ID_diagnosis": "patient", "Stain": "stain"},
         inplace=True,
