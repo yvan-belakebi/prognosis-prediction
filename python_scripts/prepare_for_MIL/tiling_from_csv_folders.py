@@ -42,6 +42,7 @@ TRIDENT errors out on a list entry it cannot find.
 import argparse
 import csv
 import os
+import shutil
 import subprocess
 import sys
 from collections import namedtuple
@@ -193,7 +194,6 @@ def tiling_commands(
     gpus=0,
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
     dump_patches=True,
-    visualize=True,
     seg_batch_size=None,
     skip_errors=True,
     clear_dead_locks=True,
@@ -239,11 +239,20 @@ def tiling_commands(
     ]
     if dump_patches:
         coords.append("--dump_patches")
-    if not visualize:
-        # TRIDENT draws a patch-grid thumbnail per slide by default (its
-        # run_patching_job(visualize=True)); --no_visualize turns that off.
-        coords.append("--no_visualize")
     return [seg, coords]
+
+
+def drop_visualization(out_dir, coords_subdir):
+    """Delete the patch-grid overlay thumbnails TRIDENT wrote for this job dir.
+
+    TRIDENT always draws one jpg per slide (its run_patching_job takes
+    visualize=True and run_batch_of_slides.py exposes no flag for it), and the
+    vendored TRIDENT checkout is untracked, so --no-visualize reclaims the
+    space here rather than by patching TRIDENT on every machine.
+    """
+    shutil.rmtree(
+        os.path.join(out_dir, coords_subdir, "visualization"), ignore_errors=True
+    )
 
 
 # What each staged chunk carries through nas_staging into tile_chunk():
@@ -286,6 +295,10 @@ def run_direct(results, root, run, tiling_kwargs):
     Used for dry runs and --no_staging; `run` gates whether the commands are
     actually executed or only printed.
     """
+    visualize = tiling_kwargs.pop("visualize", True)
+    coords_subdir = coords_dir_name(
+        tiling_kwargs["mag"], tiling_kwargs["patch_size"], tiling_kwargs["overlap"]
+    )
     env = child_env()
     for _csv_rel, out_dir, found in results:
         list_csv = write_custom_list(found, os.path.join(out_dir, "slide_list.csv"))
@@ -293,6 +306,8 @@ def run_direct(results, root, run, tiling_kwargs):
             print("  " + format_command(command))
             if run:
                 subprocess.run(command, check=True, env=env)
+        if run and not visualize:
+            drop_visualization(out_dir, coords_subdir)
 
 
 def already_tiled(rel_path, out_dir, coords_subdir):
@@ -349,6 +364,7 @@ def run_pipeline(
     reported at the end and the run exits non-zero so a re-run can mop them up
     (finished slides are skipped by TRIDENT's own resume).
     """
+    visualize = tiling_kwargs.pop("visualize", True)
     coords_subdir = coords_dir_name(
         tiling_kwargs["mag"], tiling_kwargs["patch_size"], tiling_kwargs["overlap"]
     )
@@ -395,6 +411,8 @@ def run_pipeline(
             if not run_with_retries(command, env, retries, retry_wait):
                 print(f"  {unit.label}: giving up, leaving its slides for a re-run")
                 return ChunkResult(ok=False, failed_slides=[])
+        if not visualize:
+            drop_visualization(info.out_dir, coords_subdir)
         # The chunk ran to completion; any slide still without its .h5 was
         # skipped by --skip_errors. Log it, keep the rest.
         errored = [
@@ -464,9 +482,11 @@ def main():
         "--visualize",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="also write the per-slide patch-grid overlay thumbnail to "
-        "<job_dir>/<coords_dir>/visualization (default: on; --no-visualize "
-        "skips it, saving a thumbnail read and a jpg per slide)",
+        help="keep the per-slide patch-grid overlay thumbnails TRIDENT writes "
+        "to <job_dir>/<coords_dir>/visualization (default: on; --no-visualize "
+        "deletes that dir after each chunk, saving a jpg per slide). TRIDENT "
+        "always draws them, so this reclaims the space rather than skipping "
+        "the work.",
     )
     parser.add_argument(
         "--run",
