@@ -193,6 +193,7 @@ def tiling_commands(
     gpus=0,
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
     dump_patches=True,
+    visualize=True,
     seg_batch_size=None,
     skip_errors=True,
     clear_dead_locks=True,
@@ -238,6 +239,10 @@ def tiling_commands(
     ]
     if dump_patches:
         coords.append("--dump_patches")
+    if not visualize:
+        # TRIDENT draws a patch-grid thumbnail per slide by default (its
+        # run_patching_job(visualize=True)); --no_visualize turns that off.
+        coords.append("--no_visualize")
     return [seg, coords]
 
 
@@ -456,6 +461,14 @@ def main():
         "(default: on; --no-dump_patches for coordinates only)",
     )
     parser.add_argument(
+        "--visualize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="also write the per-slide patch-grid overlay thumbnail to "
+        "<job_dir>/<coords_dir>/visualization (default: on; --no-visualize "
+        "skips it, saving a thumbnail read and a jpg per slide)",
+    )
+    parser.add_argument(
         "--run",
         action="store_true",
         help="run TRIDENT (default: print the commands and exit)",
@@ -573,6 +586,7 @@ def main():
         gpus=args.gpus,
         min_tissue_proportion=args.min_tissue_proportion,
         dump_patches=args.dump_patches,
+        visualize=args.visualize,
         seg_batch_size=args.seg_batch_size,
         skip_errors=args.skip_errors,
         clear_dead_locks=args.clear_dead_locks,
