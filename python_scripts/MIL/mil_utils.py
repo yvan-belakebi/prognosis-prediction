@@ -9,7 +9,9 @@ classification_MIL.py, regression_MIL.py, and evaluate_survival.py.
 import csv
 import os
 import random
+import subprocess
 import sys
+import time
 
 import h5py
 import numpy as np
@@ -468,6 +470,95 @@ def build_dataset(
     val_labels = np.concatenate(val_labels_parts) if val_labels_parts else None
 
     return train_ds, val_ds, train_labels, val_labels
+
+
+# ---------------------------------------------------------------------------
+# GPU memory tracing
+# ---------------------------------------------------------------------------
+_MB = 1024 ** 2
+
+
+class GpuMemLogger:
+    """Per-step CUDA memory trace, for OOMs that only strike occasionally.
+
+    Each row separates three things that an OOM message conflates:
+
+    - ``alloc_mb`` / ``peak_mb`` — tensors this process holds, and its peak
+      during the step. Rising at constant batch shape means we leak.
+    - ``reserved_mb`` — what the caching allocator keeps from the driver. It
+      only ever grows; a gap between reserved and peak is fragmentation.
+    - ``other_mb`` — device memory that is neither free nor reserved by us:
+      this process's CUDA context (a fixed few hundred MB) plus *every other
+      process on the GPU*. Jumps here are somebody else's job arriving, which
+      no amount of tuning on our side can prevent.
+
+    ``bag_n`` (the padded patch count) is logged alongside, because activation
+    memory scales with the largest slide in the batch, so a rare huge slide and
+    external pressure both look like "it OOMs sometimes" from the outside.
+    """
+
+    HEADER = [
+        "t", "phase", "step", "batch_b", "bag_n", "adj_nnz",
+        "alloc_mb", "peak_mb", "reserved_mb", "free_mb", "total_mb", "other_mb",
+        "oom",
+    ]
+
+    def __init__(self, log_dir, filename="gpu_mem.csv"):
+        os.makedirs(log_dir, exist_ok=True)
+        self.path = os.path.join(log_dir, filename)
+        self.phase = ""
+        with open(self.path, "w", newline="") as f:
+            csv.writer(f).writerow(self.HEADER)
+
+    def set_phase(self, phase):
+        self.phase = phase
+
+    def step_start(self):
+        torch.cuda.reset_peak_memory_stats()
+
+    def log(self, step, batch, oom=False):
+        free, total = torch.cuda.mem_get_info()
+        reserved = torch.cuda.memory_reserved()
+        x = batch["X"]
+        adj = batch.get("adj", None)
+        row = [
+            f"{time.time():.1f}", self.phase, step,
+            x.shape[0], x.shape[1],
+            adj._nnz() if adj is not None and adj.is_sparse else -1,
+            round(torch.cuda.memory_allocated() / _MB),
+            round(torch.cuda.max_memory_allocated() / _MB),
+            round(reserved / _MB),
+            round(free / _MB),
+            round(total / _MB),
+            round((total - free - reserved) / _MB),
+            int(oom),
+        ]
+        with open(self.path, "a", newline="") as f:
+            csv.writer(f).writerow(row)
+        return dict(zip(self.HEADER, row))
+
+    def report_oom(self, step, batch):
+        """Log the failing step and print who else was on the GPU at that moment."""
+        row = self.log(step, batch, oom=True)
+        print("")
+        print(
+            f"[OOM] {self.phase} step {step}: batch {row['batch_b']}x{row['bag_n']} patches | "
+            f"ours alloc {row['alloc_mb']} MB, peak {row['peak_mb']} MB, "
+            f"reserved {row['reserved_mb']} MB | device free {row['free_mb']} MB | "
+            f"context+other processes {row['other_mb']} MB",
+            flush=True,
+        )
+        try:
+            procs = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",
+                 "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+            print(f"[OOM] processes on the GPU (mine is pid {os.getpid()}):", flush=True)
+            print(procs, flush=True)
+        except Exception as e:  # nvidia-smi missing or wedged: not worth failing over
+            print(f"[OOM] nvidia-smi unavailable: {e}", flush=True)
+        print(f"[OOM] trace written to {self.path}", flush=True)
 
 
 # ---------------------------------------------------------------------------

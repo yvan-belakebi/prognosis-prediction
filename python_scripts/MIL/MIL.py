@@ -87,6 +87,7 @@ from mil_utils import (
     load_val_names,
     load_authorized_slides,
     make_collate_fn,
+    GpuMemLogger,
     build_dataset,
     BiopsySampler,
     LossLogger,
@@ -126,20 +127,30 @@ def _forward(model, batch, model_type: str) -> torch.Tensor:
 # Train / validation loops
 # ---------------------------------------------------------------------------
 def train_epoch(
-    model, loader, optimizer, device, risk_fn, accumulation_steps: int = 1
+    model, loader, optimizer, device, risk_fn, accumulation_steps: int = 1,
+    mem_logger=None,
 ) -> float:
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
     for i, batch in enumerate(loader):
         batch = batch.to(device)
-        risk = risk_fn(model, batch)
-        loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
-        # Scale so that accumulated gradients match a single full-batch step.
-        # Note: for Cox PH the risk set is per micro-batch, which is approximate
-        # but acceptable in practice.
-        (loss / accumulation_steps).backward()
+        if mem_logger is not None:
+            mem_logger.step_start()
+        try:
+            risk = risk_fn(model, batch)
+            loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
+            # Scale so that accumulated gradients match a single full-batch step.
+            # Note: for Cox PH the risk set is per micro-batch, which is approximate
+            # but acceptable in practice.
+            (loss / accumulation_steps).backward()
+        except torch.OutOfMemoryError:
+            if mem_logger is not None:
+                mem_logger.report_oom(i, batch)
+            raise
         total_loss += loss.item()
+        if mem_logger is not None:
+            mem_logger.log(i, batch)
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
             optimizer.step()
             optimizer.zero_grad()
@@ -359,6 +370,15 @@ def main():
             "Randomly subsample each slide to at most this many patches before "
             "the adjacency matrix is built. Required for PatchGCN / DeepGraphSurv "
             "on large slides (e.g. --max_patches 4096)."
+        ),
+    )
+    parser.add_argument(
+        "--mem_debug",
+        action="store_true",
+        help=(
+            "Write a per-step CUDA memory trace to <log_dir>/gpu_mem.csv and, on "
+            "an OOM, dump the failing batch shape plus the other processes "
+            "holding GPU memory. Use with monitor_gpu.py."
         ),
     )
     parser.add_argument(
@@ -590,10 +610,19 @@ def main():
     logger = LossLogger(log_dir)
     print(f"Loss log: {logger.csv_path}")
 
+    mem_logger = None
+    if args.mem_debug:
+        if device.type != "cuda":
+            parser.error("--mem_debug requires a CUDA device.")
+        mem_logger = GpuMemLogger(log_dir)
+        print(f"GPU memory trace: {mem_logger.path}")
+
     # --- Phase 1: pretrain on non-IgA (no validation) ------------------------
     if do_pretrain:
         print(f"\n--- Pretrain phase: {args.pretrain_epochs} epochs on non-IgA ---")
         for epoch in range(1, args.pretrain_epochs + 1):
+            if mem_logger is not None:
+                mem_logger.set_phase(f"pretrain{epoch}")
             train_loss = train_epoch(
                 model,
                 pretrain_loader,
@@ -601,6 +630,7 @@ def main():
                 device,
                 risk_fn,
                 accumulation_steps=args.accumulation_steps,
+                mem_logger=mem_logger,
             )
             logger.log(epoch, "pretrain", train_loss)
             print(
@@ -618,6 +648,8 @@ def main():
     print(f"\n--- Finetune phase: {finetune_epochs} epochs on IgA datasets ---")
     for epoch in range(1, finetune_epochs + 1):
         global_epoch = epoch + args.pretrain_epochs
+        if mem_logger is not None:
+            mem_logger.set_phase(f"finetune{global_epoch}")
         train_loss = train_epoch(
             model,
             train_loader,
@@ -625,6 +657,7 @@ def main():
             device,
             risk_fn,
             accumulation_steps=args.accumulation_steps,
+            mem_logger=mem_logger,
         )
 
         if val_loader is not None:
