@@ -50,13 +50,13 @@ if (
 ):
     sys.path.insert(0, _torchmil_root)
 
-from torchmil.datasets import ProcessedMILDataset
 from torchmil.data import collate_fn
 from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
+    BagDataset,
     discover_bags,
     drop_empty_bags,
     load_val_names,
@@ -86,7 +86,7 @@ def build_val_dataset(
         names_here = drop_empty_bags(fp, names_here, file_ext)
         if names_here:
             datasets.append(
-                ProcessedMILDataset(
+                BagDataset(
                     features_path=fp,
                     labels_path=lp,
                     coords_path=cp,

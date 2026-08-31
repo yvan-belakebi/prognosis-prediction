@@ -35,6 +35,27 @@ if (
 from torchmil.datasets import ProcessedMILDataset  # noqa: E402
 
 
+class BagDataset(ProcessedMILDataset):
+    """ProcessedMILDataset without the unbounded in-memory bag cache.
+
+    Upstream ``__getitem__`` stores every bag it has ever built in
+    ``self.loaded_bags`` and never evicts. One pass over the 31k-bag non-IgA
+    pretrain set therefore accumulates the entire feature archive in host RAM
+    (tens of GB) and the process is killed by the OOM killer partway through
+    the first epoch — a silent SIGKILL with no traceback.
+
+    Rebuilding a bag from disk is cheap next to a training step, so the cache
+    is kept only when the caller explicitly asked to preload everything with
+    ``load_at_init=True``.
+    """
+
+    def __getitem__(self, index):
+        bag = super().__getitem__(index)
+        if not self.load_at_init:
+            self.loaded_bags.pop(self.bag_names[index], None)
+        return bag
+
+
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
     """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
 
@@ -423,12 +444,12 @@ def build_dataset(
             f"{sum(before)} biopsies selected"
         )
 
-    # --- Pass 2: build ProcessedMILDataset objects ---------------------------
+    # --- Pass 2: build BagDataset objects ---------------------------
     for fp, lp, cp, train_names, val_names_here in zip(
         features_paths, labels_paths, coords_paths, all_train_names, all_val_names_here
     ):
         train_datasets.append(
-            ProcessedMILDataset(
+            BagDataset(
                 features_path=fp,
                 labels_path=lp,
                 coords_path=cp,
@@ -444,7 +465,7 @@ def build_dataset(
 
         if val_names_here:
             val_datasets.append(
-                ProcessedMILDataset(
+                BagDataset(
                     features_path=fp,
                     labels_path=lp,
                     coords_path=cp,
@@ -478,6 +499,27 @@ def build_dataset(
 _MB = 1024 ** 2
 
 
+def _host_mem_mb():
+    """(this process's RSS, system MemAvailable) in MB; (-1, -1) off Linux.
+
+    The GPU is not the only memory that ends a run: a host-RAM exhaustion shows
+    up as a bare "Killed" (SIGKILL from the OOM killer) with no traceback, so
+    the trace records both.
+    """
+    try:
+        with open("/proc/self/statm") as f:
+            rss = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / _MB
+        avail = -1
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) / 1024
+                    break
+        return round(rss), round(avail)
+    except Exception:
+        return -1, -1
+
+
 class GpuMemLogger:
     """Per-step CUDA memory trace, for OOMs that only strike occasionally.
 
@@ -500,7 +542,7 @@ class GpuMemLogger:
     HEADER = [
         "t", "phase", "step", "batch_b", "bag_n", "adj_nnz",
         "alloc_mb", "peak_mb", "reserved_mb", "free_mb", "total_mb", "other_mb",
-        "oom",
+        "rss_mb", "sys_avail_mb", "oom",
     ]
 
     def __init__(self, log_dir, filename="gpu_mem.csv"):
@@ -531,6 +573,7 @@ class GpuMemLogger:
             round(free / _MB),
             round(total / _MB),
             round((total - free - reserved) / _MB),
+            *_host_mem_mb(),
             int(oom),
         ]
         with open(self.path, "a", newline="") as f:
@@ -545,7 +588,8 @@ class GpuMemLogger:
             f"[OOM] {self.phase} step {step}: batch {row['batch_b']}x{row['bag_n']} patches | "
             f"ours alloc {row['alloc_mb']} MB, peak {row['peak_mb']} MB, "
             f"reserved {row['reserved_mb']} MB | device free {row['free_mb']} MB | "
-            f"context+other processes {row['other_mb']} MB",
+            f"context+other processes {row['other_mb']} MB | "
+            f"host RSS {row['rss_mb']} MB, system available {row['sys_avail_mb']} MB",
             flush=True,
         )
         try:

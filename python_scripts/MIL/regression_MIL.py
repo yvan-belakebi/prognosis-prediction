@@ -50,7 +50,6 @@ if (
 ):
     sys.path.insert(0, _torchmil_root)
 
-from torchmil.datasets import ProcessedMILDataset
 from torchmil.data import collate_fn
 from torchmil.models import abmil as abmil_module
 from torchmil.models import dsmil as dsmil_module
@@ -64,6 +63,7 @@ from mil_utils import (
     make_collate_fn,
     build_dataset,
     drop_empty_bags,
+    BagDataset,
     BiopsySampler,
     LossLogger as _BaseLossLogger,
 )
@@ -512,7 +512,7 @@ def main():
         pretrain_names = drop_empty_bags(
             args.pretrain_features_path, pretrain_names, args.file_ext
         )
-        pretrain_dataset = ProcessedMILDataset(
+        pretrain_dataset = BagDataset(
             features_path=args.pretrain_features_path,
             labels_path=args.pretrain_labels_path,
             coords_path=args.pretrain_coords_path,
