@@ -63,6 +63,7 @@ from mil_utils import (
     load_authorized_slides,
     make_collate_fn,
     build_dataset,
+    drop_empty_bags,
     BiopsySampler,
     LossLogger as _BaseLossLogger,
 )
@@ -508,6 +509,9 @@ def main():
         pretrain_names = discover_bags(args.pretrain_features_path)
         pretrain_labelled = set(discover_bags(args.pretrain_labels_path, extensions=(".npy",)))
         pretrain_names = [n for n in pretrain_names if n in pretrain_labelled]
+        pretrain_names = drop_empty_bags(
+            args.pretrain_features_path, pretrain_names, args.file_ext
+        )
         pretrain_dataset = ProcessedMILDataset(
             features_path=args.pretrain_features_path,
             labels_path=args.pretrain_labels_path,

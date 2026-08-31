@@ -11,6 +11,7 @@ import os
 import random
 import sys
 
+import h5py
 import numpy as np
 import pandas as pd
 import torch
@@ -52,6 +53,40 @@ def discover_bags(base_dir, extensions=(".npy", ".h5")):
                     if ext in extensions:
                         bags.append(f"{entry.name}/{stem}")
     return sorted(bags)
+
+
+def _bag_shape(file_path):
+    """Return the shape of a bag's feature array, reading headers only."""
+    if os.path.splitext(file_path)[1] == ".h5":
+        with h5py.File(file_path, "r") as f:
+            return f["features"].shape
+    return np.load(file_path, mmap_mode="r").shape
+
+
+def drop_empty_bags(features_path, bag_names, file_ext=".h5"):
+    """Drop bags whose feature file holds no usable patches.
+
+    TRIDENT writes an .h5 even when segmentation finds no tissue in a slide;
+    those files carry a features array of shape (0,), which has no patch
+    dimension and blows up in collate. Bags are filtered here, before the
+    datasets are built, so that bag_names stays aligned with what the loaders
+    yield — evaluate_survival.py pairs predictions with bag names positionally,
+    so bags must never be dropped later, inside collate.
+
+    Only file headers are read, so the scan is cheap even for tens of
+    thousands of bags.
+    """
+    keep = []
+    for name in bag_names:
+        shape = _bag_shape(os.path.join(features_path, name + file_ext))
+        if len(shape) >= 2 and shape[0] > 0:
+            keep.append(name)
+    if len(keep) < len(bag_names):
+        print(
+            f"  Skipped {len(bag_names) - len(keep)} bags with no patches in "
+            f"{features_path}"
+        )
+    return keep
 
 
 def get_filtered_bag_names(features_path, stain_csv, stain_filter):
@@ -358,6 +393,8 @@ def build_dataset(
         available = [n for n in available if n in labelled]
         if len(available) < n_before:
             print(f"  Skipped {n_before - len(available)} bags with no label file in {lp}")
+
+        available = drop_empty_bags(fp, available, file_ext)
 
         if val_names is not None:
             train_names = [n for n in available if n not in val_names]

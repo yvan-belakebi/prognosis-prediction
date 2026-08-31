@@ -56,7 +56,13 @@ from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
-from mil_utils import discover_bags, load_val_names, make_collate_fn, get_bag_names
+from mil_utils import (
+    discover_bags,
+    drop_empty_bags,
+    load_val_names,
+    make_collate_fn,
+    get_bag_names,
+)
 from late_fusion import LateFusionSurv
 
 # ---------------------------------------------------------------------------
@@ -77,6 +83,7 @@ def build_val_dataset(
         labelled = set(discover_bags(lp, extensions=(".npy",)))
         available = discover_bags(fp)
         names_here = [n for n in available if n in val_names and n in labelled]
+        names_here = drop_empty_bags(fp, names_here, file_ext)
         if names_here:
             datasets.append(
                 ProcessedMILDataset(
