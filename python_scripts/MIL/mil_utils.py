@@ -608,6 +608,25 @@ class GpuMemLogger:
 # ---------------------------------------------------------------------------
 # Loss logging
 # ---------------------------------------------------------------------------
+def _val_segments(df, col):
+    """Yield (rows, label) pairs of validation points, one segment per phase.
+
+    Pretrain and finetune validate on different cohorts (non-IgA vs
+    IgA + registry), so their losses are not on a comparable scale.  Drawing one
+    line per phase keeps the plot from implying a continuous curve across the
+    phase boundary.  When only one phase has validation data the label stays the
+    plain "val ..." it has always been.
+    """
+    rows = df[df[col].notna()]
+    if rows.empty:
+        return
+    base = col.replace("val_", "val ").replace("_", " ")
+    phases = list(dict.fromkeys(rows["phase"]))
+    for phase in phases:
+        grp = rows[rows["phase"] == phase]
+        yield grp, base if len(phases) == 1 else f"{base} ({phase})"
+
+
 class LossLogger:
     """CSV loss log + loss-curve plot, shared by the MIL training scripts.
 
@@ -651,14 +670,8 @@ class LossLogger:
 
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(df["epoch"], df["train_loss"], label="train loss")
-        val_rows = df["val_loss"].notna()
-        if val_rows.any():
-            ax.plot(
-                df.loc[val_rows, "epoch"],
-                df.loc[val_rows, "val_loss"],
-                linestyle="--",
-                label="val loss",
-            )
+        for grp, label in _val_segments(df, "val_loss"):
+            ax.plot(grp["epoch"], grp["val_loss"], linestyle="--", label=label)
         if pretrain_epochs > 0:
             ax.axvspan(
                 0.5, pretrain_epochs + 0.5, alpha=0.08, color="gray", label="pretrain"

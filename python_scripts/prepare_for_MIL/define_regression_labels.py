@@ -21,12 +21,21 @@ Validation split: stratified by eGFR quantile so the value distribution is
 preserved across train/val.  All slides from the same patient stay in the
 same split.  Use --val_source to control which cohort(s) contribute val slides.
 
+The non-IgA cohort is the pretraining set and is handled separately: pass
+--val_non_iga to hold out --val_frac of its patients, written to
+<val_csv stem>_non_IgA<ext> for regression_MIL.py --pretrain_val_csv.  It is
+kept out of --val_csv, which validates finetuning on IgA + registry only.
+
 Run from the project root:
     python python_scripts/prepare_for_MIL/define_regression_labels.py
 
     # IgA-only validation, 15 % val fraction:
     python python_scripts/prepare_for_MIL/define_regression_labels.py \\
         --val_source IgA --val_frac 0.15
+
+    # Add a 20 % non-IgA validation set for the pretrain phase:
+    python python_scripts/prepare_for_MIL/define_regression_labels.py \\
+        --val_non_iga --val_frac 0.2
 """
 
 import argparse
@@ -174,6 +183,14 @@ def main():
         "--n_bins", type=int, default=4, help="Quantile strata for stratified sampling."
     )
     parser.add_argument("--random_state", type=int, default=42)
+    parser.add_argument(
+        "--val_non_iga",
+        action="store_true",
+        help="Also hold out --val_frac of the non-IgA patients as a validation "
+        "set for the pretrain phase, written to <val_csv stem>_non_IgA.csv and "
+        "consumed by regression_MIL.py --pretrain_val_csv. Off by default, "
+        "which keeps every non-IgA slide in the pretrain training set.",
+    )
 
     # Biopsy-nesting layout for the written .npy labels and validation lists.
     # The summary CSV always carries biopsy_number and file_name as separate
@@ -308,9 +325,10 @@ def main():
         f"(mean {reg_df['eGFR'].mean():.1f})"
     )
 
-    # ── Non-IgA cohort (always train) ─────────────────────────────────────────
+    # ── Non-IgA cohort (pretrain; validated only with --val_non_iga) ──────────
 
     non_iga_full = load_non_iga_cohort(args.registry_csv)
+    non_iga_val_patients = []
 
     if args.registry_label_col not in non_iga_full.columns:
         print(
@@ -333,11 +351,27 @@ def main():
         non_iga_df["source"] = "non_IgA"
         non_iga_df["bag_name"] = make_bag_name(non_iga_df, args.nest_biopsy)
         non_iga_df = _drop_outliers(non_iga_df, "eGFR", args.max_label, "non_IgA")
-        # val_patients=[] → all rows get split="train"
+        # The non-IgA cohort is validated independently of --val_source: it feeds
+        # the pretrain phase, not the finetune phase the other two lists
+        # validate.  Without --val_non_iga the val list stays empty and every
+        # row gets split="train".
+        if args.val_non_iga:
+            non_iga_val_patients = select_val_patients(
+                non_iga_df, "patient", "eGFR", agg="mean", **split_kwargs
+            )
         non_iga_df = _write_cohort(
-            non_iga_df, "eGFR", "patient", args.non_iga_output_dir, [], split_kwargs
+            non_iga_df,
+            "eGFR",
+            "patient",
+            args.non_iga_output_dir,
+            non_iga_val_patients,
+            split_kwargs,
         )
-        print(f"non-IgA — {len(non_iga_df)} slides (all train)")
+        print(
+            f"non-IgA — {len(non_iga_df)} slides  "
+            f"(train {(non_iga_df['split']=='train').sum()}, "
+            f"val {(non_iga_df['split']=='val').sum()})"
+        )
         print(
             f"  eGFR: {non_iga_df['eGFR'].min():.1f} – {non_iga_df['eGFR'].max():.1f}  "
             f"(mean {non_iga_df['eGFR'].mean():.1f})"
@@ -367,6 +401,13 @@ def main():
         reg_df[reg_df["split"] == "val"][["bag_name"]].rename(
             columns={"bag_name": "file_name"}
         ),
+        non_iga_val_files=(
+            non_iga_df[non_iga_df["split"] == "val"][["bag_name"]].rename(
+                columns={"bag_name": "file_name"}
+            )
+            if args.val_non_iga
+            else None
+        ),
     )
 
     print(f"\nCombined val slides: {len(val_list)}")
@@ -376,12 +417,17 @@ def main():
     print(f"\nOutputs:")
     print(f"  {args.iga_output_dir}/        ({len(iga_df)} .npy files)")
     print(f"  {args.registry_output_dir}/   ({len(reg_df)} .npy files)")
-    print(f"  {args.non_iga_output_dir}/    ({len(non_iga_df)} .npy files, all train)")
+    print(f"  {args.non_iga_output_dir}/    ({len(non_iga_df)} .npy files)")
     print(f"  {args.summary_csv}")
     val_stem, val_ext = os.path.splitext(args.val_csv)
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")
     print(f"  {val_stem}_registry{val_ext}")
+    if args.val_non_iga:
+        print(
+            f"  {val_stem}_non_IgA{val_ext}  "
+            f"(pass to regression_MIL.py --pretrain_val_csv)"
+        )
 
 
 if __name__ == "__main__":

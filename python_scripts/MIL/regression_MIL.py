@@ -12,10 +12,27 @@ Supported models:
 
 Training loss: MSE by default; switch to MAE with --loss mae.
 
+Pretraining (--pretrain_features_path) can be validated too: pass
+--pretrain_val_csv with a non-IgA validation list (define_regression_labels.py
+--val_non_iga).  It is a separate list from --val_csv because the two phases
+train on different cohorts; both losses land in the same loss_log.csv, tagged
+by the phase column.
+
 Usage:
     python regression_MIL.py --model_type abmil \\
         --features_paths WSI/registry_IgA/UNI2-h_feats \\
         --labels_paths   WSI/registry_IgA/labels_regression \\
+        --val_csv validation_files_csvs/regression_validation_files.csv \\
+        --epochs 50
+
+Usage (validated pretraining on non-IgA):
+    python regression_MIL.py --model_type abmil \\
+        --pretrain_features_path WSI/non_IgA/UNI2-h_feats \\
+        --pretrain_labels_path   WSI/non_IgA/labels_regression \\
+        --pretrain_val_csv validation_files_csvs/regression_validation_files_non_IgA.csv \\
+        --pretrain_epochs 10 \\
+        --features_paths WSI/IgA_registry/UNI2-h_feats \\
+        --labels_paths   WSI/IgA_registry/labels_regression \\
         --val_csv validation_files_csvs/regression_validation_files.csv \\
         --epochs 50
 """
@@ -66,6 +83,7 @@ from mil_utils import (
     BagDataset,
     BiopsySampler,
     LossLogger as _BaseLossLogger,
+    _val_segments,
 )
 
 _GRAPH_MODELS = {"patchgcn"}
@@ -195,24 +213,14 @@ class LossLogger(_BaseLossLogger):
             ax.grid(True, linestyle=":", alpha=0.6)
 
         ax_loss.plot(df["epoch"], df["train_loss"], label="train loss")
-        val_rows = df["val_loss"].notna()
-        if val_rows.any():
-            ax_loss.plot(
-                df.loc[val_rows, "epoch"],
-                df.loc[val_rows, "val_loss"],
-                linestyle="--",
-                label="val loss",
-            )
+        for grp, label in _val_segments(df, "val_loss"):
+            ax_loss.plot(grp["epoch"], grp["val_loss"], linestyle="--", label=label)
         ax_loss.set_ylabel("Loss")
         ax_loss.legend()
 
-        mae_rows = df["val_mae"].notna()
-        if mae_rows.any():
+        for grp, label in _val_segments(df, "val_mae"):
             ax_mae.plot(
-                df.loc[mae_rows, "epoch"],
-                df.loc[mae_rows, "val_mae"],
-                color="tab:orange",
-                label="val MAE",
+                grp["epoch"], grp["val_mae"], color="tab:orange", label=label
             )
         ax_mae.set_ylabel("MAE")
         ax_mae.legend()
@@ -352,6 +360,15 @@ def main():
     parser.add_argument("--pretrain_features_path", default=None)
     parser.add_argument("--pretrain_labels_path", default=None)
     parser.add_argument("--pretrain_coords_path", default=None)
+    parser.add_argument(
+        "--pretrain_val_csv",
+        default=None,
+        help="Validation slide list for the pretrain phase (non-IgA), e.g. "
+        "validation_files_csvs/regression_validation_files_non_IgA.csv written by "
+        "define_regression_labels.py --val_non_iga. Those bags are held out of "
+        "the pretrain training set and scored each pretrain epoch. Omitted (the "
+        "default) means pretraining runs unvalidated on every non-IgA bag.",
+    )
     parser.add_argument("--pretrain_epochs", type=int, default=0)
 
     # Data
@@ -440,6 +457,10 @@ def main():
         )
     if do_pretrain and args.pretrain_epochs <= 0:
         parser.error("--pretrain_epochs must be > 0 with --pretrain_features_path.")
+    if args.pretrain_val_csv is not None and not do_pretrain:
+        parser.error(
+            "--pretrain_val_csv is only meaningful with --pretrain_features_path."
+        )
 
     is_graph = args.model_type in _GRAPH_MODELS
     bag_keys = ["X", "Y", "adj", "coords"] if is_graph else ["X", "Y"]
@@ -504,7 +525,7 @@ def main():
             f"Train {args.label_name}: {train_labels.mean():.1f} ± {train_labels.std():.1f}"
         )
 
-    pretrain_dataset = None
+    pretrain_dataset = pretrain_val_dataset = None
     if do_pretrain:
         pretrain_names = discover_bags(args.pretrain_features_path)
         pretrain_labelled = set(discover_bags(args.pretrain_labels_path, extensions=(".npy",)))
@@ -512,17 +533,43 @@ def main():
         pretrain_names = drop_empty_bags(
             args.pretrain_features_path, pretrain_names, args.file_ext
         )
-        pretrain_dataset = BagDataset(
-            features_path=args.pretrain_features_path,
-            labels_path=args.pretrain_labels_path,
-            coords_path=args.pretrain_coords_path,
-            bag_keys=bag_keys,
-            dist_thr=args.dist_thr,
-            bag_names=pretrain_names,
-            file_ext=args.file_ext,
-            label_ext=".npy",
+
+        # The pretrain val list is separate from --val_csv: it names non-IgA
+        # bags, while --val_csv names IgA + registry bags for the finetune
+        # phase.  Without --pretrain_val_csv every bag stays in training, which
+        # is the previous behaviour.
+        pretrain_val_names = load_val_names(args.pretrain_val_csv)
+
+        def _make_pretrain_ds(names):
+            return BagDataset(
+                features_path=args.pretrain_features_path,
+                labels_path=args.pretrain_labels_path,
+                coords_path=args.pretrain_coords_path,
+                bag_keys=bag_keys,
+                dist_thr=args.dist_thr,
+                bag_names=names,
+                file_ext=args.file_ext,
+                label_ext=".npy",
+            )
+
+        if pretrain_val_names is not None:
+            held_out = [n for n in pretrain_names if n in pretrain_val_names]
+            pretrain_names = [n for n in pretrain_names if n not in pretrain_val_names]
+            if held_out:
+                pretrain_val_dataset = _make_pretrain_ds(held_out)
+            else:
+                print(
+                    f"Warning: no pretrain bag matched {args.pretrain_val_csv} "
+                    f"— pretraining will run unvalidated."
+                )
+
+        pretrain_dataset = _make_pretrain_ds(pretrain_names)
+        pretrain_val_info = (
+            f" | Pretrain val bags: {len(pretrain_val_dataset)}"
+            if pretrain_val_dataset is not None
+            else ""
         )
-        print(f"Pretrain bags: {len(pretrain_dataset)}")
+        print(f"Pretrain bags: {len(pretrain_dataset)}{pretrain_val_info}")
 
     _collate = make_collate_fn(
         partial(collate_fn, sparse=not is_graph),
@@ -539,6 +586,9 @@ def main():
         )
 
     val_loader = _make_loader(val_dataset, False) if val_dataset else None
+    pretrain_val_loader = (
+        _make_loader(pretrain_val_dataset, False) if pretrain_val_dataset else None
+    )
     if args.biopsy_sampling:
         pretrain_loader = (
             _make_loader(pretrain_dataset, True, BiopsySampler(pretrain_dataset))
@@ -577,8 +627,18 @@ def main():
                 args.model_type,
                 args.accumulation_steps,
             )
-            logger.log(epoch, "pretrain", tl)
-            print(f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] loss={tl:.4f}")
+            if pretrain_val_loader is not None:
+                vl, mae, rmse = val_epoch(
+                    model, pretrain_val_loader, criterion, device, args.model_type
+                )
+                logger.log(epoch, "pretrain", tl, vl, mae, rmse)
+                print(
+                    f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] loss={tl:.4f}"
+                    f"  val_loss={vl:.4f}  MAE={mae:.2f}  RMSE={rmse:.2f}"
+                )
+            else:
+                logger.log(epoch, "pretrain", tl)
+                print(f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] loss={tl:.4f}")
             if args.save_every > 0 and epoch % args.save_every == 0:
                 torch.save(
                     model.state_dict(),

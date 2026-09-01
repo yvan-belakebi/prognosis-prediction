@@ -51,23 +51,35 @@ def select_val_patients(
     )[patient_col].tolist()
 
 
-def write_val_csvs(val_csv, iga_val_files, registry_val_files):
+def write_val_csvs(
+    val_csv, iga_val_files, registry_val_files, non_iga_val_files=None
+):
     """Write the validation slide lists from per-cohort val file_name frames.
 
-    Three files are written:
+    Up to four files are written:
       <val_csv>              — combined list (IgA + registry), with a header;
                                consumed by MIL.py --val_csv.
       <stem>_IgA<ext>        — IgA-only list, no header.
       <stem>_registry<ext>   — registry-only list, no header.
+      <stem>_non_IgA<ext>    — non-IgA list, with a header; written only when
+                               non_iga_val_files is given.  Consumed by
+                               MIL.py --pretrain_val_csv.
     where <stem>/<ext> are the splitext parts of val_csv.
+
+    The non-IgA slides are deliberately NOT merged into <val_csv>.  That list
+    validates the finetune phase, which trains on IgA + registry only; the
+    non-IgA slides validate the pretrain phase and are passed separately.
+    Merging them would report one loss over two different data distributions.
 
     Parameters
     ----------
     val_csv : path of the combined validation list.
     iga_val_files, registry_val_files : single-column DataFrames (column
         "file_name") holding the validation slides for each cohort.
+    non_iga_val_files : same, for the non-IgA pretrain cohort.  Pass None (the
+        default) to leave pretraining unvalidated and write no non-IgA list.
 
-    Returns the combined validation DataFrame.
+    Returns the combined (IgA + registry) validation DataFrame.
     """
     val_stem, val_ext = os.path.splitext(val_csv)
 
@@ -79,6 +91,8 @@ def write_val_csvs(val_csv, iga_val_files, registry_val_files):
     registry_val_files.to_csv(
         f"{val_stem}_registry{val_ext}", index=False, header=False
     )
+    if non_iga_val_files is not None:
+        non_iga_val_files.to_csv(f"{val_stem}_non_IgA{val_ext}", index=False)
 
     combined = pd.concat([iga_val_files, registry_val_files], ignore_index=True)
     combined.to_csv(val_csv, index=False)

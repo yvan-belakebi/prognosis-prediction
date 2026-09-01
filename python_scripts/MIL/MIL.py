@@ -3,14 +3,21 @@ MIL.py — Train and validate ABMIL, TransMIL, DeepGraphSurv or PatchGCN for WSI
 prognosis prediction.
 
 Two-phase training:
-  Phase 1 (pretrain): train on non-IgA data for --pretrain_epochs epochs (no validation).
+  Phase 1 (pretrain): train on non-IgA data for --pretrain_epochs epochs,
+                      optionally validated on a held-out non-IgA val set
+                      (--pretrain_val_csv).
   Phase 2 (finetune): train on combined IgA + IgA_registry for remaining epochs,
                       validated on the combined IgA + IgA_registry val sets.
+
+The two phases use separate val lists because they train on different cohorts:
+--pretrain_val_csv holds non-IgA bags, --val_csv holds IgA + registry bags.
+Both losses land in the same loss_log.csv, tagged by the phase column.
 
 Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
     python MIL.py --model_type abmil \\
         --pretrain_features_path WSI/non_IgA/UNI2-h_feats \\
         --pretrain_labels_path   WSI/non_IgA/labels \\
+        --pretrain_val_csv validation_files_csvs/survival_validation_files_non_IgA.csv \\
         --pretrain_epochs 20 \\
         --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
         --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
@@ -212,6 +219,15 @@ def main():
         "--pretrain_coords_path",
         default=None,
         help="Non-IgA coords folder for pretraining (deepgraphsurv / patchgcn only).",
+    )
+    parser.add_argument(
+        "--pretrain_val_csv",
+        default=None,
+        help="Validation slide list for the pretrain phase (non-IgA), e.g. "
+        "validation_files_csvs/survival_validation_files_non_IgA.csv written by "
+        "define_labels.py --val_non_iga. Those bags are held out of the pretrain "
+        "training set and scored each pretrain epoch. Omitted (the default) "
+        "means pretraining runs unvalidated on every non-IgA bag.",
     )
     parser.add_argument(
         "--pretrain_epochs",
@@ -451,6 +467,10 @@ def main():
             )
     if args.pretrain_epochs > 0 and not do_pretrain:
         parser.error("--pretrain_features_path is required when --pretrain_epochs > 0.")
+    if args.pretrain_val_csv is not None and not do_pretrain:
+        parser.error(
+            "--pretrain_val_csv is only meaningful with --pretrain_features_path."
+        )
 
     if args.model_type in ("deepgraphsurv", "patchgcn"):
         if args.coords_paths is None:
@@ -518,24 +538,40 @@ def main():
         authorized_slides=authorized_slides,
     )
 
-    pretrain_dataset = None
+    pretrain_dataset = pretrain_val_dataset = None
     if do_pretrain:
-        pretrain_dataset, _, _, _ = build_dataset(
+        # The pretrain val list is separate from --val_csv: it names non-IgA
+        # bags, while --val_csv names IgA + registry bags for the finetune
+        # phase.  build_dataset returns val_ds=None when val_names is None, so
+        # passing no --pretrain_val_csv keeps the old unvalidated behaviour.
+        pretrain_dataset, pretrain_val_dataset, _, _ = build_dataset(
             [args.pretrain_features_path],
             [args.pretrain_labels_path],
             [args.pretrain_coords_path] if args.pretrain_coords_path is not None else [None],
             bag_keys,
             args.dist_thr,
-            val_names=None,
+            val_names=load_val_names(args.pretrain_val_csv),
             stain_csvs=[None],
             stain_filter=None,
             file_ext=args.file_ext,
         )
+        if args.pretrain_val_csv is not None and pretrain_val_dataset is None:
+            # Silent fallback would be a trap: the val list and the feature dirs
+            # must agree on the biopsy-prefix form (see define_labels.py).
+            print(
+                f"Warning: no pretrain bag matched {args.pretrain_val_csv} "
+                f"— pretraining will run unvalidated."
+            )
 
     val_info = f" | Val bags: {len(val_dataset)}" if val_dataset is not None else ""
     print(f"Finetune train bags: {len(train_dataset)}{val_info}")
     if pretrain_dataset is not None:
-        print(f"Pretrain bags: {len(pretrain_dataset)}")
+        pretrain_val_info = (
+            f" | Pretrain val bags: {len(pretrain_val_dataset)}"
+            if pretrain_val_dataset is not None
+            else ""
+        )
+        print(f"Pretrain bags: {len(pretrain_dataset)}{pretrain_val_info}")
 
     # Subsample patches before adj is built to avoid OOM on large slides.
     _collate = make_collate_fn(
@@ -573,6 +609,16 @@ def main():
         )
     else:
         pretrain_loader = None
+    pretrain_val_loader = (
+        DataLoader(
+            pretrain_val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=_collate,
+        )
+        if pretrain_val_dataset is not None
+        else None
+    )
 
     # --- Model ---------------------------------------------------------------
     if args.model_type == "abmil":
@@ -652,7 +698,7 @@ def main():
         mem_logger = GpuMemLogger(log_dir)
         print(f"GPU memory trace: {mem_logger.path}")
 
-    # --- Phase 1: pretrain on non-IgA (no validation) ------------------------
+    # --- Phase 1: pretrain on non-IgA ----------------------------------------
     if do_pretrain:
         print(f"\n--- Pretrain phase: {args.pretrain_epochs} epochs on non-IgA ---")
         for epoch in range(1, args.pretrain_epochs + 1):
@@ -667,10 +713,19 @@ def main():
                 accumulation_steps=args.accumulation_steps,
                 mem_logger=mem_logger,
             )
-            logger.log(epoch, "pretrain", train_loss)
-            print(
-                f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] train_loss={train_loss:.4f}"
-            )
+            if pretrain_val_loader is not None:
+                val_loss = val_epoch(model, pretrain_val_loader, device, risk_fn)
+                logger.log(epoch, "pretrain", train_loss, val_loss)
+                print(
+                    f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}]"
+                    f" train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
+                )
+            else:
+                logger.log(epoch, "pretrain", train_loss)
+                print(
+                    f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}]"
+                    f" train_loss={train_loss:.4f}"
+                )
 
             if args.save_every > 0 and epoch % args.save_every == 0:
                 ckpt = os.path.join(

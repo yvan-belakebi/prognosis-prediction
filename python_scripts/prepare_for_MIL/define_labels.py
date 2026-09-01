@@ -12,7 +12,7 @@ Key outputs
   layout (file_name only).  Files are written under each cohort's output dir:
       <iga_output_dir>/        (default WSI/IgA/labels)
       <registry_output_dir>/   (default WSI/IgA_registry/labels)
-      <non_iga_output_dir>/    (default WSI/non_IgA/labels — always train)
+      <non_iga_output_dir>/    (default WSI/non_IgA/labels — pretrain cohort)
 
   <output_dir>/labels_unfiltered.csv        All slides (IgA + registry + non-IgA) with
                                             biopsy_number, file_name, time, event,
@@ -20,16 +20,25 @@ Key outputs
                                             file_name (slide stem) are separate columns
                                             so downstream can match flat (file_name) or
                                             nested (biopsy_number/file_name) layouts.
-                                            non-IgA slides always have split="train".
+                                            non-IgA slides are split only with
+                                            --val_non_iga, otherwise all train.
   <val_csv>                                 Flat list of validation slide names
                                             (file_name column); consumed directly
                                             by MIL.py --val_csv.
+  <val_csv stem>_non_IgA<ext>               Written with --val_non_iga: the non-IgA
+                                            validation slides for the pretrain
+                                            phase; pass to MIL.py
+                                            --pretrain_val_csv.  Kept out of
+                                            <val_csv>, which validates finetuning
+                                            on IgA + registry only.
   <output_dir>/full_data.csv               IgA cohort with all clinical columns.
 
 Parameters
 ----------
 --val_source    IgA | registry | both  (default: both)
-                Which cohort(s) contribute slides to the validation set.
+                Which cohort(s) contribute slides to the finetune validation set.
+--val_non_iga   Also hold out --val_frac of the non-IgA patients as a pretrain
+                validation set (default: off, i.e. all non-IgA slides train).
 --val_frac      Fraction of patients assigned to validation  (default: 0.2)
 --n_bins        Quantile strata for time-stratified patient sampling  (default: 4)
 --random_state  Random seed  (default: 42)
@@ -308,6 +317,14 @@ def main():
         default=42,
         help="Random seed for reproducibility.",
     )
+    parser.add_argument(
+        "--val_non_iga",
+        action="store_true",
+        help="Also hold out --val_frac of the non-IgA patients as a validation "
+        "set for the pretrain phase, written to <val_csv stem>_non_IgA.csv and "
+        "consumed by MIL.py --pretrain_val_csv. Off by default, which keeps "
+        "every non-IgA slide in the pretrain training set.",
+    )
 
     # Output paths
     parser.add_argument(
@@ -416,10 +433,10 @@ def main():
     registry_df = load_registry_cohort(args.registry_csv)
     registry_df["bag_name"] = make_bag_name(registry_df, args.nest_biopsy)
 
-    # Non-IgA registry — always train, never validated
+    # Non-IgA registry — pretrain cohort; split assigned below (all train
+    # unless --val_non_iga).
     non_iga_df = load_non_iga_cohort(args.registry_csv)
     non_iga_df["bag_name"] = make_bag_name(non_iga_df, args.nest_biopsy)
-    non_iga_df["split"] = "train"
 
     # ── Diagnosis code column + vocabulary (opt-in) ───────────────────────────
     # The IgA cohort CSV has no Diagnosis column; those slides are IgA
@@ -457,6 +474,13 @@ def main():
         if args.val_source in ("registry", "both")
         else []
     )
+    # The non-IgA cohort is validated independently of --val_source: it feeds
+    # the pretrain phase, not the finetune phase the other two lists validate.
+    non_iga_val_patients = (
+        select_val_patients(non_iga_df, "patient", "time", **split_kwargs)
+        if args.val_non_iga
+        else []
+    )
 
     iga_df["split"] = (
         iga_df["PERSON_NR"].isin(iga_val_patients).map({True: "val", False: "train"})
@@ -464,6 +488,11 @@ def main():
     registry_df["split"] = (
         registry_df["patient"]
         .isin(registry_val_patients)
+        .map({True: "val", False: "train"})
+    )
+    non_iga_df["split"] = (
+        non_iga_df["patient"]
+        .isin(non_iga_val_patients)
         .map({True: "val", False: "train"})
     )
 
@@ -517,6 +546,13 @@ def main():
         registry_df[registry_df["split"] == "val"][["bag_name"]].rename(
             columns={"bag_name": "file_name"}
         ),
+        non_iga_val_files=(
+            non_iga_df[non_iga_df["split"] == "val"][["bag_name"]].rename(
+                columns={"bag_name": "file_name"}
+            )
+            if args.val_non_iga
+            else None
+        ),
     )
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -535,16 +571,23 @@ def main():
         f"excluded (date filter): {len(iga_excluded):>4d}"
     )
     print(f"  Registry — train: {n_reg_train:>5d}  val: {n_reg_val:>4d}")
-    print(f"  non-IgA  — train: {len(non_iga_df):>5d}  val:    0  (always train)")
+    n_non_iga_train = (non_iga_df["split"] == "train").sum()
+    n_non_iga_val = (non_iga_df["split"] == "val").sum()
+    print(
+        f"  non-IgA  — train: {n_non_iga_train:>5d}  val: {n_non_iga_val:>4d}"
+        f"  (pretrain cohort)"
+    )
     print(f"  Combined val slides: {len(survival_val)}")
     print(f"\nOutputs:")
     print(f"  {args.iga_output_dir}/        ({n_iga_npy} .npy files)")
     print(f"  {args.registry_output_dir}/   ({n_reg_npy} .npy files)")
-    print(f"  {args.non_iga_output_dir}/    ({n_non_iga_npy} .npy files, all train)")
+    print(f"  {args.non_iga_output_dir}/    ({n_non_iga_npy} .npy files)")
     val_stem, val_ext = os.path.splitext(args.val_csv)
     print(f"  {args.val_csv}")
     print(f"  {val_stem}_IgA{val_ext}")
     print(f"  {val_stem}_registry{val_ext}")
+    if args.val_non_iga:
+        print(f"  {val_stem}_non_IgA{val_ext}  (pass to MIL.py --pretrain_val_csv)")
     print(f"  {os.path.join(args.output_dir, 'labels_unfiltered.csv')}")
     print(f"  {os.path.join(args.output_dir, 'full_data.csv')}")
     print(f"  {excluded_path}  ({len(iga_excluded)} slides excluded by date filter)")
