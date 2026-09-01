@@ -1,5 +1,6 @@
 """
-MIL.py — Train and validate ABMIL or DeepGraphSurv for WSI prognosis prediction.
+MIL.py — Train and validate ABMIL, TransMIL, DeepGraphSurv or PatchGCN for WSI
+prognosis prediction.
 
 Two-phase training:
   Phase 1 (pretrain): train on non-IgA data for --pretrain_epochs epochs (no validation).
@@ -32,6 +33,15 @@ Usage (DeepGraphSurv, two-phase — coords auto-read from features .h5, no --coo
         --log_dir results/losses_10_pretraining/ \\
         --dropout 0.1 --save_every 5 --batch_size 4
 
+
+Usage (TransMIL — self-attention pooling, no coords/adjacency needed):
+    python python_scripts/MIL/MIL.py --model_type transmil \
+        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \
+        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \
+        --val_csv validation_files_csvs/survival_validation_files.csv \
+        --n_layers 2 --n_heads 4 --dropout 0.1 --batch_size 4
+    # TransMIL attends over every instance and takes no padding mask, so keep
+    # --batch_size small (or use --max_patches) on large bags.
 
 Usage (single-repo, no pretraining):
     python MIL.py --model_type abmil \\
@@ -80,6 +90,7 @@ if (
 
 from torchmil.data import collate_fn
 from torchmil.models import abmil as abmil_module
+from torchmil.models import transmil as transmil_module
 from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
@@ -115,6 +126,9 @@ def cox_ph_loss(
 def _forward(model, batch, model_type: str) -> torch.Tensor:
     if model_type == "abmil":
         return model(batch["X"], batch["mask"])
+    # transmil pools with self-attention over all instances and takes no mask.
+    if model_type == "transmil":
+        return model(batch["X"])
     # deepgraphsurv: adj may be sparse (COO) and/or float64 from numpy; normalise both.
     adj = batch["adj"]
     if adj.is_sparse:
@@ -174,12 +188,12 @@ def val_epoch(model, loader, device, risk_fn) -> float:
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Train ABMIL or DeepGraphSurv for WSI prognosis."
+        description="Train ABMIL / TransMIL / DeepGraphSurv / PatchGCN for WSI prognosis."
     )
     parser.add_argument(
         "--model_type",
         default="abmil",
-        choices=["abmil", "deepgraphsurv", "patchgcn"],
+        choices=["abmil", "transmil", "deepgraphsurv", "patchgcn"],
         help="Model architecture (default: abmil).",
     )
 
@@ -333,6 +347,13 @@ def main():
         default=None,
         help="Hidden dim for DeepGraphSurv / PatchGCN (default: feat_dim).",
     )
+    # TransMIL-specific
+    parser.add_argument(
+        "--n_layers", type=int, default=2, help="Transformer layers (transmil)."
+    )
+    parser.add_argument(
+        "--n_heads", type=int, default=4, help="Attention heads (transmil)."
+    )
     # DeepGraphSurv-specific
     parser.add_argument(
         "--n_layers_rep", type=int, default=1, help="DeepGraphSurv rep GCN layers."
@@ -354,7 +375,7 @@ def main():
         "--dropout",
         type=float,
         default=0.0,
-        help="Dropout rate (deepgraphsurv / patchgcn).",
+        help="Dropout rate (transmil / deepgraphsurv / patchgcn).",
     )
     parser.add_argument(
         "--dist_thr",
@@ -449,6 +470,12 @@ def main():
                 parser.error(
                     f"--pretrain_coords_path is required for {args.model_type} pretraining."
                 )
+
+    if args.model_type == "transmil" and args.att_dim % args.n_heads != 0:
+        parser.error(
+            f"--att_dim ({args.att_dim}) must be divisible by --n_heads "
+            f"({args.n_heads}) for transmil."
+        )
 
     if args.stain_csvs is not None:
         if args.stain_filter is None:
@@ -556,7 +583,15 @@ def main():
             pretrain_dataset if pretrain_dataset is not None else train_dataset
         )
         feat_dim = int(ref_dataset[0]["X"].shape[-1])
-        if args.model_type == "deepgraphsurv":
+        if args.model_type == "transmil":
+            model = transmil_module.TransMIL(
+                in_shape=(feat_dim,),
+                att_dim=args.att_dim,
+                n_layers=args.n_layers,
+                n_heads=args.n_heads,
+                dropout=args.dropout,
+            )
+        elif args.model_type == "deepgraphsurv":
             model = dgs_module.DeepGraphSurv(
                 in_shape=(feat_dim,),
                 att_dim=args.att_dim,

@@ -2,7 +2,7 @@
 late_fusion.py — Late-fusion wrapper that conditions a MIL survival model on a
 per-bag diagnosis code.
 
-The three supported backbones (ABMIL, DeepGraphSurv, PatchGCN) all share the
+The supported backbones (ABMIL, TransMIL, DeepGraphSurv, PatchGCN) all share the
 same tail: they pool the patches into a bag vector ``z`` and then apply a single
 linear ``self.classifier`` to produce the risk scalar. This wrapper neutralises
 that head (``classifier = Identity``) so ``backbone.forward(...)`` returns the
@@ -30,13 +30,14 @@ class LateFusionSurv(nn.Module):
     """Condition a pooled-bag MIL backbone on a categorical diagnosis code.
 
     Arguments:
-        backbone: An ABMIL / DeepGraphSurv / PatchGCN instance. Its ``.classifier``
+        backbone: An ABMIL / TransMIL / DeepGraphSurv / PatchGCN instance. Its ``.classifier``
             attribute is replaced in-place with ``nn.Identity`` so that
             ``backbone.forward`` returns the pooled bag vector ``z`` (and, when
             ``return_att=True``, the instance attention) instead of the risk.
-        model_type: One of ``"abmil"``, ``"deepgraphsurv"``, ``"patchgcn"`` —
-            selects the backbone call signature (abmil takes ``(X, mask)``, the
-            graph models take ``(X, adj, mask)``).
+        model_type: One of ``"abmil"``, ``"transmil"``, ``"deepgraphsurv"``,
+            ``"patchgcn"`` — selects the backbone call signature (abmil takes
+            ``(X, mask)``, transmil takes ``(X,)``, the graph models take
+            ``(X, adj, mask)``).
         n_codes: Vocabulary size of the diagnosis code (including index 0, which
             is reserved for unknown/missing and kept as a neutral zero embedding
             via ``padding_idx=0``).
@@ -51,7 +52,7 @@ class LateFusionSurv(nn.Module):
         diag_dim: int = 16,
     ) -> None:
         super().__init__()
-        if model_type not in ("abmil", "deepgraphsurv", "patchgcn"):
+        if model_type not in ("abmil", "transmil", "deepgraphsurv", "patchgcn"):
             raise ValueError(f"Unsupported model_type for late fusion: {model_type}")
         self.model_type = model_type
         self.backbone = backbone
@@ -69,6 +70,8 @@ class LateFusionSurv(nn.Module):
         X, mask = batch["X"], batch.get("mask")
         if self.model_type == "abmil":
             out = self.backbone(X, mask, return_att=return_att)
+        elif self.model_type == "transmil":
+            out = self.backbone(X, return_att=return_att)
         else:
             adj = batch["adj"]
             if adj.is_sparse:
