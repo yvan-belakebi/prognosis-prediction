@@ -126,7 +126,16 @@ def get_filtered_bag_names(features_path, stain_csv, stain_filter):
     if stain_csv is None or stain_csv.lower() == "none":
         return None
     df = pd.read_csv(stain_csv)
-    rows = df.loc[df["stain"] == stain_filter]
+    # define_labels.py writes the column as "stain", define_regression_labels.py
+    # as "Stain"; accept either so callers need not care which pipeline produced
+    # the CSV they are pointing at.
+    stain_col = next((c for c in ("stain", "Stain") if c in df.columns), None)
+    if stain_col is None:
+        raise KeyError(
+            f"{stain_csv} has no 'stain' or 'Stain' column "
+            f"(columns: {list(df.columns)})"
+        )
+    rows = df.loc[df[stain_col] == stain_filter]
     matching = set(rows["file_name"].astype(str))
     if "biopsy_number" in rows.columns:
         matching |= set(
