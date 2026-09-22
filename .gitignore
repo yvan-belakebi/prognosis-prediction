@@ -20,6 +20,7 @@
 *.bin
 # Ignore model congiguration files
 *.json 
+*.geojson
 # Ignore feature extractor files
 *.safetensors
 *.h5
