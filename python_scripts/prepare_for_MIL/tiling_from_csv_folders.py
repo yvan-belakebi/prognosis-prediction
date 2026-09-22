@@ -33,7 +33,10 @@ Segmentation is magnification-independent (TRIDENT's segmenters run at their
 own fixed mag), so tiling the same slides at a second magnification only needs
 the coords step: --reuse_segmentation drops the seg pass and tiles against the
 masks the first run left in --job_dir. The new tiles land in their own
-{mag}x_{patch_size}px_{overlap}px_overlap dir next to the old ones.
+{mag}x_{patch_size}px_{overlap}px_overlap dir next to the old ones. Even
+without the flag, a chunk's existing masks are copied into its staging job dir
+first, so TRIDENT skips the slides it has already segmented instead of
+re-segmenting them and overwriting their masks.
 
 <csv_dir> is a folder of subfolders, each holding slide-list CSVs. The only
 column required is `wsi_anon_name` (see file_for_hrafn.csv); any other columns
@@ -265,27 +268,40 @@ def tiling_commands(
     return [seg, coords] if segment else [coords]
 
 
-def seg_geojson(job_dir, rel_path):
-    """Path to the tissue mask TRIDENT's seg pass wrote for this slide."""
+def seg_artifacts(job_dir, rel_path):
+    """The two files TRIDENT's seg pass writes for a slide: the contour jpg it
+    checks to decide the slide is already segmented, and the tissue mask the
+    coords pass tiles against."""
     stem = os.path.splitext(os.path.basename(rel_path))[0]
-    return os.path.join(job_dir, "contours_geojson", f"{stem}.geojson")
+    return (
+        os.path.join(job_dir, "contours", f"{stem}.jpg"),
+        os.path.join(job_dir, "contours_geojson", f"{stem}.geojson"),
+    )
 
 
 def seed_segmentation(rel_paths, src_job_dir, dst_job_dir):
-    """Copy the slides' existing tissue masks into a chunk's local job dir.
+    """Copy a chunk's existing segmentation from the job dir into its local one.
 
-    TRIDENT resolves the mask as {job_dir}/contours_geojson/{stem}.geojson and
-    skips any slide without one, so a chunk tiled against a fresh local job dir
-    has to be given the masks of the run that segmented them. Returns the paths
-    it wrote, which the caller drops again before the chunk is copied back --
-    the masks are unchanged, and are already in the job dir they came from.
+    TRIDENT decides both "already segmented, skip" and "which mask to tile
+    against" by looking inside its --job_dir. Staging the output means it is
+    handed an empty one, so without this it would re-segment slides that were
+    segmented long ago -- and write the new masks over the old ones. Seeding
+    restores the behaviour the mounted job dir gave for free.
+
+    A slide is seeded only if both files are there: a contour jpg without a mask
+    would make the seg pass skip the slide and leave the coords pass nothing to
+    tile. Returns the paths written, which the caller drops before the chunk is
+    copied back, since they are unchanged and already in the job dir.
     """
     seeded = []
     for rel in rel_paths:
-        dst = seg_geojson(dst_job_dir, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(seg_geojson(src_job_dir, rel), dst)
-        seeded.append(dst)
+        sources = seg_artifacts(src_job_dir, rel)
+        if not all(os.path.exists(path) for path in sources):
+            continue
+        for src, dst in zip(sources, seg_artifacts(dst_job_dir, rel)):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            seeded.append(dst)
     return seeded
 
 
@@ -445,7 +461,7 @@ def run_pipeline(
             # No mask, nothing for the coords pass to tile against: TRIDENT
             # would stage the slide only to skip it as geojson_not_found.
             segmented = [
-                rel for rel in pending if os.path.exists(seg_geojson(out_dir, rel))
+                rel for rel in pending if os.path.exists(seg_artifacts(out_dir, rel)[1])
             ]
             unsegmented += len(pending) - len(segmented)
             pending = segmented
@@ -498,9 +514,11 @@ def run_pipeline(
                 f"using this staging dir? Skipping the chunk."
             )
             return ChunkResult(ok=False, failed_slides=[])
+        # Always seed, not just with --reuse_segmentation: it is what stops a
+        # re-run from re-segmenting slides the job dir already has masks for.
         seeded = (
             seed_segmentation(unit.rel_paths, info.out_dir, out_dir)
-            if reuse_seg and writeback
+            if writeback
             else []
         )
         if gpu >= 0:
@@ -611,10 +629,13 @@ def main():
     parser.add_argument(
         "--reuse_segmentation",
         action="store_true",
-        help="skip the segmentation pass and tile against the tissue masks an "
-        "earlier run left in --job_dir; use it to tile slides at a second "
-        "--mag without segmenting them again. Slides with no mask there are "
-        "reported and left alone.",
+        help="drop the segmentation pass entirely and tile against the tissue "
+        "masks an earlier run left in --job_dir; use it to tile slides at a "
+        "second --mag without segmenting them again, saving the model load and "
+        "a pass over every slide. Slides with no mask there are reported and "
+        "left alone. Without this, existing masks are still reused -- TRIDENT "
+        "skips a slide whose contour jpg is in the job dir -- but the seg pass "
+        "still runs.",
     )
     parser.add_argument(
         "--visualize",
