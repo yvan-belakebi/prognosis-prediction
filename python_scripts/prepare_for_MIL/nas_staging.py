@@ -9,7 +9,8 @@ lives here once:
     while a background thread already stages the next chunk.
 
 That overlaps the NAS transfer with the GPU work and bounds how much local disk
-is in use (about `prefetch + 1` chunks at a time).
+is in use: `prefetch` chunks staged ahead, one being processed, and the one the
+copier is filling, so `prefetch + 2` chunks at the peak.
 
 The results have the same problem in the other direction: an output dir on the
 NAS makes every write a network round trip, and the tools here write many small
@@ -96,6 +97,27 @@ def copy_into_staging(rel_paths, source_root, dest_root):
         dst = os.path.join(dest_root, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(os.path.join(source_root, rel), dst)
+
+
+def verify_staged(rel_paths, source_root, staged_dir):
+    """Return the rel_paths whose staged copy is missing or the wrong size.
+
+    Cheap insurance (one stat per file) against a staged chunk that is not what
+    the copier meant to put there: a copy truncated by a full disk, or a second
+    run writing over this one's staging subdir. Both leave a file that opens
+    fine and reads as garbage, which downstream surfaces as an empty result
+    rather than an error -- so it is worth catching here, before the GPU time.
+    """
+    bad = []
+    for rel in rel_paths:
+        try:
+            if os.path.getsize(os.path.join(staged_dir, rel)) != os.path.getsize(
+                os.path.join(source_root, rel)
+            ):
+                bad.append(rel)
+        except OSError:  # gone, or the source is unreadable
+            bad.append(rel)
+    return bad
 
 
 def gpu_free_gib(gpu):
