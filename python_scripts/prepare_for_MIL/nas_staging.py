@@ -11,6 +11,12 @@ lives here once:
 That overlaps the NAS transfer with the GPU work and bounds how much local disk
 is in use (about `prefetch + 1` chunks at a time).
 
+The results have the same problem in the other direction: an output dir on the
+NAS makes every write a network round trip, and the tools here write many small
+files per slide. `Writeback` is the mirror of the copier -- write the results
+locally, then copy the finished dir out on a background thread while the next
+chunk is already processing.
+
 This module is mechanism, not policy. `stage_and_process` owns the copier
 thread, the bounded queue and the cleanup of staged dirs, and it reports what
 failed; deciding how to log those failures, and whether they should fail the
@@ -216,3 +222,78 @@ def stage_and_process(units, source_root, staging_dir, prefetch, process):
             shutil.rmtree(dest, ignore_errors=True)
 
     return StagingOutcome(failed_chunks, failed_slides)
+
+
+def merge_into(src_root, dest_root):
+    """Copy everything under src_root into dest_root, merging with what's there.
+
+    Each file is written to a `.part` sibling and renamed into place, so a
+    transfer cut short mid-file never leaves a half-written artifact that a
+    resumed run would mistake for a finished one. TRIDENT's per-job `_logs_*.txt`
+    are appended instead of replaced, since each chunk's job dir only logs its
+    own slides and a plain copy would drop the previous chunks' lines.
+    """
+    for dirpath, _dirnames, filenames in os.walk(src_root):
+        rel = os.path.relpath(dirpath, src_root)
+        dest_dir = dest_root if rel == os.curdir else os.path.join(dest_root, rel)
+        os.makedirs(dest_dir, exist_ok=True)
+        for name in filenames:
+            src = os.path.join(dirpath, name)
+            dst = os.path.join(dest_dir, name)
+            is_log = name.startswith("_logs_") and name.endswith(".txt")
+            if is_log and os.path.exists(dst):
+                with open(src, encoding="utf-8") as f_src:
+                    text = f_src.read()
+                with open(dst, "a", encoding="utf-8") as f_dst:
+                    f_dst.write(text)
+                continue
+            part = dst + ".part"
+            shutil.copy2(src, part)
+            os.replace(part, dst)
+
+
+class Writeback:
+    """Background thread copying finished local output dirs to their destination.
+
+    The mirror image of the staging copier: with the results written to local
+    disk first, the (slow, mounted) destination is off the processing path, and
+    one chunk's transfer out overlaps the next chunk's compute instead of
+    stalling it. That matters most when the outputs are many small files -- e.g.
+    TRIDENT's dumped patch images, one write each -- where per-file network
+    latency, not bandwidth, sets the pace.
+
+    `submit` blocks once `pending` transfers are queued, bounding the local disk
+    held by finished-but-not-yet-copied outputs. Each local dir is deleted once
+    copied, whether the copy succeeded or not. `close` drains the queue and
+    returns the labels of the transfers that failed, for the caller to report.
+    """
+
+    def __init__(self, pending=1):
+        self.queue = queue.Queue(maxsize=max(1, pending))
+        self.failed = []
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while True:
+            item = self.queue.get()
+            if item is None:
+                return
+            local_dir, dest_dir, label = item
+            try:
+                merge_into(local_dir, dest_dir)
+            except Exception as error:  # a full or unwritable destination
+                print(f"  {label}: writing results to {dest_dir} failed ({error})")
+                self.failed.append(label)
+            finally:
+                shutil.rmtree(local_dir, ignore_errors=True)
+
+    def submit(self, local_dir, dest_dir, label):
+        """Hand a finished local output dir over to be copied to dest_dir."""
+        self.queue.put((local_dir, dest_dir, label))
+
+    def close(self):
+        """Wait for every queued transfer to finish; return the failed labels."""
+        self.queue.put(None)
+        self.thread.join()
+        return self.failed

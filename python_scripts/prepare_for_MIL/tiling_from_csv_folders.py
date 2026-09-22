@@ -19,6 +19,12 @@ work. --chunk_size and --prefetch bound how much local disk is used at once
 (roughly (prefetch + 1) chunks). A chunk is tiled by a single TRIDENT
 invocation, so a larger chunk also amortizes TRIDENT's per-run model loading.
 
+The tiles go back the same way: each chunk's TRIDENT job dir is written under
+--staging_dir and copied into --job_dir by a background thread once the chunk
+is done, so a mounted job_dir never blocks the GPU. That matters even more than
+staging the slides when --dump_patches is on, since every patch image is its own
+small write. --no-output_staging writes straight to job_dir instead.
+
 <csv_dir> is a folder of subfolders, each holding slide-list CSVs. The only
 column required is `wsi_anon_name` (see file_for_hrafn.csv); any other columns
 are ignored, so CSVs from different sources need not agree beyond that one
@@ -50,6 +56,7 @@ from collections import namedtuple
 from nas_staging import (
     ChunkResult,
     StagedUnit,
+    Writeback,
     child_env,
     chunked,
     format_command,
@@ -343,6 +350,7 @@ def run_pipeline(
     min_free_gib,
     gpu_wait,
     failed_log,
+    output_staging,
     tiling_kwargs,
 ):
     """Tile every resolved slide, staging chunks on local disk off the NAS.
@@ -351,6 +359,13 @@ def run_pipeline(
     the current chunk is tiled from local disk; each chunk is deleted once its
     slides are done. The ready queue's bound keeps at most `prefetch` chunks
     staged ahead of the one being tiled, capping local disk use.
+
+    With `output_staging`, TRIDENT also writes into a staging subdir and a second
+    background thread copies the finished chunk into its job dir, so the tiles
+    travel to a mounted job_dir while the next chunk is already being tiled
+    rather than between chunks. One finished chunk waits to be copied at a time,
+    so local disk holds at most two chunks' worth of tiles on top of the staged
+    slides.
 
     Slides already tiled on an earlier run (their patch-coords .h5 is on disk)
     are dropped up front, so a resumed run never copies them from the NAS just
@@ -394,32 +409,48 @@ def run_pipeline(
 
     env = child_env()
     gpu = tiling_kwargs["gpus"]  # index the preflight gate polls; < 0 means CPU
+    writeback = Writeback() if output_staging else None
 
     def tile_chunk(unit, staged_dir):
         """Tile one staged chunk: seg then coords, against the local copy."""
         info = unit.payload
+        # Tile into a local job dir and let the writeback thread copy it to
+        # info.out_dir afterwards. TRIDENT sees an empty dir either way, so it
+        # redoes nothing: slides tiled by an earlier run were dropped above.
+        out_dir = (
+            os.path.join(staging_dir, f"out_{unit.seq}") if writeback else info.out_dir
+        )
         list_csv = write_custom_list(
             unit.rel_paths,
-            os.path.join(info.out_dir, f"slide_list_{info.index:04d}.csv"),
+            os.path.join(out_dir, f"slide_list_{info.index:04d}.csv"),
         )
         if gpu >= 0:
             wait_for_gpu(gpu, min_free_gib, gpu_wait)
-        for command in tiling_commands(
-            list_csv, info.out_dir, staged_dir, **tiling_kwargs
-        ):
+
+        def hand_over():
+            """Ship whatever this chunk produced to its job dir."""
+            if writeback:
+                writeback.submit(out_dir, info.out_dir, unit.label)
+
+        for command in tiling_commands(list_csv, out_dir, staged_dir, **tiling_kwargs):
             print("    " + format_command(command))
             if not run_with_retries(command, env, retries, retry_wait):
                 print(f"  {unit.label}: giving up, leaving its slides for a re-run")
+                # Keep the partial output: what the chunk did finish still
+                # counts on a re-run, as it would without output staging.
+                hand_over()
                 return ChunkResult(ok=False, failed_slides=[])
         if not visualize:
-            drop_visualization(info.out_dir, coords_subdir)
+            drop_visualization(out_dir, coords_subdir)
         # The chunk ran to completion; any slide still without its .h5 was
-        # skipped by --skip_errors. Log it, keep the rest.
+        # skipped by --skip_errors. Log it, keep the rest. This reads the local
+        # job dir, before the writeback thread has copied it out.
         errored = [
             rel
             for rel in unit.rel_paths
-            if not already_tiled(rel, info.out_dir, coords_subdir)
+            if not already_tiled(rel, out_dir, coords_subdir)
         ]
+        hand_over()
         if errored:
             record_failed_slides(failed_log, info.csv_rel, errored)
             print(
@@ -429,16 +460,23 @@ def run_pipeline(
         return ChunkResult(ok=True, failed_slides=errored)
 
     outcome = stage_and_process(units, root, staging_dir, prefetch, tile_chunk)
+    failed_chunks = list(outcome.failed_chunks)
+    if writeback:
+        # A chunk whose tiles never reached the job dir is a failed chunk: its
+        # slides have no .h5 there, so a re-run picks them up again.
+        print("\nWaiting for the last chunks' tiles to reach the job dir...")
+        failed_chunks += [
+            label for label in writeback.close() if label not in failed_chunks
+        ]
 
     if outcome.failed_slides:
         print(
             f"\n{len(outcome.failed_slides)} slide(s) failed and were skipped; "
             f"see {failed_log}"
         )
-    if outcome.failed_chunks:
+    if failed_chunks:
         print(
-            f"\n{len(outcome.failed_chunks)} chunk(s) failed: "
-            f"{', '.join(outcome.failed_chunks)}"
+            f"\n{len(failed_chunks)} chunk(s) failed: {', '.join(failed_chunks)}"
         )
         print("Re-run the same command to retry them (finished slides are skipped).")
         sys.exit(1)
@@ -512,6 +550,16 @@ def main():
         default=1,
         help="chunks staged ahead of the one being tiled (default: 1); local "
         "disk holds up to ~(prefetch + 1) chunks at once.",
+    )
+    parser.add_argument(
+        "--output_staging",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="write each chunk's tiles under --staging_dir and copy them into "
+        "--job_dir on a background thread (default: on; ignored with "
+        "--no_staging), keeping a mounted job_dir off the tiling path at the "
+        "cost of holding up to two chunks' tiles on local disk; "
+        "--no-output_staging writes straight to job_dir",
     )
     parser.add_argument(
         "--no_staging",
@@ -625,6 +673,7 @@ def main():
             args.min_free_gib,
             args.gpu_wait,
             failed_log,
+            args.output_staging,
             tiling_kwargs,
         )
     else:
