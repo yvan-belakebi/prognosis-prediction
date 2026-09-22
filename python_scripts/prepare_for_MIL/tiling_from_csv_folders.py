@@ -7,6 +7,9 @@ Usage:
     # least 70% under the tissue mask:
     python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
         --staging_dir /local/scratch/staging --min_tissue_proportion 0.7 --run
+    # Tile at a second magnification, reusing the masks of an earlier run:
+    python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
+        --staging_dir /local/scratch/staging --mag 20 --reuse_segmentation --run
     # Bypass staging and read the registry directly (the old, NAS-bound path):
     python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
         --no_staging --run
@@ -25,6 +28,12 @@ background thread once the chunk is done, so a mounted job_dir never blocks the
 GPU. That matters even more than
 staging the slides when --dump_patches is on, since every patch image is its own
 small write. --no-output_staging writes straight to job_dir instead.
+
+Segmentation is magnification-independent (TRIDENT's segmenters run at their
+own fixed mag), so tiling the same slides at a second magnification only needs
+the coords step: --reuse_segmentation drops the seg pass and tiles against the
+masks the first run left in --job_dir. The new tiles land in their own
+{mag}x_{patch_size}px_{overlap}px_overlap dir next to the old ones.
 
 <csv_dir> is a folder of subfolders, each holding slide-list CSVs. The only
 column required is `wsi_anon_name` (see file_for_hrafn.csv); any other columns
@@ -201,13 +210,18 @@ def tiling_commands(
     overlap=0,
     segmenter="hest",
     gpus=0,
+    segment=True,
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
     dump_patches=True,
     seg_batch_size=None,
     skip_errors=True,
     clear_dead_locks=True,
 ):
-    """Return the TRIDENT seg and coords commands for the slides in list_csv."""
+    """Return the TRIDENT commands for the slides in list_csv.
+
+    Both the seg and the coords pass, unless `segment` is False -- then only
+    coords, tiling against masks an earlier run already wrote to job_dir.
+    """
     common = [
         sys.executable,
         TRIDENT,
@@ -248,7 +262,31 @@ def tiling_commands(
     ]
     if dump_patches:
         coords.append("--dump_patches")
-    return [seg, coords]
+    return [seg, coords] if segment else [coords]
+
+
+def seg_geojson(job_dir, rel_path):
+    """Path to the tissue mask TRIDENT's seg pass wrote for this slide."""
+    stem = os.path.splitext(os.path.basename(rel_path))[0]
+    return os.path.join(job_dir, "contours_geojson", f"{stem}.geojson")
+
+
+def seed_segmentation(rel_paths, src_job_dir, dst_job_dir):
+    """Copy the slides' existing tissue masks into a chunk's local job dir.
+
+    TRIDENT resolves the mask as {job_dir}/contours_geojson/{stem}.geojson and
+    skips any slide without one, so a chunk tiled against a fresh local job dir
+    has to be given the masks of the run that segmented them. Returns the paths
+    it wrote, which the caller drops again before the chunk is copied back --
+    the masks are unchanged, and are already in the job dir they came from.
+    """
+    seeded = []
+    for rel in rel_paths:
+        dst = seg_geojson(dst_job_dir, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(seg_geojson(src_job_dir, rel), dst)
+        seeded.append(dst)
+    return seeded
 
 
 def drop_visualization(out_dir, coords_subdir):
@@ -394,13 +432,23 @@ def run_pipeline(
     if out_staging_dir:
         out_staging_dir = os.path.join(out_staging_dir, run_tag)
         print(f"Tiling into {out_staging_dir}, copied to the job dir as chunks finish")
+    reuse_seg = not tiling_kwargs.get("segment", True)
     units = []
     skipped = 0
+    unsegmented = 0
     for csv_rel, out_dir, found in results:
         pending = [
             rel for rel in found if not already_tiled(rel, out_dir, coords_subdir)
         ]
         skipped += len(found) - len(pending)
+        if reuse_seg:
+            # No mask, nothing for the coords pass to tile against: TRIDENT
+            # would stage the slide only to skip it as geojson_not_found.
+            segmented = [
+                rel for rel in pending if os.path.exists(seg_geojson(out_dir, rel))
+            ]
+            unsegmented += len(pending) - len(segmented)
+            pending = segmented
         for index, chunk in enumerate(chunked(pending, chunk_size)):
             units.append(
                 StagedUnit(
@@ -412,6 +460,11 @@ def run_pipeline(
             )
     if skipped:
         print(f"\nAlready tiled on a previous run, not re-copying: {skipped} slides.")
+    if unsegmented:
+        print(
+            f"No tissue mask in the job dir, not tiling: {unsegmented} slides. "
+            f"Drop --reuse_segmentation to segment them."
+        )
 
     # Start each run with a fresh failed-slides log; resume re-attempts the
     # slides listed here (they still lack a .h5), so a stale list would mislead.
@@ -445,11 +498,18 @@ def run_pipeline(
                 f"using this staging dir? Skipping the chunk."
             )
             return ChunkResult(ok=False, failed_slides=[])
+        seeded = (
+            seed_segmentation(unit.rel_paths, info.out_dir, out_dir)
+            if reuse_seg and writeback
+            else []
+        )
         if gpu >= 0:
             wait_for_gpu(gpu, min_free_gib, gpu_wait)
 
         def hand_over():
             """Ship whatever this chunk produced to its job dir."""
+            for mask in seeded:  # unchanged, and already in info.out_dir
+                os.remove(mask)
             if writeback:
                 writeback.submit(out_dir, info.out_dir, unit.label)
 
@@ -547,6 +607,14 @@ def main():
         default=True,
         help="also write the patch images to disk, not just their coordinates "
         "(default: on; --no-dump_patches for coordinates only)",
+    )
+    parser.add_argument(
+        "--reuse_segmentation",
+        action="store_true",
+        help="skip the segmentation pass and tile against the tissue masks an "
+        "earlier run left in --job_dir; use it to tile slides at a second "
+        "--mag without segmenting them again. Slides with no mask there are "
+        "reported and left alone.",
     )
     parser.add_argument(
         "--visualize",
@@ -694,6 +762,7 @@ def main():
         segmenter=args.segmenter,
         gpus=args.gpus,
         min_tissue_proportion=args.min_tissue_proportion,
+        segment=not args.reuse_segmentation,
         dump_patches=args.dump_patches,
         visualize=args.visualize,
         seg_batch_size=args.seg_batch_size,
