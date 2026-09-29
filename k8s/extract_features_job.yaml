@@ -1,0 +1,53 @@
+# Patch-feature extraction for already-tiled slides, on one cluster GPU.
+#
+# Image: Dockerfile_remote, built on the VM on top of prognosis_prediction:2.0, pushed to a registry the cluster can pull:
+#   docker build -f Dockerfile_remote -t <registry>/prognosis_feats:1.0 .
+#   docker push <registry>/prognosis_feats:1.0
+# The image's ENTRYPOINT already runs TRIDENT's feat task with UNI2-h; `args` below replace its default CMD.
+# Run:
+#   kubectl apply -f k8s/extract_features_job.yaml
+#   kubectl logs -f job/extract-features
+#
+# Features land next to the coords, in
+#   <job_dir>/20x_224px_0px_overlap/features_uni_v2/{slide_id}.h5
+# Re-applying the job (after `kubectl delete job extract-features`) skips slides already done.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: extract-features
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: trident
+          image: <registry>/prognosis_feats:1.0
+          args:
+            - --wsi_dir=/nfs-share/test                 # folder holding the .svs files
+            - --wsi_ext=.svs
+            - --job_dir=/nfs-share/test/trident         # --job_dir used for tiling (holds 20x_224px_0px_overlap/patches)
+            - --mag=20
+            - --patch_size=224
+            - --overlap=0
+            - --batch_size=256
+            - --skip_errors
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: nfs
+              mountPath: /nfs-share
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        # The share the VM mounts at /nfs-share. `findmnt -no SOURCE /nfs-share` on the VM prints <server>:<path>.
+        - name: nfs
+          nfs:
+            server: <nfs-server-address>
+            path: <exported/path/on/server>
+        # PyTorch DataLoader workers share batches through /dev/shm; the container default (64 MB) crashes them.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

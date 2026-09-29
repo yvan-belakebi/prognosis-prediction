@@ -1,10 +1,8 @@
 FROM prognosis_prediction:2.0
 
-COPY models/ models/
-COPY data/ data/
-COPY label_csvs/ label_csvs/
-COPY stain_refs/ stain_refs/
-COPY python_scripts/prepare_for_MIL/ python_scripts/prepare_for_MIL/
+# Only the UNI2-h weights; slides, coords and features stay on the NFS share.
 
-ENTRYPOINT ["python"]
-CMD ["python_scripts/prepare_for_MIL/run_trident_stain_feats.py", "--wsi_dir", "data/raw_wsi/IgA", "--job_dir", "WSI/IgA/trident", "--labels_csv", "label_csvs/labels_unfiltered.csv", "--stain_refs_dir", "stain_refs/IgA_20x", "--backbone", "uni_v2", "--mag", "20", "--patch_size", "224", "--overlap", "0", "--batch_size", "256", "--search_nested"]
+ENTRYPOINT ["python", "python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py", \
+            "--task", "feat", "--patch_encoder", "uni_v2", \
+            "--patch_encoder_ckpt_path", "/nfs-share/models/uni2h/pytorch_model.bin"]
+CMD ["--wsi_dir", "/nfs-share/test_docker/wsis", "--job_dir", "/nfs-share/test_docker/trident", "--wsi_ext", ".svs", "--mag", "20", "--patch_size", "224", "--overlap", "0", "--batch_size", "256", "--skip_errors"]
