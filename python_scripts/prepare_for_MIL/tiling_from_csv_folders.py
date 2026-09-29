@@ -7,9 +7,11 @@ Usage:
     # least 70% under the tissue mask:
     python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
         --staging_dir /local/scratch/staging --min_tissue_proportion 0.7 --run
-    # Tile at a second magnification, reusing the masks of an earlier run:
+    # Tile at a second magnification, reusing the masks of an earlier run,
+    # with 8 of the machine's cores on the tiling:
     python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
-        --staging_dir /local/scratch/staging --mag 20 --reuse_segmentation --run
+        --staging_dir /local/scratch/staging --mag 20 --reuse_segmentation \
+        --coords_workers 8 --run
     # Bypass staging and read the registry directly (the old, NAS-bound path):
     python tiling_from_csv_folders.py <csv_dir> --job_dir WSI/hrafn/trident \
         --no_staging --run
@@ -214,6 +216,9 @@ def tiling_commands(
     segmenter="hest",
     gpus=0,
     segment=True,
+    coords_workers=1,
+    patch_format=None,
+    patch_quality=None,
     min_tissue_proportion=MIN_TISSUE_PROPORTION,
     dump_patches=True,
     seg_batch_size=None,
@@ -265,6 +270,16 @@ def tiling_commands(
     ]
     if dump_patches:
         coords.append("--dump_patches")
+        if patch_format:
+            coords += ["--dump_patches_format", patch_format]
+        if patch_quality is not None:
+            coords += ["--dump_patches_jpeg_quality", str(patch_quality)]
+    if coords_workers > 1:
+        # TRIDENT shards the slides round-robin over its --gpus entries and runs
+        # one process per entry. Nothing in the coords pass touches the GPU --
+        # it reads regions, writes the coords h5 and encodes the patch images --
+        # so the workers are CPU ones (-1), which also skips a CUDA init each.
+        coords += ["--gpus"] + ["-1"] * coords_workers
     return [seg, coords] if segment else [coords]
 
 
@@ -521,7 +536,7 @@ def run_pipeline(
             if writeback
             else []
         )
-        if gpu >= 0:
+        if gpu >= 0 and not reuse_seg:  # only the seg pass uses the GPU
             wait_for_gpu(gpu, min_free_gib, gpu_wait)
 
         def hand_over():
@@ -625,6 +640,29 @@ def main():
         default=True,
         help="also write the patch images to disk, not just their coordinates "
         "(default: on; --no-dump_patches for coordinates only)",
+    )
+    parser.add_argument(
+        "--coords_workers",
+        type=int,
+        default=1,
+        help="processes tiling a chunk in parallel (default: 1). The coords "
+        "pass is CPU work -- reading regions and encoding the patch images -- "
+        "and one worker uses one core, so on a many-core box this is the knob "
+        "that matters, especially with --reuse_segmentation, where the GPU "
+        "pass is skipped entirely. Keep it under the core count; each worker "
+        "opens its own slides.",
+    )
+    parser.add_argument(
+        "--patch_format",
+        choices=("png", "jpg"),
+        help="format for the dumped patch images (TRIDENT's default: png). "
+        "jpg encodes several times faster and writes far smaller files, which "
+        "also shortens the copy back to --job_dir; png is lossless",
+    )
+    parser.add_argument(
+        "--patch_quality",
+        type=int,
+        help="JPEG quality for --patch_format jpg, 1-100 (TRIDENT's default: 90)",
     )
     parser.add_argument(
         "--reuse_segmentation",
@@ -762,6 +800,10 @@ def main():
         )
     if args.chunk_size < 1:
         parser.error("--chunk_size must be at least 1")
+    if args.coords_workers < 1:
+        parser.error("--coords_workers must be at least 1")
+    if args.patch_quality is not None and args.patch_format != "jpg":
+        parser.error("--patch_quality only applies to --patch_format jpg")
     if args.output_staging_dir and not args.output_staging:
         parser.error("--output_staging_dir conflicts with --no-output_staging")
 
@@ -784,6 +826,9 @@ def main():
         gpus=args.gpus,
         min_tissue_proportion=args.min_tissue_proportion,
         segment=not args.reuse_segmentation,
+        coords_workers=args.coords_workers,
+        patch_format=args.patch_format,
+        patch_quality=args.patch_quality,
         dump_patches=args.dump_patches,
         visualize=args.visualize,
         seg_batch_size=args.seg_batch_size,
