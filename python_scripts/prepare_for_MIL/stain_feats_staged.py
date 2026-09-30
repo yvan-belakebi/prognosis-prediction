@@ -207,7 +207,6 @@ def feats_command(labels_csv, wsi_dir, job_dir, ext, args):
         "--wsi_dir", wsi_dir,
         "--job_dir", job_dir,
         "--labels_csv", labels_csv,
-        "--stain_refs_dir", args.stain_refs_dir,
         "--backbone", args.backbone,
         "--slide_ext", ext,
         "--mag", str(args.mag),
@@ -219,6 +218,8 @@ def feats_command(labels_csv, wsi_dir, job_dir, ext, args):
         # the feats script has to walk the chunk dir to find them.
         "--search_nested",
     ]
+    if args.stain_refs_dir:
+        command += ["--stain_refs_dir", args.stain_refs_dir]
     if args.enc_name_suffix:
         command += ["--enc_name_suffix", args.enc_name_suffix]
     if args.patch_encoder_ckpt_path:
@@ -315,7 +316,9 @@ def main():
         help="CSV mapping each slide's base name to its stain (ANON_name, Stain)",
     )
     parser.add_argument(
-        "--stain_refs_dir", required=True, help="dir of per-stain .pt references"
+        "--stain_refs_dir",
+        default=None,
+        help="dir of per-stain .pt references; omit to extract without stain normalisation",
     )
     parser.add_argument("--staging_dir", help="local scratch dir; required with --run")
     parser.add_argument("--backbone", default="uni_v2")

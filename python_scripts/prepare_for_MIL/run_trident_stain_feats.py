@@ -128,8 +128,11 @@ def main():
     )
     parser.add_argument(
         "--stain_refs_dir",
-        required=True,
-        help="Directory of .pt references from fit_stain_reference.py (one per stain).",
+        default=None,
+        help=(
+            "Directory of .pt references from fit_stain_reference.py (one per stain). "
+            "Omit to extract all slides without stain normalisation."
+        ),
     )
     parser.add_argument(
         "--mapping_csv",
@@ -230,8 +233,11 @@ def main():
 
     for stain in stains:
         group = df[df["stain"] == stain]
-        ref_path = os.path.join(args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt")
-        if not os.path.isfile(ref_path):
+        if args.stain_refs_dir is None:
+            ref_path = None
+        else:
+            ref_path = os.path.join(args.stain_refs_dir, f"{_sanitize_stain_name(stain)}.pt")
+        if ref_path is not None and not os.path.isfile(ref_path):
             print(
                 f"\n[WARN] stain '{stain}': no reference at {ref_path} — "
                 f"{len(group)} slide(s) will be extracted WITHOUT normalisation."
