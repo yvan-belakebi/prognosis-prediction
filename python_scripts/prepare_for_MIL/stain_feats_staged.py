@@ -75,6 +75,8 @@ def load_stain_map(registry_csv, name_column="ANON_name", stain_column="Stain"):
     stains = {}
     with open(registry_csv, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
+        if name_column == "ANON_name" and name_column not in (reader.fieldnames or []):
+            name_column = "wsi_anon_name"
         for column in (name_column, stain_column):
             if column not in (reader.fieldnames or []):
                 raise SystemExit(
