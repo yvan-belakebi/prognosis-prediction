@@ -1,4 +1,4 @@
-FROM registry.ihelse.net/python/python@sha256:d1975f2182c9962f5daa1ad935eb092e3e32dce11d8105cb3584a31afc7b451b
+FROM registry.ihelse.net/python/python:3.11.8-alpine3.19
 
 # Required for the NVIDIA Container Toolkit to mount CUDA driver libs when
 # the container is run with `--gpus`; torch's pip wheel already bundles the
