@@ -1,4 +1,4 @@
-FROM registry.ihelse.net/python/python:3.11.8-alpine3.19
+FROM registry.ihelse.net/docker.io/library/python:3.11-slim
 
 # Required for the NVIDIA Container Toolkit to mount CUDA driver libs when
 # the container is run with `--gpus`; torch's pip wheel already bundles the
@@ -8,7 +8,7 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 WORKDIR /app
 
-RUN apk add --no-cache micro
+RUN apt-get update && apt-get install -y --no-install-recommends micro
 
 COPY requirements.txt .
 COPY python_scripts/external_repositories/TRIDENT-main/ python_scripts/external_repositories/TRIDENT-main/
