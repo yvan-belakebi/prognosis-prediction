@@ -8,7 +8,7 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends micro
+RUN apk add --no-cache micro
 
 COPY requirements.txt .
 COPY python_scripts/external_repositories/TRIDENT-main/ python_scripts/external_repositories/TRIDENT-main/
