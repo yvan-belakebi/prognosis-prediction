@@ -57,11 +57,15 @@ from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
     BagDataset,
+    bag_group,
     discover_bags,
     drop_empty_bags,
+    load_group_map,
     load_val_names,
     make_collate_fn,
     get_bag_names,
+    split_by_group,
+    warn_if_ungrouped,
 )
 from late_fusion import LateFusionSurv
 
@@ -73,6 +77,7 @@ from late_fusion import LateFusionSurv
 def build_val_dataset(
     features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv,
     file_ext=".h5",
+    group_map=None,
 ):
     val_names = load_val_names(val_csv)
     if val_names is None:
@@ -82,8 +87,9 @@ def build_val_dataset(
     for fp, lp, cp in zip(features_paths, labels_paths, coords_paths):
         labelled = set(discover_bags(lp, extensions=(".npy",)))
         available = discover_bags(fp)
-        names_here = [n for n in available if n in val_names and n in labelled]
-        names_here = drop_empty_bags(fp, names_here, file_ext)
+        available = drop_empty_bags(fp, [n for n in available if n in labelled], file_ext)
+        # Same whole-biopsy split as training, so the evaluated set matches it.
+        _, names_here = split_by_group(available, val_names, group_map, fp)
         if names_here:
             datasets.append(
                 BagDataset(
@@ -104,11 +110,12 @@ def build_val_dataset(
     return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
 
 
-def aggregate_by_biopsy(risks, times, events, bag_names):
+def aggregate_by_biopsy(risks, times, events, bag_names, group_map=None):
     """Average per-slide risk scores within each biopsy.
 
-    Groups slides by the biopsy directory prefix (the part before '/' in the
-    bag name). For flat names (no '/'), each slide is its own biopsy group.
+    Groups slides with mil_utils.bag_group: by group_map when given, else by the
+    biopsy directory prefix (the part before '/' in the bag name). For flat
+    names without a group_map, each slide is its own biopsy group.
 
     Returns (agg_risks, agg_times, agg_events, biopsy_ids).
     """
@@ -117,7 +124,7 @@ def aggregate_by_biopsy(risks, times, events, bag_names):
     biopsy_events = {}
 
     for name, risk, time, event in zip(bag_names, risks, times, events):
-        biopsy_id = name.rsplit("/", 1)[0] if "/" in name else name
+        biopsy_id = bag_group(name, group_map)
         biopsy_risks.setdefault(biopsy_id, []).append(risk)
         biopsy_times[biopsy_id] = time
         biopsy_events[biopsy_id] = event
@@ -533,6 +540,15 @@ def main():
     )
     parser.add_argument("--output_dir", default="results/survival_eval")
     parser.add_argument(
+        "--group_csvs",
+        nargs="+",
+        default=None,
+        help=(
+            "define_labels.py CSV(s) mapping file_name -> biopsy_number, used to group "
+            "slides into biopsies instead of the biopsy-nested directory layout."
+        ),
+    )
+    parser.add_argument(
         "--n_groups",
         type=int,
         default=3,
@@ -611,6 +627,7 @@ def main():
     print(f"Device: {device}")
 
     # --- Dataset -------------------------------------------------------------
+    group_map = load_group_map(args.group_csvs)
     val_dataset = build_val_dataset(
         args.features_paths,
         args.labels_paths,
@@ -619,6 +636,7 @@ def main():
         args.dist_thr,
         args.val_csv,
         file_ext=args.file_ext,
+        group_map=group_map,
     )
     print(f"Val bags: {len(val_dataset)}")
 
@@ -703,9 +721,13 @@ def main():
     )
     print(f"Per-slide risk scores → {slide_csv}")
 
-    # Aggregate to one score per biopsy when bag names carry a biopsy prefix
-    if any("/" in n for n in bag_names):
-        risks, times, events, biopsy_ids = aggregate_by_biopsy(risks, times, events, bag_names)
+    # Aggregate to one score per biopsy when biopsies are known (a group map or
+    # a biopsy prefix in the bag names)
+    warn_if_ungrouped(bag_names, group_map, "the evaluated set")
+    if group_map is not None or any("/" in n for n in bag_names):
+        risks, times, events, biopsy_ids = aggregate_by_biopsy(
+            risks, times, events, bag_names, group_map
+        )
         print(
             f"Biopsy aggregation: {len(bag_names)} slides → {len(biopsy_ids)} biopsies"
             f"  |  events after aggregation: {int(events.sum())}"

@@ -57,12 +57,12 @@ python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py 
 # Patch coordinates (20x, 224 px, no overlap)
 python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 224 --overlap 0 --search_nested (--dump_patches)
 
-# Labels definition
+3) Labels definition
 python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/trident/labels --iga_date_filter None
 
 python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/trident/labels_regression --iga_date_filter None
 
-3) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
+4) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
 
 # (Optional) Stain references — one .pt per stain, used by the per-stain extractor below.
 # fit_stain_reference.py auto-detects TRIDENT coords (point --patches_dir at the job's
@@ -96,17 +96,23 @@ python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir
 # the biopsy-nested layout, reorganize_wsi_dirs.py migrates them in place (and can rename
 # slides with unsafe names). Dry-run by default; --apply to execute. Not part of the per-run
 # flow — only needed once to convert old data. See the script's docstring for usage.
+#
+# The nested layout is optional: pass --group_csvs label_csvs/labels_unfiltered.csv to
+# MIL.py / regression_MIL.py / evaluate_survival.py / plot_train_survival.py to group slides
+# into biopsies from the CSV's biopsy_number column instead of from the directories
+# (--biopsy_sampling, --max_biopsies, the val split and biopsy-level metrics then work on
+# flat feature dirs too). multistain_MIL.py does this automatically from --stain_csvs.
 
-4) MIL pooling
+5) MIL pooling
 python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
 # Attention map
 python python_scripts/evaluate_MIL/visualize_attention.py --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --checkpoint checkpoints_regression_transmil/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_unfiltered.csv --authorized_slides_csv ok_slides.csv --save_as_tif 
 
-5) Survival model
+6) Survival model
 python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1
 
-6) Multi-stain fusion (UNICORN-style)
+7) Multi-stain fusion (UNICORN-style)
 
 Predicts at the *biopsy* level instead of the slide level: the biopsy's slides are grouped by
 stain, each stain is encoded by its own 2-layer transformer + attention pooling into one token,

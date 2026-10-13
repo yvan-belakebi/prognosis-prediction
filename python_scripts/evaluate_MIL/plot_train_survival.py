@@ -30,6 +30,7 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 from evaluate_survival import kaplan_meier, aggregate_by_biopsy
+from mil_utils import load_group_map
 
 
 def load_train_names(csv_path):
@@ -138,6 +139,15 @@ def main():
         "If omitted, every .npy label found under --labels_paths is used.",
     )
     p.add_argument("--output_dir", default="results/train_survival")
+    p.add_argument(
+        "--group_csvs",
+        nargs="+",
+        default=None,
+        help=(
+            "define_labels.py CSV(s) mapping file_name -> biopsy_number, used to group "
+            "slides into biopsies instead of the biopsy-nested directory layout."
+        ),
+    )
     p.add_argument("--time_unit", default="days")
     p.add_argument(
         "--no_aggregate",
@@ -165,9 +175,10 @@ def main():
 
     # Aggregate slides to biopsies (mirrors evaluate_survival.py). Risks don't
     # exist here, so we pass zeros and discard the aggregated risk output.
-    if not args.no_aggregate and any("/" in n for n in names):
+    group_map = load_group_map(args.group_csvs)
+    if not args.no_aggregate and (group_map is not None or any("/" in n for n in names)):
         _, times, events, biopsies = aggregate_by_biopsy(
-            np.zeros_like(times), times, events, list(names)
+            np.zeros_like(times), times, events, list(names), group_map
         )
         print(
             f"Aggregated to {len(biopsies)} biopsies  |  events: {int(events.sum())}"

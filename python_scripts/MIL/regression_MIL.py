@@ -77,6 +77,7 @@ from mil_utils import (
     discover_bags,
     load_val_names,
     load_authorized_slides,
+    load_group_map,
     make_collate_fn,
     build_dataset,
     drop_empty_bags,
@@ -419,6 +420,17 @@ def main():
         help="Sample one slide per biopsy per epoch to avoid inflated loss from repeated biopsies.",
     )
     parser.add_argument(
+        "--group_csvs",
+        nargs="+",
+        default=None,
+        help=(
+            "define_labels.py CSV(s) mapping file_name -> biopsy_number. Groups slides "
+            "into biopsies from the CSV instead of the biopsy-nested directory layout, "
+            "so flat feature dirs work for --biopsy_sampling, --max_biopsies and the "
+            "val split. Default: group by the directory prefix of nested bags."
+        ),
+    )
+    parser.add_argument(
         "--max_biopsies",
         type=int,
         default=None,
@@ -501,6 +513,7 @@ def main():
     # Build datasets
     val_names = load_val_names(args.val_csv)
     authorized_slides = load_authorized_slides(args.authorized_slides_csv)
+    group_map = load_group_map(args.group_csvs)
     train_dataset, val_dataset, train_labels, val_labels = build_dataset(
         args.features_paths,
         args.labels_paths,
@@ -514,6 +527,7 @@ def main():
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
         authorized_slides=authorized_slides,
+        group_map=group_map,
     )
 
     print(
@@ -591,11 +605,11 @@ def main():
     )
     if args.biopsy_sampling:
         pretrain_loader = (
-            _make_loader(pretrain_dataset, True, BiopsySampler(pretrain_dataset))
+            _make_loader(pretrain_dataset, True, BiopsySampler(pretrain_dataset, group_map))
             if pretrain_dataset
             else None
         )
-        train_loader = _make_loader(train_dataset, True, BiopsySampler(train_dataset))
+        train_loader = _make_loader(train_dataset, True, BiopsySampler(train_dataset, group_map))
     else:
         pretrain_loader = _make_loader(pretrain_dataset, True) if pretrain_dataset else None
         train_loader = _make_loader(train_dataset, True)

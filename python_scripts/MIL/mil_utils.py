@@ -200,6 +200,85 @@ def _bag_authorized(bag_name, authorized_slides):
     )
 
 
+def load_group_map(csvs, key="biopsy_number"):
+    """Map slide stem -> group id (biopsy by default) from define_labels.py CSVs.
+
+    This decouples biopsy grouping from the on-disk layout: with it, flat feature
+    directories ('slide.h5') group exactly like biopsy-nested ones
+    ('biopsy_nr/slide.h5'). Any column can serve as ``key`` (e.g. 'patient' in
+    the regression CSV). Returns None when no CSV is given, in which case
+    bag_group falls back to the directory prefix.
+    """
+    csvs = [c for c in (csvs or []) if c and str(c).lower() != "none"]
+    if not csvs:
+        return None
+    group_map = {}
+    for path in csvs:
+        df = pd.read_csv(path, dtype=str)
+        for col in ("file_name", key):
+            if col not in df.columns:
+                raise KeyError(f"{path} has no '{col}' column (columns: {list(df.columns)})")
+        df = df.dropna(subset=["file_name", key])
+        for stem, group in zip(df["file_name"].str.strip(), df[key].str.strip()):
+            if group_map.setdefault(stem, group) != group:
+                raise ValueError(
+                    f"Slide {stem!r} maps to both {group_map[stem]!r} and {group!r} "
+                    f"in the '{key}' column of {csvs}."
+                )
+    return group_map
+
+
+def bag_group(bag_name, group_map=None):
+    """Group id of a bag: from group_map when it knows the slide, else the path.
+
+    The path fallback is the biopsy directory for nested bags and the slide
+    itself for flat ones, so a flat layout without a group_map degrades to
+    one group per slide (see warn_if_ungrouped).
+    """
+    if group_map is not None:
+        group = group_map.get(bag_name.rsplit("/", 1)[-1])
+        if group is not None:
+            return group
+    return bag_name.rsplit("/", 1)[0] if "/" in bag_name else bag_name
+
+
+def warn_if_ungrouped(bag_names, group_map=None, where=""):
+    """Warn when every bag is its own group, i.e. biopsy grouping is a no-op.
+
+    That is what a flat layout without --group_csvs looks like, and it otherwise
+    passes silently: biopsy sampling, --max_biopsies and biopsy-level metrics
+    all quietly turn into slide-level ones.
+    """
+    if len(bag_names) > 1 and len({bag_group(n, group_map) for n in bag_names}) == len(bag_names):
+        print(
+            f"Warning: every bag{f' in {where}' if where else ''} is its own biopsy "
+            f"group ({len(bag_names)} bags). If biopsies have several slides, the "
+            f"layout is flat and --group_csvs is needed to group them."
+        )
+
+
+def split_by_group(bag_names, val_names, group_map=None, where=""):
+    """Split bag_names into (train, val) whole biopsies at a time.
+
+    Bags and val_names are matched on the slide stem, so nested and flat val
+    lists split nested and flat bags alike (stems are unique across biopsies in
+    the label CSVs). If any slide of a group is listed, the
+    whole group goes to validation: no biopsy straddles the train/val boundary.
+    """
+    val_stems = {v.rsplit("/", 1)[-1] for v in val_names}
+    listed = {n for n in bag_names if n.rsplit("/", 1)[-1] in val_stems}
+    val_groups = {bag_group(n, group_map) for n in listed}
+    train, val = [], []
+    for n in bag_names:
+        (val if bag_group(n, group_map) in val_groups else train).append(n)
+    if len(val) > len(listed):
+        print(
+            f"  Moved {len(val) - len(listed)} unlisted bags into validation with "
+            f"the rest of their biopsy{f' in {where}' if where else ''}"
+        )
+    return train, val
+
+
 def _subsample_adj(adj, idx):
     """Subsample a 2D sparse or dense adjacency matrix to the given indices.
 
@@ -278,18 +357,17 @@ def get_bag_names(dataset):
 class BiopsySampler(torch.utils.data.Sampler):
     """Sample exactly one slide per biopsy per epoch.
 
-    Slides are grouped by the biopsy directory prefix (the part before '/'
-    in the bag name). At each epoch, one slide is chosen at random from each
-    biopsy group, eliminating repeated survival labels in the Cox risk set
-    for biopsies with multiple slides.
+    Slides are grouped by bag_group (group_map, else the biopsy directory
+    prefix). At each epoch, one slide is chosen at random from each biopsy
+    group, eliminating repeated survival labels in the Cox risk set for
+    biopsies with multiple slides.
     """
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, group_map=None):
         bag_names = get_bag_names(dataset)
         groups = {}
         for i, name in enumerate(bag_names):
-            biopsy_id = name.rsplit("/", 1)[0] if "/" in name else name
-            groups.setdefault(biopsy_id, []).append(i)
+            groups.setdefault(bag_group(name, group_map), []).append(i)
         self._groups = list(groups.values())
 
     def __iter__(self):
@@ -301,7 +379,7 @@ class BiopsySampler(torch.utils.data.Sampler):
         return len(self._groups)
 
 
-def _allocate_max_biopsies(train_names_per_ds, max_biopsies):
+def _allocate_max_biopsies(train_names_per_ds, max_biopsies, group_map=None):
     """Distribute a biopsy budget equally across datasets, redistributing surplus.
 
     Each dataset gets an equal share of max_biopsies. If a dataset has fewer
@@ -315,8 +393,7 @@ def _allocate_max_biopsies(train_names_per_ds, max_biopsies):
     for names in train_names_per_ds:
         groups: dict = {}
         for n in names:
-            biopsy_id = n.rsplit("/", 1)[0] if "/" in n else n
-            groups.setdefault(biopsy_id, []).append(n)
+            groups.setdefault(bag_group(n, group_map), []).append(n)
         biopsy_groups.append(groups)
 
     n_avail = [len(g) for g in biopsy_groups]
@@ -371,11 +448,16 @@ def build_dataset(
     max_biopsies=None,
     file_ext=".h5",
     authorized_slides=None,
+    group_map=None,
 ):
     """Build train and (optionally) val datasets from lists of feature/label paths.
 
     Parameters
     ----------
+    group_map : dict[str, str], optional
+        Slide stem -> biopsy id from load_group_map. Decides which bags form a
+        biopsy for the val split and max_biopsies; ``None`` groups by the
+        biopsy directory prefix of nested bag names.
     authorized_slides : set[str], optional
         When provided, only bags whose file basename (or full bag name) is in
         this set are included in the train and val datasets. Pass ``None`` to
@@ -429,8 +511,7 @@ def build_dataset(
         available = drop_empty_bags(fp, available, file_ext)
 
         if val_names is not None:
-            train_names = [n for n in available if n not in val_names]
-            val_names_here = [n for n in available if n in val_names]
+            train_names, val_names_here = split_by_group(available, val_names, group_map, fp)
         else:
             train_names = available
             val_names_here = []
@@ -439,12 +520,15 @@ def build_dataset(
         all_val_names_here.append(val_names_here)
 
     # --- Optional biopsy-level subsampling of the training set ---------------
+    for fp, names in zip(features_paths, all_train_names):
+        warn_if_ungrouped(names, group_map, fp)
+
     if max_biopsies is not None:
         def _count_biopsies(names):
-            return len({(n.rsplit("/", 1)[0] if "/" in n else n) for n in names})
+            return len({bag_group(n, group_map) for n in names})
 
         before = [_count_biopsies(names) for names in all_train_names]
-        all_train_names = _allocate_max_biopsies(all_train_names, max_biopsies)
+        all_train_names = _allocate_max_biopsies(all_train_names, max_biopsies, group_map)
         for fp, nb, names in zip(features_paths, before, all_train_names):
             na = _count_biopsies(names)
             print(f"  [{fp}] max_biopsies: {na}/{nb} biopsies selected ({len(names)} bags)")

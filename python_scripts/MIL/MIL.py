@@ -104,6 +104,7 @@ from torchmil.models import patch_gcn as patch_gcn_module
 from mil_utils import (
     load_val_names,
     load_authorized_slides,
+    load_group_map,
     make_collate_fn,
     GpuMemLogger,
     build_dataset,
@@ -434,6 +435,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--group_csvs",
+        nargs="+",
+        default=None,
+        help=(
+            "define_labels.py CSV(s) mapping file_name -> biopsy_number. Groups slides "
+            "into biopsies from the CSV instead of the biopsy-nested directory layout, "
+            "so flat feature dirs work for --biopsy_sampling, --max_biopsies and the "
+            "val split. Default: group by the directory prefix of nested bags."
+        ),
+    )
+    parser.add_argument(
         "--max_biopsies",
         type=int,
         default=None,
@@ -524,6 +536,7 @@ def main():
     # --- Build datasets -------------------------------------------------------
     val_names = load_val_names(args.val_csv)
     authorized_slides = load_authorized_slides(args.authorized_slides_csv)
+    group_map = load_group_map(args.group_csvs)
     train_dataset, val_dataset, _, _ = build_dataset(
         args.features_paths,
         args.labels_paths,
@@ -536,6 +549,7 @@ def main():
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
         authorized_slides=authorized_slides,
+        group_map=group_map,
     )
 
     pretrain_dataset = pretrain_val_dataset = None
@@ -554,6 +568,7 @@ def main():
             stain_csvs=[None],
             stain_filter=None,
             file_ext=args.file_ext,
+            group_map=group_map,
         )
         if args.pretrain_val_csv is not None and pretrain_val_dataset is None:
             # Silent fallback would be a trap: the val list and the feature dirs
@@ -581,7 +596,7 @@ def main():
         max_patches=args.max_patches,
     )
 
-    _train_sampler = BiopsySampler(train_dataset) if args.biopsy_sampling else None
+    _train_sampler = BiopsySampler(train_dataset, group_map) if args.biopsy_sampling else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -598,7 +613,7 @@ def main():
     )
     if pretrain_dataset is not None:
         _pretrain_sampler = (
-            BiopsySampler(pretrain_dataset) if args.biopsy_sampling else None
+            BiopsySampler(pretrain_dataset, group_map) if args.biopsy_sampling else None
         )
         pretrain_loader = DataLoader(
             pretrain_dataset,
