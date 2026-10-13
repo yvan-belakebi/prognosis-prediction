@@ -12,6 +12,7 @@
 *.jpeg
 *.jpg
 *.csv
+*.tsv
 *.npy
 # Ignore Python bytecode files
 *.pyc
@@ -42,7 +43,12 @@ TRIDENT-main/
 WSI/
 # Ignore venv
 *trident_venv/
+*venv/
 # Qupath files
 *.qpproj
 *.qpdata
 *.qpproj.backup
+# Haakon's stuff
+*Haakon_tb_removed/
+# Compressed
+*.tar
