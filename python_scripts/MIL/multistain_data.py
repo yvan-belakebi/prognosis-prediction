@@ -12,7 +12,9 @@ Input layout (produced by run_trident_stain_feats.py + reorganize_trident_feats.
     labels_path/{biopsy_nr}/{slide_id}.npy      [time, event]  or  scalar (regression)
 
 The stain of each slide comes from the labels CSV written by define_labels.py
-(columns: biopsy_number, file_name, stain).  All slides of a biopsy carry the same
+(columns: biopsy_number, file_name, stain), and so does its biopsy when the CSV has
+a biopsy_number column — the nested layout is then not required, flat feature
+directories group the same way.  All slides of a biopsy carry the same
 survival/regression label, so the biopsy label is read from the first slide found.
 
 Fixed patch count per stain
@@ -45,7 +47,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from mil_utils import discover_bags, _bag_authorized
+from mil_utils import bag_group, discover_bags, load_group_map, _bag_authorized
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +139,7 @@ def index_biopsies(
 
     Returns a list of dicts::
 
-        {"biopsy": str,                       # biopsy directory name (bag prefix)
+        {"biopsy": str,                       # biopsy_number (else bag prefix)
          "source": features_path,
          "label": np.ndarray,                 # from the first labelled slide
          "slides": {stain_idx: [h5 path, ...]},
@@ -148,6 +150,11 @@ def index_biopsies(
     left with fewer than ``min_stains`` stains are dropped.
     """
     lookup = load_stain_lookup(stain_csv)
+    group_map = (
+        load_group_map([stain_csv])
+        if "biopsy_number" in pd.read_csv(stain_csv, nrows=0).columns
+        else None
+    )
     bags = discover_bags(features_path, extensions=(file_ext,))
     labelled = set(discover_bags(labels_path, extensions=(".npy",)))
 
@@ -169,7 +176,7 @@ def index_biopsies(
             dropped["other_stain"] += 1
             continue
 
-        biopsy = bag.rsplit("/", 1)[0] if "/" in bag else bag
+        biopsy = bag_group(bag, group_map)
         rec = groups.setdefault(
             biopsy,
             {
