@@ -2,67 +2,40 @@
 MIL.py — Train and validate ABMIL, TransMIL, DeepGraphSurv or PatchGCN for WSI
 prognosis prediction.
 
-Two-phase training:
-  Phase 1 (pretrain): train on non-IgA data for --pretrain_epochs epochs,
-                      optionally validated on a held-out non-IgA val set
-                      (--pretrain_val_csv).
-  Phase 2 (finetune): train on combined IgA + IgA_registry for remaining epochs,
-                      validated on the combined IgA + IgA_registry val sets.
+Data: one flat features folder (--features_path, <slide>.h5), the flat .npy labels
+from define_labels.py (--labels_path), and its labels CSV (--labels_csv), which
+supplies each slide's biopsy (for --biopsy_sampling / --max_biopsies), its stain
+(for --stains) and its train/val split.
 
-The two phases use separate val lists because they train on different cohorts:
---pretrain_val_csv holds non-IgA bags, --val_csv holds IgA + registry bags.
-Both losses land in the same loss_log.csv, tagged by the phase column.
+Usage (ABMIL on PAS slides):
+    python python_scripts/MIL/MIL.py --model_type abmil \\
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels \\
+        --labels_csv    label_csvs/labels.csv \\
+        --stains PAS --epochs 50
 
-Usage (ABMIL, two-phase with stain filtering on IgA): (on server)
-    python MIL.py --model_type abmil \\
-        --pretrain_features_path WSI/non_IgA/UNI2-h_feats \\
-        --pretrain_labels_path   WSI/non_IgA/labels \\
-        --pretrain_val_csv validation_files_csvs/survival_validation_files_non_IgA.csv \\
-        --pretrain_epochs 20 \\
-        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
-        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_csv validation_files_csvs/survival_validation_files.csv \\
-        --stain_filter PAS \\
-        --stain_csvs label_csvs/labels_combined.csv none \\
-        --epochs 50
-
-Usage (DeepGraphSurv, two-phase — coords auto-read from features .h5, no --coords_paths needed):
+Usage (DeepGraphSurv — coords auto-read from features .h5, no --coords_path needed):
     python python_scripts/MIL/MIL.py --model_type deepgraphsurv \\
-        --pretrain_features_path WSI/non_IgA/UNI2-h_feats \\
-        --pretrain_labels_path   WSI/non_IgA/labels \\
-        --pretrain_epochs 10 \\
-        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
-        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_csv validation_files_csvs/survival_validation_files.csv \\
-        --stain_filter PAS \\
-        --stain_csvs label_csvs/labels_combined.csv label_csvs/labels_combined.csv \\
-        --checkpoint_dir checkpoints_10_epochs_pretraining/ \\
-        --log_dir results/losses_10_pretraining/ \\
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels \\
+        --labels_csv    label_csvs/labels.csv \\
+        --stains PAS "HES|HE" \\
         --dropout 0.1 --save_every 5 --batch_size 4
 
-
 Usage (TransMIL — self-attention pooling, no coords/adjacency needed):
-    python python_scripts/MIL/MIL.py --model_type transmil \
-        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \
-        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \
-        --val_csv validation_files_csvs/survival_validation_files.csv \
+    python python_scripts/MIL/MIL.py --model_type transmil \\
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels \\
+        --labels_csv    label_csvs/labels.csv \\
         --n_layers 2 --n_heads 4 --dropout 0.1 --batch_size 4
     # TransMIL attends over every instance and takes no padding mask, so keep
     # --batch_size small (or use --max_patches) on large bags.
 
-Usage (single-repo, no pretraining):
-    python MIL.py --model_type abmil \\
-        --features_paths WSI/IgA/UNI2-h_feats \\
-        --labels_paths   WSI/IgA/labels \\
-        --val_csv validation_files_csvs/survival_validation_files.csv
-
 Usage (diagnosis-code late fusion): first regenerate labels with the code +
 vocabulary, then pass --use_diagnosis (works with any --model_type):
-    python python_scripts/prepare_for_MIL/define_labels.py --with_diagnosis
-    python MIL.py --model_type abmil --use_diagnosis \\
-        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
-        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_csv validation_files_csvs/survival_validation_files.csv \\
+    python python_scripts/prepare_for_MIL/define_labels.py --with_diagnosis ...
+    python python_scripts/MIL/MIL.py --model_type abmil --use_diagnosis \\
+        --features_path ... --labels_path ... --labels_csv label_csvs/labels.csv \\
         --diagnosis_codes_json label_csvs/diagnosis_codes.json --diag_dim 16
     # A learned code embedding is concatenated to the pooled bag vector before
     # the risk head. --diag_dim must match at eval/inference time.
@@ -102,9 +75,8 @@ from torchmil.models import deepgraphsurv as dgs_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
-    load_val_names,
     load_authorized_slides,
-    load_group_map,
+    load_labels_table,
     make_collate_fn,
     GpuMemLogger,
     build_dataset,
@@ -205,58 +177,36 @@ def main():
         help="Model architecture (default: abmil).",
     )
 
-    # --- Phase 1: pretrain on non-IgA (no val files) -------------------------
+    # --- Data ----------------------------------------------------------------
     parser.add_argument(
-        "--pretrain_features_path",
-        default=None,
-        help="Non-IgA features folder for pretraining.",
-    )
-    parser.add_argument(
-        "--pretrain_labels_path",
-        default=None,
-        help="Non-IgA labels folder for pretraining.",
-    )
-    parser.add_argument(
-        "--pretrain_coords_path",
-        default=None,
-        help="Non-IgA coords folder for pretraining (deepgraphsurv / patchgcn only).",
-    )
-    parser.add_argument(
-        "--pretrain_val_csv",
-        default=None,
-        help="Validation slide list for the pretrain phase (non-IgA), e.g. "
-        "validation_files_csvs/survival_validation_files_non_IgA.csv written by "
-        "define_labels.py --val_non_iga. Those bags are held out of the pretrain "
-        "training set and scored each pretrain epoch. Omitted (the default) "
-        "means pretraining runs unvalidated on every non-IgA bag.",
-    )
-    parser.add_argument(
-        "--pretrain_epochs",
-        type=int,
-        default=0,
-        help="Epochs to train on non-IgA before switching to IgA datasets (default: 0).",
-    )
-
-    # --- Phase 2: finetune on IgA + IgA_registry -----------------------------
-    parser.add_argument(
-        "--features_paths",
-        nargs="+",
+        "--features_path",
         required=True,
-        help="Training features folder(s) (one per repo, e.g. IgA and IgA_registry).",
+        help="Flat features folder (<slide>.h5 or .npy).",
     )
     parser.add_argument(
-        "--labels_paths",
-        nargs="+",
+        "--labels_path",
         required=True,
-        help="Training labels folder(s).",
+        help="Flat .npy labels folder written by define_labels.py.",
     )
     parser.add_argument(
-        "--coords_paths",
+        "--labels_csv",
+        required=True,
+        help="Labels CSV written by define_labels.py: the biopsy, stain and "
+             "train/val split of every slide.",
+    )
+    parser.add_argument(
+        "--stains",
         nargs="+",
         default=None,
-        help="Training coords folder(s) (deepgraphsurv / patchgcn only). "
-             "When --file_ext .h5 and omitted, defaults to --features_paths "
-             "(coords are read from the same .h5 file as features).",
+        help="Stains to train on (default: all). Use '|' to merge source stain "
+             "names (e.g. 'HES|HE'); matching ignores case and punctuation.",
+    )
+    parser.add_argument(
+        "--coords_path",
+        default=None,
+        help="Coords folder (deepgraphsurv / patchgcn only). When --file_ext .h5 "
+             "and omitted, defaults to --features_path (coords are read from the "
+             "same .h5 file as features).",
     )
     parser.add_argument(
         "--file_ext",
@@ -266,36 +216,11 @@ def main():
              "Use .npy for the legacy pipeline.",
     )
     parser.add_argument(
-        "--val_csv",
-        default=None,
-        help=(
-            "CSV listing validation slide basenames ('file_name' column or headerless). "
-            "The same feature/label directories are used; bags are split at load time."
-        ),
-    )
-    parser.add_argument(
         "--authorized_slides_csv",
         default=None,
         help=(
-            "CSV listing authorized slide basenames ('file_name' column or headerless). "
-            "When set, only bags whose file basename appears in this list are loaded "
-            "into the train/val dataloaders (applies to --features_paths, not pretrain)."
-        ),
-    )
-
-    # --- Stain filtering (e.g. for IgA_light which contains multiple stains) -
-    parser.add_argument(
-        "--stain_filter",
-        default=None,
-        help="Keep only bags with this value in the 'Stain' column (e.g. PAS).",
-    )
-    parser.add_argument(
-        "--stain_csvs",
-        nargs="+",
-        default=None,
-        help=(
-            "Path to labels_combined.csv for each entry in --features_paths, "
-            "in the same order. Use 'none' for repos that need no filtering."
+            "CSV listing authorized slide names ('file_name' column or headerless). "
+            "When set, only those slides are loaded."
         ),
     )
 
@@ -342,7 +267,7 @@ def main():
         "--epochs",
         type=int,
         default=50,
-        help="Total training epochs including pretrain (default: 50).",
+        help="Training epochs (default: 50).",
     )
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size.")
     parser.add_argument(
@@ -435,25 +360,12 @@ def main():
         ),
     )
     parser.add_argument(
-        "--group_csvs",
-        nargs="+",
-        default=None,
-        help=(
-            "define_labels.py CSV(s) mapping file_name -> biopsy_number. Groups slides "
-            "into biopsies from the CSV instead of the biopsy-nested directory layout, "
-            "so flat feature dirs work for --biopsy_sampling, --max_biopsies and the "
-            "val split. Default: group by the directory prefix of nested bags."
-        ),
-    )
-    parser.add_argument(
         "--max_biopsies",
         type=int,
         default=None,
         help=(
-            "Maximum number of training biopsies across all datasets combined. "
-            "The budget is split equally across datasets; if one has fewer biopsies "
-            "than its share, all of them are kept and the surplus is redistributed "
-            "to the others. Has no effect on the validation set."
+            "Maximum number of training biopsies (all slides of a selected biopsy "
+            "are kept). Has no effect on the validation set."
         ),
     )
 
@@ -461,65 +373,18 @@ def main():
     torch.cuda.empty_cache()
 
     # --- Validate argument combinations --------------------------------------
-    n_train = len(args.features_paths)
-    if len(args.labels_paths) != n_train:
-        parser.error(
-            "--features_paths and --labels_paths must have the same number of entries."
-        )
-
-    do_pretrain = args.pretrain_features_path is not None
-    if do_pretrain:
-        if args.pretrain_labels_path is None:
-            parser.error(
-                "--pretrain_labels_path is required when --pretrain_features_path is set."
-            )
-        if args.pretrain_epochs <= 0:
-            parser.error(
-                "--pretrain_epochs must be > 0 when --pretrain_features_path is set."
-            )
-    if args.pretrain_epochs > 0 and not do_pretrain:
-        parser.error("--pretrain_features_path is required when --pretrain_epochs > 0.")
-    if args.pretrain_val_csv is not None and not do_pretrain:
-        parser.error(
-            "--pretrain_val_csv is only meaningful with --pretrain_features_path."
-        )
-
-    if args.model_type in ("deepgraphsurv", "patchgcn"):
-        if args.coords_paths is None:
-            if args.file_ext == ".h5":
-                # Coords are embedded in the features .h5; reuse the same directories.
-                args.coords_paths = args.features_paths
-            else:
-                parser.error(f"--coords_paths is required for {args.model_type}.")
-        if len(args.coords_paths) != n_train:
-            parser.error(
-                "--coords_paths must have the same number of entries as --features_paths."
-            )
-        if do_pretrain and args.pretrain_coords_path is None:
-            if args.file_ext == ".h5":
-                args.pretrain_coords_path = args.pretrain_features_path
-            else:
-                parser.error(
-                    f"--pretrain_coords_path is required for {args.model_type} pretraining."
-                )
+    if args.model_type in ("deepgraphsurv", "patchgcn") and args.coords_path is None:
+        if args.file_ext == ".h5":
+            # Coords are embedded in the features .h5; reuse the same directory.
+            args.coords_path = args.features_path
+        else:
+            parser.error(f"--coords_path is required for {args.model_type}.")
 
     if args.model_type == "transmil" and args.att_dim % args.n_heads != 0:
         parser.error(
             f"--att_dim ({args.att_dim}) must be divisible by --n_heads "
             f"({args.n_heads}) for transmil."
         )
-
-    if args.stain_csvs is not None:
-        if args.stain_filter is None:
-            parser.error("--stain_filter is required when --stain_csvs is set.")
-        if len(args.stain_csvs) != n_train:
-            parser.error(
-                "--stain_csvs must have the same number of entries as --features_paths."
-            )
-
-    finetune_epochs = args.epochs - args.pretrain_epochs
-    if finetune_epochs <= 0:
-        parser.error("--pretrain_epochs must be less than --epochs.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -530,63 +395,22 @@ def main():
         else ["X", "Y"]
     )
 
-    def _none_list(paths, n):
-        return paths if paths is not None else [None] * n
-
     # --- Build datasets -------------------------------------------------------
-    val_names = load_val_names(args.val_csv)
-    authorized_slides = load_authorized_slides(args.authorized_slides_csv)
-    group_map = load_group_map(args.group_csvs)
+    table = load_labels_table(args.labels_csv)
     train_dataset, val_dataset, _, _ = build_dataset(
-        args.features_paths,
-        args.labels_paths,
-        _none_list(args.coords_paths, n_train),
+        args.features_path,
+        args.labels_path,
+        args.coords_path,
         bag_keys,
         args.dist_thr,
-        val_names=val_names,
-        stain_csvs=args.stain_csvs,
-        stain_filter=args.stain_filter,
+        table,
+        stains=args.stains,
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
-        authorized_slides=authorized_slides,
-        group_map=group_map,
+        authorized_slides=load_authorized_slides(args.authorized_slides_csv),
     )
-
-    pretrain_dataset = pretrain_val_dataset = None
-    if do_pretrain:
-        # The pretrain val list is separate from --val_csv: it names non-IgA
-        # bags, while --val_csv names IgA + registry bags for the finetune
-        # phase.  build_dataset returns val_ds=None when val_names is None, so
-        # passing no --pretrain_val_csv keeps the old unvalidated behaviour.
-        pretrain_dataset, pretrain_val_dataset, _, _ = build_dataset(
-            [args.pretrain_features_path],
-            [args.pretrain_labels_path],
-            [args.pretrain_coords_path] if args.pretrain_coords_path is not None else [None],
-            bag_keys,
-            args.dist_thr,
-            val_names=load_val_names(args.pretrain_val_csv),
-            stain_csvs=[None],
-            stain_filter=None,
-            file_ext=args.file_ext,
-            group_map=group_map,
-        )
-        if args.pretrain_val_csv is not None and pretrain_val_dataset is None:
-            # Silent fallback would be a trap: the val list and the feature dirs
-            # must agree on the biopsy-prefix form (see define_labels.py).
-            print(
-                f"Warning: no pretrain bag matched {args.pretrain_val_csv} "
-                f"— pretraining will run unvalidated."
-            )
-
     val_info = f" | Val bags: {len(val_dataset)}" if val_dataset is not None else ""
-    print(f"Finetune train bags: {len(train_dataset)}{val_info}")
-    if pretrain_dataset is not None:
-        pretrain_val_info = (
-            f" | Pretrain val bags: {len(pretrain_val_dataset)}"
-            if pretrain_val_dataset is not None
-            else ""
-        )
-        print(f"Pretrain bags: {len(pretrain_dataset)}{pretrain_val_info}")
+    print(f"Train bags: {len(train_dataset)}{val_info}")
 
     # Subsample patches before adj is built to avoid OOM on large slides.
     _collate = make_collate_fn(
@@ -596,7 +420,7 @@ def main():
         max_patches=args.max_patches,
     )
 
-    _train_sampler = BiopsySampler(train_dataset, group_map) if args.biopsy_sampling else None
+    _train_sampler = BiopsySampler(train_dataset, table) if args.biopsy_sampling else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -611,39 +435,12 @@ def main():
         if val_dataset is not None
         else None
     )
-    if pretrain_dataset is not None:
-        _pretrain_sampler = (
-            BiopsySampler(pretrain_dataset, group_map) if args.biopsy_sampling else None
-        )
-        pretrain_loader = DataLoader(
-            pretrain_dataset,
-            batch_size=args.batch_size,
-            shuffle=(_pretrain_sampler is None),
-            sampler=_pretrain_sampler,
-            collate_fn=_collate,
-        )
-    else:
-        pretrain_loader = None
-    pretrain_val_loader = (
-        DataLoader(
-            pretrain_val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            collate_fn=_collate,
-        )
-        if pretrain_val_dataset is not None
-        else None
-    )
 
     # --- Model ---------------------------------------------------------------
     if args.model_type == "abmil":
         model = abmil_module.ABMIL(att_dim=args.att_dim)
     else:
-        # Resolve feat_dim from the first available sample across datasets.
-        ref_dataset = (
-            pretrain_dataset if pretrain_dataset is not None else train_dataset
-        )
-        feat_dim = int(ref_dataset[0]["X"].shape[-1])
+        feat_dim = int(train_dataset[0]["X"].shape[-1])
         if args.model_type == "transmil":
             model = transmil_module.TransMIL(
                 in_shape=(feat_dim,),
@@ -675,10 +472,7 @@ def main():
 
     # --- Optional diagnosis-code late fusion ---------------------------------
     if args.use_diagnosis:
-        ref_dataset = (
-            pretrain_dataset if pretrain_dataset is not None else train_dataset
-        )
-        n_label = int(ref_dataset[0]["Y"].numel())
+        n_label = int(train_dataset[0]["Y"].numel())
         if n_label < 3:
             parser.error(
                 "--use_diagnosis requires 3-element labels [time, event, code_idx], "
@@ -713,48 +507,10 @@ def main():
         mem_logger = GpuMemLogger(log_dir)
         print(f"GPU memory trace: {mem_logger.path}")
 
-    # --- Phase 1: pretrain on non-IgA ----------------------------------------
-    if do_pretrain:
-        print(f"\n--- Pretrain phase: {args.pretrain_epochs} epochs on non-IgA ---")
-        for epoch in range(1, args.pretrain_epochs + 1):
-            if mem_logger is not None:
-                mem_logger.set_phase(f"pretrain{epoch}")
-            train_loss = train_epoch(
-                model,
-                pretrain_loader,
-                optimizer,
-                device,
-                risk_fn,
-                accumulation_steps=args.accumulation_steps,
-                mem_logger=mem_logger,
-            )
-            if pretrain_val_loader is not None:
-                val_loss = val_epoch(model, pretrain_val_loader, device, risk_fn)
-                logger.log(epoch, "pretrain", train_loss, val_loss)
-                print(
-                    f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}]"
-                    f" train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
-                )
-            else:
-                logger.log(epoch, "pretrain", train_loss)
-                print(
-                    f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}]"
-                    f" train_loss={train_loss:.4f}"
-                )
-
-            if args.save_every > 0 and epoch % args.save_every == 0:
-                ckpt = os.path.join(
-                    args.checkpoint_dir, f"{args.model_type}_pretrain_epoch{epoch}.pth"
-                )
-                torch.save(model.state_dict(), ckpt)
-                print(f"  → checkpoint: {ckpt}")
-
-    # --- Phase 2: finetune on IgA + IgA_registry -----------------------------
-    print(f"\n--- Finetune phase: {finetune_epochs} epochs on IgA datasets ---")
-    for epoch in range(1, finetune_epochs + 1):
-        global_epoch = epoch + args.pretrain_epochs
+    # --- Training ------------------------------------------------------------
+    for epoch in range(1, args.epochs + 1):
         if mem_logger is not None:
-            mem_logger.set_phase(f"finetune{global_epoch}")
+            mem_logger.set_phase(f"epoch{epoch}")
         train_loss = train_epoch(
             model,
             train_loader,
@@ -767,21 +523,17 @@ def main():
 
         if val_loader is not None:
             val_loss = val_epoch(model, val_loader, device, risk_fn)
-            logger.log(global_epoch, "finetune", train_loss, val_loss)
+            logger.log(epoch, train_loss, val_loss)
             print(
-                f"[Epoch {global_epoch:>3d}/{args.epochs}]"
+                f"[Epoch {epoch:>3d}/{args.epochs}]"
                 f" train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
             )
         else:
-            logger.log(global_epoch, "finetune", train_loss)
-            print(
-                f"[Epoch {global_epoch:>3d}/{args.epochs}] train_loss={train_loss:.4f}"
-            )
+            logger.log(epoch, train_loss)
+            print(f"[Epoch {epoch:>3d}/{args.epochs}] train_loss={train_loss:.4f}")
 
-        if args.save_every > 0 and global_epoch % args.save_every == 0:
-            ckpt = os.path.join(
-                args.checkpoint_dir, f"{args.model_type}_epoch{global_epoch}.pth"
-            )
+        if args.save_every > 0 and epoch % args.save_every == 0:
+            ckpt = os.path.join(args.checkpoint_dir, f"{args.model_type}_epoch{epoch}.pth")
             torch.save(model.state_dict(), ckpt)
             print(f"  → checkpoint: {ckpt}")
 
@@ -789,7 +541,7 @@ def main():
     torch.save(model.state_dict(), final_path)
     print(f"Model saved to {final_path}")
 
-    logger.save_plot(pretrain_epochs=args.pretrain_epochs)
+    logger.save_plot()
 
 
 if __name__ == "__main__":

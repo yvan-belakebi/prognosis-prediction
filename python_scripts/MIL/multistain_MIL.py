@@ -13,21 +13,21 @@ or a continuous target (--task regression).
 
 Usage (survival):
     python python_scripts/MIL/multistain_MIL.py --task survival \\
-        --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested \\
-        --labels_paths   WSI/IgA/trident/labels \\
-        --stain_csvs     label_csvs/labels_unfiltered.csv \\
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels \\
+        --labels_csv    label_csvs/labels.csv \\
         --stains PAS PASM "HES|HE" Congo AFOG \\
-        --val_csv validation_files_csvs/survival_validation_20pct_both.csv \\
         --patches_per_stain 512 --batch_size 8 --epochs 50 \\
         --checkpoint_dir checkpoints_multistain --log_dir results/losses_multistain
 
 Usage (regression, eGFR):
     python python_scripts/MIL/multistain_MIL.py --task regression \\
-        --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested \\
-        --labels_paths   WSI/IgA/trident/labels_regression \\
-        --stain_csvs     label_csvs/labels_unfiltered.csv \\
-        --stains PAS PASM "HES|HE" Congo AFOG \\
-        --val_csv validation_files_csvs/regression_validation_files.csv
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels_regression \\
+        --labels_csv    label_csvs/labels_regression.csv \\
+        --stains PAS PASM "HES|HE" Congo AFOG
+
+The train/val split is the labels CSV's split column.
 
 A stain argument may list aliases separated by '|' ("HES|HE"); the first name is the
 one reported.  Stains absent from --stains are ignored, and biopsies keep whichever
@@ -69,7 +69,7 @@ _evaluate_dir = os.path.abspath(os.path.join(_script_dir, "..", "evaluate_MIL"))
 if _evaluate_dir not in sys.path:
     sys.path.insert(0, _evaluate_dir)
 
-from mil_utils import load_val_names, load_authorized_slides, LossLogger  # noqa: E402
+from mil_utils import load_authorized_slides, load_labels_table, LossLogger  # noqa: E402
 from multistain_data import (  # noqa: E402
     MultiStainBiopsyDataset,
     StainVocabulary,
@@ -84,13 +84,12 @@ from evaluate_survival import concordance_index  # noqa: E402
 class MultiStainLogger(LossLogger):
     """Loss log with one extra metric column (C-index for survival, MAE for regression)."""
 
-    COLUMNS = ["epoch", "phase", "train_loss", "val_loss", "val_metric"]
+    COLUMNS = ["epoch", "train_loss", "val_loss", "val_metric"]
 
-    def log(self, epoch, phase, train_loss, val_loss=None, val_metric=None):
+    def log(self, epoch, train_loss, val_loss=None, val_metric=None):
         self._append(
             [
                 epoch,
-                phase,
                 f"{train_loss:.6f}",
                 "" if val_loss is None else f"{val_loss:.6f}",
                 "" if val_metric is None else f"{val_metric:.4f}",
@@ -239,24 +238,16 @@ def main():
 
     # --- Data ----------------------------------------------------------------
     parser.add_argument(
-        "--features_paths",
-        nargs="+",
+        "--features_path",
         required=True,
-        help="Biopsy-nested feature folder(s), one per cohort "
-             "({features_path}/{biopsy}/{slide}.h5).",
+        help="Flat feature folder ({features_path}/{slide}.h5).",
     )
+    parser.add_argument("--labels_path", required=True, help="Flat .npy label folder.")
     parser.add_argument(
-        "--labels_paths",
-        nargs="+",
+        "--labels_csv",
         required=True,
-        help="Label folder(s), same order and count as --features_paths.",
-    )
-    parser.add_argument(
-        "--stain_csvs",
-        nargs="+",
-        required=True,
-        help="define_labels.py CSV(s) with biopsy_number / file_name / stain columns, "
-             "same order as --features_paths. Pass one CSV to reuse it for all.",
+        help="define_labels.py / define_regression_labels.py CSV: the biopsy, stain "
+             "and train/val split of every slide.",
     )
     parser.add_argument(
         "--stains",
@@ -273,12 +264,6 @@ def main():
         help="Drop biopsies with fewer than this many of the selected stains.",
     )
     parser.add_argument("--file_ext", default=".h5", choices=[".h5", ".npy"])
-    parser.add_argument(
-        "--val_csv",
-        default=None,
-        help="CSV of validation slide (or biopsy) names — a biopsy is held out when "
-             "any of its slides is listed.",
-    )
     parser.add_argument(
         "--authorized_slides_csv",
         default=None,
@@ -352,14 +337,6 @@ def main():
 
     args = parser.parse_args()
 
-    n_cohorts = len(args.features_paths)
-    if len(args.labels_paths) != n_cohorts:
-        parser.error("--features_paths and --labels_paths must have the same length.")
-    if len(args.stain_csvs) == 1:
-        args.stain_csvs = args.stain_csvs * n_cohorts
-    if len(args.stain_csvs) != n_cohorts:
-        parser.error("--stain_csvs must have 1 entry or one per --features_paths.")
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -371,18 +348,16 @@ def main():
     vocab = StainVocabulary(args.stains)
     print(f"Stain vocabulary ({len(vocab)}): {vocab.names}")
 
-    authorized = load_authorized_slides(args.authorized_slides_csv)
-    records = []
-    for fp, lp, sc in zip(args.features_paths, args.labels_paths, args.stain_csvs):
-        records += index_biopsies(
-            fp,
-            lp,
-            sc,
-            vocab,
-            file_ext=args.file_ext,
-            authorized_slides=authorized,
-            min_stains=args.min_stains,
-        )
+    table = load_labels_table(args.labels_csv)
+    records = index_biopsies(
+        args.features_path,
+        args.labels_path,
+        table,
+        vocab,
+        file_ext=args.file_ext,
+        authorized_slides=load_authorized_slides(args.authorized_slides_csv),
+        min_stains=args.min_stains,
+    )
     if not records:
         parser.error("No biopsies found — check the feature/label paths and --stains.")
 
@@ -391,10 +366,10 @@ def main():
         parser.error(
             f"--task {args.task} expects labels with at least {expected_label_len} "
             f"value(s), but the .npy files hold {len(records[0]['label'])}. "
-            "Point --labels_paths at the right label folder."
+            "Point --labels_path at the right label folder."
         )
 
-    train_records, val_records = split_records(records, load_val_names(args.val_csv))
+    train_records, val_records = split_records(records, table)
     print(f"Biopsies — train: {len(train_records)} | val: {len(val_records)}")
 
     # --- Label normalisation (regression only) --------------------------------
@@ -407,9 +382,7 @@ def main():
     #
     # Statistics come from the *training* biopsies only — including val would leak,
     # and one value per biopsy rather than per slide keeps multi-slide biopsies from
-    # getting extra weight.  A single pooled scaler is used across cohorts: per-cohort
-    # scaling would erase genuine cohort differences and is not invertible at
-    # inference, where the cohort is unknown.
+    # getting extra weight.
     label_mean, label_std = 0.0, 1.0
     if args.task == "regression":
         y = np.array([r["label"][0] for r in train_records], dtype=np.float64)
@@ -540,7 +513,7 @@ def main():
             # log reads in mL/min/1.73m². Monotone, so best-model selection is unaffected.
             if args.task == "regression":
                 metric *= label_std
-            logger.log(epoch, "train", train_loss, val_loss, metric)
+            logger.log(epoch, train_loss, val_loss, metric)
             print(
                 f"[Epoch {epoch:>3d}/{args.epochs}] train_loss={train_loss:.4f}"
                 f"  val_loss={val_loss:.4f}  {metric_name}={metric:.4f}"
@@ -556,7 +529,7 @@ def main():
                     os.path.join(args.checkpoint_dir, f"multistain_{args.task}_best.pth"),
                 )
         else:
-            logger.log(epoch, "train", train_loss)
+            logger.log(epoch, train_loss)
             print(f"[Epoch {epoch:>3d}/{args.epochs}] train_loss={train_loss:.4f}")
 
         if args.save_every > 0 and epoch % args.save_every == 0:

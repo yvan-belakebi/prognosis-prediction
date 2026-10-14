@@ -12,29 +12,16 @@ Supported models:
 
 Training loss: MSE by default; switch to MAE with --loss mae.
 
-Pretraining (--pretrain_features_path) can be validated too: pass
---pretrain_val_csv with a non-IgA validation list (define_regression_labels.py
---val_non_iga).  It is a separate list from --val_csv because the two phases
-train on different cohorts; both losses land in the same loss_log.csv, tagged
-by the phase column.
+Data: one flat features folder (--features_path), the flat .npy labels from
+define_regression_labels.py (--labels_path) and its labels CSV (--labels_csv),
+which supplies each slide's biopsy, stain (for --stains) and train/val split.
 
 Usage:
-    python regression_MIL.py --model_type abmil \\
-        --features_paths WSI/registry_IgA/UNI2-h_feats \\
-        --labels_paths   WSI/registry_IgA/labels_regression \\
-        --val_csv validation_files_csvs/regression_validation_files.csv \\
-        --epochs 50
-
-Usage (validated pretraining on non-IgA):
-    python regression_MIL.py --model_type abmil \\
-        --pretrain_features_path WSI/non_IgA/UNI2-h_feats \\
-        --pretrain_labels_path   WSI/non_IgA/labels_regression \\
-        --pretrain_val_csv validation_files_csvs/regression_validation_files_non_IgA.csv \\
-        --pretrain_epochs 10 \\
-        --features_paths WSI/IgA_registry/UNI2-h_feats \\
-        --labels_paths   WSI/IgA_registry/labels_regression \\
-        --val_csv validation_files_csvs/regression_validation_files.csv \\
-        --epochs 50
+    python python_scripts/MIL/regression_MIL.py --model_type abmil \\
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels_regression \\
+        --labels_csv    label_csvs/labels_regression.csv \\
+        --stains PAS --epochs 50
 """
 
 import os
@@ -74,17 +61,12 @@ from torchmil.models import transmil as transmil_module
 from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
-    discover_bags,
-    load_val_names,
     load_authorized_slides,
-    load_group_map,
+    load_labels_table,
     make_collate_fn,
     build_dataset,
-    drop_empty_bags,
-    BagDataset,
     BiopsySampler,
     LossLogger as _BaseLossLogger,
-    _val_segments,
 )
 
 _GRAPH_MODELS = {"patchgcn"}
@@ -178,13 +160,12 @@ def scan_labels(labels_path: str, bag_names: list) -> np.ndarray:
 class LossLogger(_BaseLossLogger):
     """Regression logger: adds val_mae / val_rmse columns and an MAE plot panel."""
 
-    COLUMNS = ["epoch", "phase", "train_loss", "val_loss", "val_mae", "val_rmse"]
+    COLUMNS = ["epoch", "train_loss", "val_loss", "val_mae", "val_rmse"]
 
-    def log(self, epoch, phase, train_loss, val_loss=None, val_mae=None, val_rmse=None):
+    def log(self, epoch, train_loss, val_loss=None, val_mae=None, val_rmse=None):
         self._append(
             [
                 epoch,
-                phase,
                 f"{train_loss:.6f}",
                 "" if val_loss is None else f"{val_loss:.6f}",
                 "" if val_mae is None else f"{val_mae:.4f}",
@@ -192,39 +173,28 @@ class LossLogger(_BaseLossLogger):
             ]
         )
 
-    def save_plot(self, pretrain_epochs=0):
+    def save_plot(self):
         if not _HAS_MATPLOTLIB:
             return
         df = pd.read_csv(self.csv_path)
         for col in ("val_loss", "val_mae", "val_rmse"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        val = df[df["val_loss"].notna()]
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         ax_loss, ax_mae = axes
         for ax in axes:
-            if pretrain_epochs > 0:
-                ax.axvspan(
-                    0.5,
-                    pretrain_epochs + 0.5,
-                    alpha=0.08,
-                    color="gray",
-                    label="pretrain",
-                )
             ax.set_xlabel("Epoch")
             ax.grid(True, linestyle=":", alpha=0.6)
 
         ax_loss.plot(df["epoch"], df["train_loss"], label="train loss")
-        for grp, label in _val_segments(df, "val_loss"):
-            ax_loss.plot(grp["epoch"], grp["val_loss"], linestyle="--", label=label)
+        if not val.empty:
+            ax_loss.plot(val["epoch"], val["val_loss"], linestyle="--", label="val loss")
+            ax_mae.plot(val["epoch"], val["val_mae"], color="tab:orange", label="val mae")
+            ax_mae.legend()
         ax_loss.set_ylabel("Loss")
         ax_loss.legend()
-
-        for grp, label in _val_segments(df, "val_mae"):
-            ax_mae.plot(
-                grp["epoch"], grp["val_mae"], color="tab:orange", label=label
-            )
         ax_mae.set_ylabel("MAE")
-        ax_mae.legend()
 
         fig.tight_layout()
         fig.savefig(self.plot_path, dpi=150)
@@ -357,30 +327,36 @@ def main():
         help="Training loss: MSE (default) or MAE.",
     )
 
-    # Pretrain
-    parser.add_argument("--pretrain_features_path", default=None)
-    parser.add_argument("--pretrain_labels_path", default=None)
-    parser.add_argument("--pretrain_coords_path", default=None)
+    # --- Data ----------------------------------------------------------------
     parser.add_argument(
-        "--pretrain_val_csv",
-        default=None,
-        help="Validation slide list for the pretrain phase (non-IgA), e.g. "
-        "validation_files_csvs/regression_validation_files_non_IgA.csv written by "
-        "define_regression_labels.py --val_non_iga. Those bags are held out of "
-        "the pretrain training set and scored each pretrain epoch. Omitted (the "
-        "default) means pretraining runs unvalidated on every non-IgA bag.",
+        "--features_path",
+        required=True,
+        help="Flat features folder (<slide>.h5 or .npy).",
     )
-    parser.add_argument("--pretrain_epochs", type=int, default=0)
-
-    # Data
-    parser.add_argument("--features_paths", nargs="+", required=True)
-    parser.add_argument("--labels_paths", nargs="+", required=True)
     parser.add_argument(
-        "--coords_paths",
+        "--labels_path",
+        required=True,
+        help="Flat .npy labels folder written by define_labels.py.",
+    )
+    parser.add_argument(
+        "--labels_csv",
+        required=True,
+        help="Labels CSV written by define_labels.py: the biopsy, stain and "
+             "train/val split of every slide.",
+    )
+    parser.add_argument(
+        "--stains",
         nargs="+",
         default=None,
-        help="Coord folder(s) for patchgcn. When --file_ext .h5 and omitted, "
-             "defaults to --features_paths.",
+        help="Stains to train on (default: all). Use '|' to merge source stain "
+             "names (e.g. 'HES|HE'); matching ignores case and punctuation.",
+    )
+    parser.add_argument(
+        "--coords_path",
+        default=None,
+        help="Coords folder (deepgraphsurv / patchgcn only). When --file_ext .h5 "
+             "and omitted, defaults to --features_path (coords are read from the "
+             "same .h5 file as features).",
     )
     parser.add_argument(
         "--file_ext",
@@ -389,18 +365,14 @@ def main():
         help="File extension for feature and coordinate bags (default: .h5). "
              "Use .npy for the legacy pipeline.",
     )
-    parser.add_argument("--val_csv", default=None)
     parser.add_argument(
         "--authorized_slides_csv",
         default=None,
         help=(
-            "CSV listing authorized slide basenames ('file_name' column or headerless). "
-            "When set, only bags whose file basename appears in this list are loaded "
-            "into the train/val dataloaders (applies to --features_paths, not pretrain)."
+            "CSV listing authorized slide names ('file_name' column or headerless). "
+            "When set, only those slides are loaded."
         ),
     )
-    parser.add_argument("--stain_filter", default=None)
-    parser.add_argument("--stain_csvs", nargs="+", default=None)
 
     # Output
     parser.add_argument("--checkpoint_dir", default="checkpoints")
@@ -420,26 +392,10 @@ def main():
         help="Sample one slide per biopsy per epoch to avoid inflated loss from repeated biopsies.",
     )
     parser.add_argument(
-        "--group_csvs",
-        nargs="+",
-        default=None,
-        help=(
-            "define_labels.py CSV(s) mapping file_name -> biopsy_number. Groups slides "
-            "into biopsies from the CSV instead of the biopsy-nested directory layout, "
-            "so flat feature dirs work for --biopsy_sampling, --max_biopsies and the "
-            "val split. Default: group by the directory prefix of nested bags."
-        ),
-    )
-    parser.add_argument(
         "--max_biopsies",
         type=int,
         default=None,
-        help=(
-            "Maximum number of training biopsies across all datasets combined. "
-            "The budget is split equally across datasets; if one has fewer biopsies "
-            "than its share, all of them are kept and the surplus is redistributed "
-            "to the others. Has no effect on the validation set."
-        ),
+        help="Maximum number of training biopsies (all slides of a selected biopsy are kept). Has no effect on the validation set.",
     )
 
     # Model architecture
@@ -457,77 +413,31 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate
-    n_train = len(args.features_paths)
-    if len(args.labels_paths) != n_train:
-        parser.error("--features_paths and --labels_paths must have the same length.")
-
-    do_pretrain = args.pretrain_features_path is not None
-    if do_pretrain and args.pretrain_labels_path is None:
-        parser.error(
-            "--pretrain_labels_path is required with --pretrain_features_path."
-        )
-    if do_pretrain and args.pretrain_epochs <= 0:
-        parser.error("--pretrain_epochs must be > 0 with --pretrain_features_path.")
-    if args.pretrain_val_csv is not None and not do_pretrain:
-        parser.error(
-            "--pretrain_val_csv is only meaningful with --pretrain_features_path."
-        )
-
     is_graph = args.model_type in _GRAPH_MODELS
     bag_keys = ["X", "Y", "adj", "coords"] if is_graph else ["X", "Y"]
-    if is_graph:
-        if args.coords_paths is None:
-            if args.file_ext == ".h5":
-                args.coords_paths = args.features_paths
-            else:
-                parser.error(f"--coords_paths is required for {args.model_type}.")
-        if len(args.coords_paths) != n_train:
-            parser.error(
-                "--coords_paths must have the same number of entries as --features_paths."
-            )
-        if do_pretrain and args.pretrain_coords_path is None:
-            if args.file_ext == ".h5":
-                args.pretrain_coords_path = args.pretrain_features_path
-            else:
-                parser.error(f"--pretrain_coords_path is required for {args.model_type} pretraining.")
-
-    if args.stain_csvs is not None:
-        if args.stain_filter is None:
-            parser.error("--stain_filter is required when --stain_csvs is set.")
-        if len(args.stain_csvs) != n_train:
-            parser.error(
-                "--stain_csvs must have the same number of entries as --features_paths."
-            )
-
-    finetune_epochs = args.epochs - args.pretrain_epochs
-    if finetune_epochs <= 0:
-        parser.error("--pretrain_epochs must be less than --epochs.")
-
-    def _none_list(paths, n):
-        return paths if paths is not None else [None] * n
+    if is_graph and args.coords_path is None:
+        if args.file_ext == ".h5":
+            args.coords_path = args.features_path
+        else:
+            parser.error(f"--coords_path is required for {args.model_type}.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # Build datasets
-    val_names = load_val_names(args.val_csv)
-    authorized_slides = load_authorized_slides(args.authorized_slides_csv)
-    group_map = load_group_map(args.group_csvs)
+    table = load_labels_table(args.labels_csv)
     train_dataset, val_dataset, train_labels, val_labels = build_dataset(
-        args.features_paths,
-        args.labels_paths,
-        _none_list(args.coords_paths, n_train),
+        args.features_path,
+        args.labels_path,
+        args.coords_path,
         bag_keys,
         args.dist_thr,
-        val_names=val_names,
-        stain_csvs=args.stain_csvs,
-        stain_filter=args.stain_filter,
+        table,
+        stains=args.stains,
         scan_labels_fn=scan_labels,
         max_biopsies=args.max_biopsies,
         file_ext=args.file_ext,
-        authorized_slides=authorized_slides,
-        group_map=group_map,
+        authorized_slides=load_authorized_slides(args.authorized_slides_csv),
     )
 
     print(
@@ -538,52 +448,6 @@ def main():
         print(
             f"Train {args.label_name}: {train_labels.mean():.1f} ± {train_labels.std():.1f}"
         )
-
-    pretrain_dataset = pretrain_val_dataset = None
-    if do_pretrain:
-        pretrain_names = discover_bags(args.pretrain_features_path)
-        pretrain_labelled = set(discover_bags(args.pretrain_labels_path, extensions=(".npy",)))
-        pretrain_names = [n for n in pretrain_names if n in pretrain_labelled]
-        pretrain_names = drop_empty_bags(
-            args.pretrain_features_path, pretrain_names, args.file_ext
-        )
-
-        # The pretrain val list is separate from --val_csv: it names non-IgA
-        # bags, while --val_csv names IgA + registry bags for the finetune
-        # phase.  Without --pretrain_val_csv every bag stays in training, which
-        # is the previous behaviour.
-        pretrain_val_names = load_val_names(args.pretrain_val_csv)
-
-        def _make_pretrain_ds(names):
-            return BagDataset(
-                features_path=args.pretrain_features_path,
-                labels_path=args.pretrain_labels_path,
-                coords_path=args.pretrain_coords_path,
-                bag_keys=bag_keys,
-                dist_thr=args.dist_thr,
-                bag_names=names,
-                file_ext=args.file_ext,
-                label_ext=".npy",
-            )
-
-        if pretrain_val_names is not None:
-            held_out = [n for n in pretrain_names if n in pretrain_val_names]
-            pretrain_names = [n for n in pretrain_names if n not in pretrain_val_names]
-            if held_out:
-                pretrain_val_dataset = _make_pretrain_ds(held_out)
-            else:
-                print(
-                    f"Warning: no pretrain bag matched {args.pretrain_val_csv} "
-                    f"— pretraining will run unvalidated."
-                )
-
-        pretrain_dataset = _make_pretrain_ds(pretrain_names)
-        pretrain_val_info = (
-            f" | Pretrain val bags: {len(pretrain_val_dataset)}"
-            if pretrain_val_dataset is not None
-            else ""
-        )
-        print(f"Pretrain bags: {len(pretrain_dataset)}{pretrain_val_info}")
 
     _collate = make_collate_fn(
         partial(collate_fn, sparse=not is_graph),
@@ -600,23 +464,14 @@ def main():
         )
 
     val_loader = _make_loader(val_dataset, False) if val_dataset else None
-    pretrain_val_loader = (
-        _make_loader(pretrain_val_dataset, False) if pretrain_val_dataset else None
+    train_loader = _make_loader(
+        train_dataset,
+        True,
+        BiopsySampler(train_dataset, table) if args.biopsy_sampling else None,
     )
-    if args.biopsy_sampling:
-        pretrain_loader = (
-            _make_loader(pretrain_dataset, True, BiopsySampler(pretrain_dataset, group_map))
-            if pretrain_dataset
-            else None
-        )
-        train_loader = _make_loader(train_dataset, True, BiopsySampler(train_dataset, group_map))
-    else:
-        pretrain_loader = _make_loader(pretrain_dataset, True) if pretrain_dataset else None
-        train_loader = _make_loader(train_dataset, True)
 
     # Model
-    ref = pretrain_dataset if pretrain_dataset is not None else train_dataset
-    feat_dim = int(ref[0]["X"].shape[-1])
+    feat_dim = int(train_dataset[0]["X"].shape[-1])
     model = build_model(args.model_type, feat_dim, args).to(device)
 
     criterion = nn.MSELoss() if args.loss == "mse" else nn.L1Loss()
@@ -628,44 +483,7 @@ def main():
     logger = LossLogger(log_dir)
     print(f"Loss: {args.loss.upper()}  |  Log: {logger.csv_path}")
 
-    # Phase 1: pretrain
-    if do_pretrain:
-        print(f"\n--- Pretrain: {args.pretrain_epochs} epochs ---")
-        for epoch in range(1, args.pretrain_epochs + 1):
-            tl = train_epoch(
-                model,
-                pretrain_loader,
-                optimizer,
-                criterion,
-                device,
-                args.model_type,
-                args.accumulation_steps,
-            )
-            if pretrain_val_loader is not None:
-                vl, mae, rmse = val_epoch(
-                    model, pretrain_val_loader, criterion, device, args.model_type
-                )
-                logger.log(epoch, "pretrain", tl, vl, mae, rmse)
-                print(
-                    f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] loss={tl:.4f}"
-                    f"  val_loss={vl:.4f}  MAE={mae:.2f}  RMSE={rmse:.2f}"
-                )
-            else:
-                logger.log(epoch, "pretrain", tl)
-                print(f"[Pretrain {epoch:>3d}/{args.pretrain_epochs}] loss={tl:.4f}")
-            if args.save_every > 0 and epoch % args.save_every == 0:
-                torch.save(
-                    model.state_dict(),
-                    os.path.join(
-                        args.checkpoint_dir,
-                        f"{args.model_type}_pretrain_epoch{epoch}.pth",
-                    ),
-                )
-
-    # Phase 2: finetune
-    print(f"\n--- Finetune: {finetune_epochs} epochs ---")
-    for epoch in range(1, finetune_epochs + 1):
-        ge = epoch + args.pretrain_epochs
+    for epoch in range(1, args.epochs + 1):
         tl = train_epoch(
             model,
             train_loader,
@@ -679,25 +497,25 @@ def main():
             vl, mae, rmse = val_epoch(
                 model, val_loader, criterion, device, args.model_type
             )
-            logger.log(ge, "finetune", tl, vl, mae, rmse)
+            logger.log(epoch, tl, vl, mae, rmse)
             print(
-                f"[{ge:>3d}/{args.epochs}] loss={tl:.4f}  val_loss={vl:.4f}"
+                f"[{epoch:>3d}/{args.epochs}] loss={tl:.4f}  val_loss={vl:.4f}"
                 f"  MAE={mae:.2f}  RMSE={rmse:.2f}"
             )
         else:
-            logger.log(ge, "finetune", tl)
-            print(f"[{ge:>3d}/{args.epochs}] loss={tl:.4f}")
+            logger.log(epoch, tl)
+            print(f"[{epoch:>3d}/{args.epochs}] loss={tl:.4f}")
 
-        if args.save_every > 0 and ge % args.save_every == 0:
+        if args.save_every > 0 and epoch % args.save_every == 0:
             torch.save(
                 model.state_dict(),
-                os.path.join(args.checkpoint_dir, f"{args.model_type}_epoch{ge}.pth"),
+                os.path.join(args.checkpoint_dir, f"{args.model_type}_epoch{epoch}.pth"),
             )
 
     torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, checkpoint_name))
     print(f"Model saved to {os.path.join(args.checkpoint_dir, checkpoint_name)}")
 
-    logger.save_plot(pretrain_epochs=args.pretrain_epochs)
+    logger.save_plot()
 
     if val_loader is not None:
         plot_regression_results(

@@ -42,10 +42,9 @@ Outputs (in --output_dir):
 Usage:
     python python_scripts/evaluate_MIL/analyze_stain_weights.py \\
         --checkpoint     checkpoints_multistain/multistain_survival_best.pth \\
-        --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested \\
-        --labels_paths   WSI/IgA/trident/labels \\
-        --stain_csvs     label_csvs/labels_unfiltered.csv \\
-        --val_csv        validation_files_csvs/survival_validation_files.csv \\
+        --features_path  WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path    WSI/IgA/trident/labels \\
+        --labels_csv     label_csvs/labels.csv \\
         --split val --output_dir results/stain_analysis
 
 The stain vocabulary and architecture come from multistain_config.json next to the
@@ -85,7 +84,7 @@ _mil_dir = os.path.abspath(os.path.join(_script_dir, "..", "MIL"))
 if _mil_dir not in sys.path:
     sys.path.insert(0, _mil_dir)
 
-from mil_utils import load_val_names, load_authorized_slides  # noqa: E402
+from mil_utils import load_authorized_slides, load_labels_table  # noqa: E402
 from multistain_data import (  # noqa: E402
     MultiStainBiopsyDataset,
     StainVocabulary,
@@ -635,15 +634,18 @@ def main():
         default=None,
         help="multistain_config.json (default: next to the checkpoint).",
     )
-    parser.add_argument("--features_paths", nargs="+", required=True)
-    parser.add_argument("--labels_paths", nargs="+", required=True)
-    parser.add_argument("--stain_csvs", nargs="+", required=True)
-    parser.add_argument("--val_csv", default=None)
+    parser.add_argument("--features_path", required=True, help="Flat feature folder.")
+    parser.add_argument("--labels_path", required=True, help="Flat .npy label folder.")
+    parser.add_argument(
+        "--labels_csv",
+        required=True,
+        help="Labels CSV: the biopsy, stain and train/val split of every slide.",
+    )
     parser.add_argument(
         "--split",
         default="val",
         choices=["val", "train", "all"],
-        help="Which biopsies to analyse. 'val' needs --val_csv.",
+        help="Which biopsies to analyse, by the labels CSV's split column.",
     )
     parser.add_argument("--authorized_slides_csv", default=None)
     parser.add_argument("--file_ext", default=".h5", choices=[".h5", ".npy"])
@@ -670,14 +672,6 @@ def main():
     with open(cfg_path) as f:
         cfg = json.load(f)
 
-    n_cohorts = len(args.features_paths)
-    if len(args.labels_paths) != n_cohorts:
-        parser.error("--features_paths and --labels_paths must have the same length.")
-    if len(args.stain_csvs) == 1:
-        args.stain_csvs = args.stain_csvs * n_cohorts
-    if args.split == "val" and args.val_csv is None:
-        parser.error("--split val requires --val_csv.")
-
     task = cfg["task"]
     label_name = cfg.get("label_name", "label")
     label_mean = float(cfg.get("label_mean", 0.0))
@@ -697,15 +691,14 @@ def main():
 
     # --- Data ----------------------------------------------------------------
     vocab = StainVocabulary(cfg["stains"])
-    records = []
-    for fp, lp, sc in zip(args.features_paths, args.labels_paths, args.stain_csvs):
-        records += index_biopsies(
-            fp, lp, sc, vocab,
-            file_ext=args.file_ext,
-            authorized_slides=load_authorized_slides(args.authorized_slides_csv),
-            min_stains=args.min_stains,
-        )
-    train_recs, val_recs = split_records(records, load_val_names(args.val_csv))
+    table = load_labels_table(args.labels_csv)
+    records = index_biopsies(
+        args.features_path, args.labels_path, table, vocab,
+        file_ext=args.file_ext,
+        authorized_slides=load_authorized_slides(args.authorized_slides_csv),
+        min_stains=args.min_stains,
+    )
+    train_recs, val_recs = split_records(records, table)
     records = {"val": val_recs, "train": train_recs, "all": records}[args.split]
     if not records:
         parser.error(f"No biopsies in the '{args.split}' split.")

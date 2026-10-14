@@ -6,15 +6,14 @@ The single-stain scripts (MIL.py, regression_MIL.py) treat one *slide* as one ba
 Here the unit of prediction is the *biopsy*: every slide of the biopsy is grouped by
 its stain, so one sample is a stack of per-stain patch bags.
 
-Input layout (produced by run_trident_stain_feats.py + reorganize_trident_feats.py):
+Inputs (flat; produced by TRIDENT and define_labels.py / define_regression_labels.py):
 
-    features_path/{biopsy_nr}/{slide_id}.h5     keys 'features' (N, D), 'coords' (N, 2)
-    labels_path/{biopsy_nr}/{slide_id}.npy      [time, event]  or  scalar (regression)
+    features_path/{slide_id}.h5     keys 'features' (N, D), 'coords' (N, 2)
+    labels_path/{slide_id}.npy      [time, event]  or  scalar (regression)
+    labels CSV                      file_name, biopsy_number, stain, split
 
-The stain of each slide comes from the labels CSV written by define_labels.py
-(columns: biopsy_number, file_name, stain), and so does its biopsy when the CSV has
-a biopsy_number column — the nested layout is then not required, flat feature
-directories group the same way.  All slides of a biopsy carry the same
+The labels CSV (loaded with mil_utils.load_labels_table) gives every slide its
+biopsy, its stain and its train/val split.  All slides of a biopsy carry the same
 survival/regression label, so the biopsy label is read from the first slide found.
 
 Fixed patch count per stain
@@ -39,96 +38,22 @@ Returned sample (all tensors, so torch's default collate stacks them):
 """
 
 import os
-import re
 
 import h5py
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from mil_utils import bag_group, discover_bags, load_group_map, _bag_authorized
+from mil_utils import StainVocabulary, bag_group, canon_stain, discover_bags  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
-# Stain vocabulary
-# ---------------------------------------------------------------------------
-def canon_stain(name) -> str:
-    """Canonical key for a stain name: lowercase, alphanumerics only.
-
-    The registry stain column is free text with case and punctuation variants
-    ('Congo' / 'CONGO', 'IgG - IgM - IgA'), so names are compared on this key.
-    """
-    if name is None:
-        return ""
-    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
-
-
-class StainVocabulary:
-    """Ordered list of model stains, each optionally covering several source names.
-
-    A stain spec is a ``'|'``-separated alias group whose first element is the
-    display name, e.g. ``'HES|HE'`` maps both source stains onto one model stain.
-    ``index_of`` returns the model stain index for a raw CSV stain name, or None
-    when that stain is not part of the vocabulary.
-    """
-
-    def __init__(self, specs):
-        self.names = []
-        self._lookup = {}
-        for i, spec in enumerate(specs):
-            aliases = [a.strip() for a in str(spec).split("|") if a.strip()]
-            if not aliases:
-                raise ValueError(f"Empty stain spec: {spec!r}")
-            self.names.append(aliases[0])
-            for alias in aliases:
-                key = canon_stain(alias)
-                if key in self._lookup:
-                    raise ValueError(
-                        f"Stain alias {alias!r} is assigned to both "
-                        f"{self.names[self._lookup[key]]!r} and {aliases[0]!r}."
-                    )
-                self._lookup[key] = i
-
-    def __len__(self):
-        return len(self.names)
-
-    def index_of(self, raw_name):
-        return self._lookup.get(canon_stain(raw_name))
-
-
-def load_stain_lookup(stain_csv) -> dict:
-    """Map bag name -> raw stain string from a define_labels.py CSV.
-
-    Both the nested ('biopsy_number/file_name') and the flat ('file_name') key are
-    registered so the lookup works whichever layout the features are stored in.
-    """
-    df = pd.read_csv(stain_csv, dtype=str)
-    for col in ("file_name", "stain"):
-        if col not in df.columns:
-            raise ValueError(f"{stain_csv} must contain a '{col}' column.")
-    lookup = {}
-    has_biopsy = "biopsy_number" in df.columns
-    for row in df.itertuples(index=False):
-        stain = getattr(row, "stain")
-        if stain is None or (isinstance(stain, float) and np.isnan(stain)):
-            continue
-        name = str(getattr(row, "file_name"))
-        lookup[name] = stain
-        if has_biopsy:
-            biopsy = getattr(row, "biopsy_number")
-            if biopsy and str(biopsy) not in ("nan", "None"):
-                lookup[f"{biopsy}/{name}"] = stain
-    return lookup
-
-
-# ---------------------------------------------------------------------------
-# Indexing: features + labels + stains -> one record per biopsy
+# Indexing: features + labels + labels table -> one record per biopsy
 # ---------------------------------------------------------------------------
 def index_biopsies(
     features_path,
     labels_path,
-    stain_csv,
+    table,
     vocab,
     file_ext=".h5",
     authorized_slides=None,
@@ -137,55 +62,41 @@ def index_biopsies(
 ) -> list:
     """Group the slides under ``features_path`` into one record per biopsy.
 
-    Returns a list of dicts::
+    ``table`` is the labels table (mil_utils.load_labels_table): it gives each
+    slide its biopsy and its stain. Returns a list of dicts::
 
-        {"biopsy": str,                       # biopsy_number (else bag prefix)
-         "source": features_path,
+        {"biopsy": str,                       # biopsy_number
          "label": np.ndarray,                 # from the first labelled slide
          "slides": {stain_idx: [h5 path, ...]},
          "bag_names": [bag name, ...]}
 
-    Slides are dropped when they have no label file, no stain in ``stain_csv``, a
-    stain outside ``vocab``, or are excluded by ``authorized_slides``.  Biopsies
-    left with fewer than ``min_stains`` stains are dropped.
+    Slides are dropped when they are not in the table, have no label file, have
+    a stain outside ``vocab``, or are excluded by ``authorized_slides``.
+    Biopsies left with fewer than ``min_stains`` stains are dropped.
     """
-    lookup = load_stain_lookup(stain_csv)
-    group_map = (
-        load_group_map([stain_csv])
-        if "biopsy_number" in pd.read_csv(stain_csv, nrows=0).columns
-        else None
-    )
     bags = discover_bags(features_path, extensions=(file_ext,))
     labelled = set(discover_bags(labels_path, extensions=(".npy",)))
 
-    dropped = {"unauthorized": 0, "no_label": 0, "no_stain": 0, "other_stain": 0}
+    dropped = {"unauthorized": 0, "no_label": 0, "not_in_csv": 0, "other_stain": 0}
     groups = {}
     for bag in bags:
-        if authorized_slides is not None and not _bag_authorized(bag, authorized_slides):
+        if authorized_slides is not None and bag not in authorized_slides:
             dropped["unauthorized"] += 1
             continue
         if bag not in labelled:
             dropped["no_label"] += 1
             continue
-        raw_stain = lookup.get(bag, lookup.get(bag.rsplit("/", 1)[-1]))
-        if raw_stain is None:
-            dropped["no_stain"] += 1
+        if bag not in table.index:
+            dropped["not_in_csv"] += 1
             continue
-        stain_idx = vocab.index_of(raw_stain)
+        stain_idx = vocab.index_of(table.at[bag, "stain"])
         if stain_idx is None:
             dropped["other_stain"] += 1
             continue
 
-        biopsy = bag_group(bag, group_map)
+        biopsy = bag_group(bag, table)
         rec = groups.setdefault(
-            biopsy,
-            {
-                "biopsy": biopsy,
-                "source": features_path,
-                "label": None,
-                "slides": {},
-                "bag_names": [],
-            },
+            biopsy, {"biopsy": biopsy, "label": None, "slides": {}, "bag_names": []}
         )
         rec["slides"].setdefault(stain_idx, []).append(
             os.path.join(features_path, f"{bag}{file_ext}")
@@ -201,7 +112,7 @@ def index_biopsies(
         print(f"  [{features_path}] {len(records)} biopsies from {len(bags)} slides")
         print(
             f"    dropped slides — no label: {dropped['no_label']}, "
-            f"no stain in CSV: {dropped['no_stain']}, "
+            f"not in labels CSV: {dropped['not_in_csv']}, "
             f"stain not in vocabulary: {dropped['other_stain']}, "
             f"not authorized: {dropped['unauthorized']}"
         )
@@ -220,22 +131,16 @@ def index_biopsies(
     return records
 
 
-def split_records(records, val_names):
-    """Split records into (train, val) using a set of slide or biopsy names.
+def split_records(records, table):
+    """Split records into (train, val) by the labels table's split column.
 
-    A biopsy goes to validation when its biopsy id, or any of its slide bag names
-    (full 'biopsy/slide' or bare slide stem), appears in ``val_names``.  Returns
-    ``(records, [])`` when ``val_names`` is None.
+    A biopsy goes to validation when any of its slides is in the val split
+    (define_labels.py splits by patient, so a biopsy's slides always agree).
     """
-    if val_names is None:
-        return records, []
     train, val = [], []
     for rec in records:
-        keys = {rec["biopsy"]}
-        for bag in rec["bag_names"]:
-            keys.add(bag)
-            keys.add(bag.rsplit("/", 1)[-1])
-        (val if keys & val_names else train).append(rec)
+        is_val = (table.loc[rec["bag_names"], "split"] == "val").any()
+        (val if is_val else train).append(rec)
     return train, val
 
 

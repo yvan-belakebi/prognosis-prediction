@@ -37,19 +37,12 @@ In python_scripts/external_repositories/TRIDENT-main/trident/patch_encoder_model
 python python_scripts/prepare_for_MIL/quick_start.py
 
 OR run the stages manually (equivalent to quick_start.py). `--search_nested` is needed because
-the raw WSIs are stored in biopsy-nested subfolders. The TRIDENT job dir (WSI/IgA/trident) holds
-segmentation, coordinates and raw feature output; the final step folds features into the
-biopsy-nested layout (WSI/IgA/UNI2-h_feats) consumed by the MIL stage.
+the raw WSIs are stored in biopsy subfolders. The TRIDENT job dir (WSI/IgA/trident) holds
+segmentation, coordinates and feature output. Features are written flat (one <slide>.h5 per slide)
+and used as-is by the MIL stage: which biopsy, stain and train/val split a slide belongs to comes
+from the labels CSV (step 3), never from folders.
 
 2) Tiling  (tissue segmentation + patch coordinates, TRIDENT)
-
-# (One-time, if any raw slides have filesystem-unsafe names — e.g. scanner timestamps
-# with spaces.) Normalize them FIRST, before tiling/labels/features, so every downstream
-# step is generated with safe names. --rename builds one global plan and rewrites the
-# source metadata CSVs into --csv_out_dir (the same dir define_labels.py reads), so
-# labels_unfiltered.csv is born with safe file_name values and reorganize_trident_feats.py
-# needs no rename of its own. Dry-run by default; add --apply. Skip if names are already safe.
-python python_scripts/prepare_for_MIL/reorganize_wsi_dirs.py --rename --slide_dirs data/raw_wsi/IgA --slide_exts .svs --csv_out_dir followup_data/derived/renamed --apply
 
 # Tissue segmentation (HEST; use --segmenter otsu for a weights-free CPU fallback)
 python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task seg --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --segmenter hest --gpus 0 --search_nested
@@ -58,9 +51,19 @@ python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py 
 python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task coords --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --mag 20 --patch_size 224 --overlap 0 --search_nested (--dump_patches)
 
 3) Labels definition
-python python_scripts/prepare_for_MIL/define_labels.py --iga_output_dir WSI/IgA/trident/labels --iga_date_filter None
 
-python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_dir WSI/IgA/trident/labels_regression --iga_date_filter None
+One registry-style CSV (one row per slide) is the single data source. --query selects the rows
+(any pandas query, e.g. "is_IgA == True" or "Biopsy_date >= '2006-01-01'"); the --*_col flags
+name its columns (defaults match registry_anonymized.csv). Each script writes a flat folder of
+<slide>.npy labels and a labels CSV (file_name, biopsy_number, patient, stain, label, split).
+The train/val split is patient-level and stratified (--val_frac, default 0.2).
+The input CSV must list the slides that were tiled: its slide column (--slide_col) is matched to
+the feature file stems. registry_anonymized.csv covers the registry slides (IgA and non-IgA) but
+not the separate IgA cohort, whose data would first have to be put into this format.
+
+python python_scripts/prepare_for_MIL/define_labels.py --input_csv followup_data/derived/renamed/registry_anonymized.csv --query "is_IgA == True" --labels_dir WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv
+
+python python_scripts/prepare_for_MIL/define_regression_labels.py --input_csv followup_data/derived/renamed/registry_anonymized.csv --query "is_IgA == True" --labels_dir WSI/IgA/trident/labels_regression --labels_csv label_csvs/labels_regression.csv
 
 4) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
 
@@ -68,49 +71,43 @@ python python_scripts/prepare_for_MIL/define_regression_labels.py --iga_output_d
 # fit_stain_reference.py auto-detects TRIDENT coords (point --patches_dir at the job's
 # patches/ dir); read recipe is detected per-file from the h5 attrs. Omit to skip stain
 # normalization and use stock TRIDENT --task feat (raw patches) instead.
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_macenko/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs_macenko/IgA/qc --n_save_patches 20 --method macenko --skip_errors
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_macenko/IgA --labels_csv label_csvs/labels.csv --save_patches stain_refs_macenko/IgA/qc --n_save_patches 20 --method macenko --skip_errors
 
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_vahadane/IgA --labels_csv label_csvs/labels_unfiltered.csv --save_patches stain_refs_vahadane/IgA/qc --n_save_patches 20 --method vahadane --skip_errors
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_vahadane/IgA --labels_csv label_csvs/labels.csv --save_patches stain_refs_vahadane/IgA/qc --n_save_patches 20 --method vahadane --skip_errors
 
 After having run both, create a stain_refs dir and copy paste the relevant .pt file for each stain
 (Explicit choice of the method).
 Recommended: Vahadane for Lendrum, Masson Goldner, Masson trichrom, PASM, HES, MSB
 # Per-stain, stain-normalized feature extraction (backbone names: uni_v2, virchow2, hoptimus1, hibou_l)
-python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --batch_size 256 --search_nested
+python python_scripts/prepare_for_MIL/run_trident_stain_feats.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels.csv --stain_refs_dir stain_refs/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --batch_size 256 --search_nested
 
 # (Optional) Speed benchmark: Macenko vs Vahadane normalization on a small subset.
 # Fit one reference set per method first (stored under stain_refs_macenko / stain_refs_vahadane),
 # then time run_trident_stain_feats.py's extraction path both ways on --n_slides slides.
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_macenko/IgA  --labels_csv label_csvs/labels_unfiltered.csv --method macenko
-python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_vahadane/IgA --labels_csv label_csvs/labels_unfiltered.csv --method vahadane
-python python_scripts/prepare_for_MIL/benchmark_stain_norm.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels_unfiltered.csv --macenko_refs_dir stain_refs_macenko/IgA --vahadane_refs_dir stain_refs_vahadane/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --n_slides 4 --batch_size 256 --search_nested
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_macenko/IgA  --labels_csv label_csvs/labels.csv --method macenko
+python python_scripts/prepare_for_MIL/fit_stain_reference.py --patches_dir WSI/IgA/trident/20x_224px_0px_overlap/patches --wsi_dir data/raw_wsi/IgA --output stain_refs_vahadane/IgA --labels_csv label_csvs/labels.csv --method vahadane
+python python_scripts/prepare_for_MIL/benchmark_stain_norm.py --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --labels_csv label_csvs/labels.csv --macenko_refs_dir stain_refs_macenko/IgA --vahadane_refs_dir stain_refs_vahadane/IgA --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 --n_slides 4 --batch_size 256 --search_nested
 
 #   Without stain normalization, use stock TRIDENT instead:
 #   python python_scripts/external_repositories/TRIDENT-main/run_batch_of_slides.py --task feat --wsi_dir data/raw_wsi/IgA --job_dir WSI/IgA/trident --patch_encoder uni_v2 --mag 20 --patch_size 224 --overlap 0 --gpus 0 --search_nested
 
-# Reorganize flat TRIDENT features into the biopsy-nested layout
-# (biopsy_nr read from the labels CSV — same source define_labels.py used for the .npy labels)
-python python_scripts/prepare_for_MIL/reorganize_trident_feats.py --features_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_csv label_csvs/labels_unfiltered.csv --output_dir WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --copy
-
-# Migration (one-time): if you have legacy *flat* WSI/feature/label/coord dirs predating
-# the biopsy-nested layout, reorganize_wsi_dirs.py migrates them in place (and can rename
-# slides with unsafe names). Dry-run by default; --apply to execute. Not part of the per-run
-# flow — only needed once to convert old data. See the script's docstring for usage.
-#
-# The nested layout is optional: pass --group_csvs label_csvs/labels_unfiltered.csv to
-# MIL.py / regression_MIL.py / evaluate_survival.py / plot_train_survival.py to group slides
-# into biopsies from the CSV's biopsy_number column instead of from the directories
-# (--biopsy_sampling, --max_biopsies, the val split and biopsy-level metrics then work on
-# flat feature dirs too). multistain_MIL.py does this automatically from --stain_csvs.
-
 5) MIL pooling
-python python_scripts/MIL/regression_MIL.py  --model_type transmil --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
-# Attention map
-python python_scripts/evaluate_MIL/visualize_attention.py --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --checkpoint checkpoints_regression_transmil/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels_unfiltered.csv --authorized_slides_csv ok_slides.csv --save_as_tif 
+All training scripts take one --features_path (the flat TRIDENT features folder), one
+--labels_path and the --labels_csv from step 3. --stains picks the stains to train on (default:
+all; '|' merges source names, e.g. "HES|HE"; matching ignores case and punctuation). The
+train/val split is the labels CSV's split column; --biopsy_sampling and --max_biopsies group
+slides by its biopsy_number column.
 
-6) Survival model
-python python_scripts/MIL/evaluate_survival.py --model_type deepgraphsurv --checkpoint checkpoints/deepgraphsurv_model.pth --features_paths WSI/IgA/UNI2-h_feats --labels_paths WSI/IgA/labels --val_csv validation_files_csvs/survival_validation_20pct_both.csv --dropout 0.1
+python python_scripts/MIL/MIL.py --model_type abmil --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --stains PAS --checkpoint_dir checkpoints --log_dir results/losses
+
+python python_scripts/MIL/regression_MIL.py --model_type transmil --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels_regression --labels_csv label_csvs/labels_regression.csv --stains PAS --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
+
+# Attention map (--labels_csv resolves biopsy IDs in --label_csv to a slide)
+python python_scripts/evaluate_MIL/visualize_attention.py --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --checkpoint checkpoints_regression_transmil/transmil_regression.pth --model_type transmil --task regression --label_csv label_csvs/labels.csv --labels_csv label_csvs/labels.csv --authorized_slides_csv ok_slides.csv --save_as_tif
+
+6) Survival model evaluation (val split of the labels CSV, risk averaged per biopsy)
+python python_scripts/evaluate_MIL/evaluate_survival.py --model_type abmil --checkpoint checkpoints/abmil_model.pth --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --stains PAS
 
 7) Multi-stain fusion (UNICORN-style)
 
@@ -124,16 +121,16 @@ have are masked out, so biopsies with different stain panels train together.
     python_scripts/MIL/multistain_model.py  MultiStainFusion (per-stain encoders + aggregator)
     python_scripts/MIL/multistain_MIL.py    training script (both tasks)
 
-Inputs are the same as the single-stain scripts: the biopsy-nested features from
-reorganize_trident_feats.py, the .npy labels from define_labels.py / define_regression_labels.py,
-and labels_unfiltered.csv for the per-slide stain. A stain argument may merge source names with
-'|' ("HES|HE"); matching ignores case and punctuation.
+Inputs are the same as the single-stain scripts: the flat TRIDENT features, the .npy labels from
+define_labels.py / define_regression_labels.py, and the labels CSV for each slide's biopsy, stain
+and split. A stain argument may merge source names with '|' ("HES|HE"); matching ignores case and
+punctuation.
 
 # Survival
-python python_scripts/MIL/multistain_MIL.py --task survival --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels --stain_csvs label_csvs/labels_unfiltered.csv --stains PAS PASM "HES|HE" Congo AFOG --val_csv validation_files_csvs/survival_validation_20pct_both.csv --patches_per_stain 512 --batch_size 8 --epochs 50 --checkpoint_dir checkpoints_multistain --log_dir results/losses_multistain
+python python_scripts/MIL/multistain_MIL.py --task survival --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --stains PAS PASM "HES|HE" Congo AFOG --patches_per_stain 512 --batch_size 8 --epochs 50 --checkpoint_dir checkpoints_multistain --log_dir results/losses_multistain
 
 # Regression (eGFR)
-python python_scripts/MIL/multistain_MIL.py --task regression --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels_regression --stain_csvs label_csvs/labels_unfiltered.csv --stains PAS PASM "HES|HE" Congo AFOG --val_csv validation_files_csvs/regression_validation_files.csv --patches_per_stain 512 --batch_size 8 --epochs 50 --checkpoint_dir checkpoints_multistain_regression --log_dir results/losses_multistain_regression
+python python_scripts/MIL/multistain_MIL.py --task regression --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels_regression --labels_csv label_csvs/labels_regression.csv --stains PAS PASM "HES|HE" Congo AFOG --patches_per_stain 512 --batch_size 8 --epochs 50 --checkpoint_dir checkpoints_multistain_regression --log_dir results/losses_multistain_regression
 
 # GPU memory scales as batch_size x n_stains x patches_per_stain x feat_dim; lower
 # --patches_per_stain first if it does not fit. Prefer that over lowering --batch_size for
@@ -144,7 +141,7 @@ python python_scripts/MIL/multistain_MIL.py --task regression --features_paths W
 # {checkpoint_dir}/multistain_config.json so evaluation can rebuild the same model.
 
 # Stain-weight analysis — which stain drove which prediction, and can you trust it
-python python_scripts/evaluate_MIL/analyze_stain_weights.py --checkpoint checkpoints_multistain/multistain_survival_best.pth --features_paths WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested --labels_paths WSI/IgA/trident/labels --stain_csvs label_csvs/labels_unfiltered.csv --val_csv validation_files_csvs/survival_validation_files.csv --split val --output_dir results/stain_analysis
+python python_scripts/evaluate_MIL/analyze_stain_weights.py --checkpoint checkpoints_multistain/multistain_survival_best.pth --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --split val --output_dir results/stain_analysis
 
 # Reads the stain vocabulary and architecture from multistain_config.json next to the
 # checkpoint, so the flags only describe the data. Writes, into --output_dir:

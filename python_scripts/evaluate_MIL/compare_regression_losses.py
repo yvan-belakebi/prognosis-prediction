@@ -51,12 +51,6 @@ def load_log(log_dir):
     return df
 
 
-def pretrain_span(df):
-    """Return (epoch_start, epoch_end) of the pretrain phase, or None."""
-    pre = df[df["phase"] == "pretrain"]["epoch"]
-    return (pre.iloc[0], pre.iloc[-1]) if not pre.empty else None
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -119,35 +113,10 @@ def main():
                 linewidth=1.8,
             )
 
-        # Shade pretrain region for each model that has one (use first model's span
-        # per subplot to avoid overlapping identical shades).
-        for name, df in data.items():
-            span = pretrain_span(df)
-            if span is not None:
-                ax.axvspan(
-                    span[0],
-                    span[1],
-                    alpha=0.07,
-                    color="gray",
-                    zorder=0,
-                )
-            break  # one shade is enough — all models share the same x-axis
-
         ax.set_title(label, fontsize=11)
         ax.set_xlabel("Epoch")
         ax.grid(True, linestyle=":", alpha=0.5)
         ax.legend(fontsize=8)
-
-    # Add a note about the pretrain shade if any model used it
-    if any(pretrain_span(df) is not None for df in data.values()):
-        fig.text(
-            0.5,
-            -0.01,
-            "Gray band = pretrain phase",
-            ha="center",
-            fontsize=8,
-            color="gray",
-        )
 
     fig.suptitle("Regression MIL — loss comparison", fontsize=13)
     fig.tight_layout()

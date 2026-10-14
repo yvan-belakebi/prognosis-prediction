@@ -10,7 +10,7 @@ gets — which is what --max_patches has to cap.
 
 Usage:
     python python_scripts/explore_data/bag_size_stats.py \
-        WSI/non_IgA/trident/20x_224px_0px_overlap/features_uni_v2_biopsy_nested \
+        WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \
         --batch_size 12 --budget_mb 21766
 """
 

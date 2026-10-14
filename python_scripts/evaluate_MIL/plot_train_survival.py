@@ -1,20 +1,14 @@
 """
 plot_train_survival.py — Plot the Kaplan-Meier survival curve of the training cohort.
 
-No model is needed: this just reads the survival labels (.npy files) under
---labels_paths, optionally filters them to the slides listed in --train_csv,
-aggregates per biopsy, and saves a KM plot with a 95% CI band.
+No model is needed: this reads time and event from the labels CSV written by
+define_labels.py, keeps the slides of one split, aggregates per biopsy, and saves a
+KM plot with a 95% CI band.
 
-Usage (filtered to a specific cohort):
-    python python_scripts/MIL/plot_train_survival.py \\
-        --labels_paths WSI/IgA/labels WSI/IgA_registry/labels \\
-        --train_csv followup_data/survival_training_files.csv \\
+Usage:
+    python python_scripts/evaluate_MIL/plot_train_survival.py \\
+        --labels_csv label_csvs/labels.csv \\
         --output_dir results/train_survival
-
-Usage (all labels under the given paths):
-    python python_scripts/MIL/plot_train_survival.py \\
-        --labels_paths WSI/IgA/labels WSI/IgA_registry/labels \\
-        --output_dir results/all_survival
 """
 
 import argparse
@@ -30,39 +24,7 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 from evaluate_survival import kaplan_meier, aggregate_by_biopsy
-from mil_utils import load_group_map
-
-
-def load_train_names(csv_path):
-    """Read training slide basenames from a CSV (first column or 'bag_name')."""
-    df = pd.read_csv(csv_path)
-    col = "bag_name" if "bag_name" in df.columns else df.columns[0]
-    return set(df[col].astype(str).str.replace(".npy", "", regex=False))
-
-
-def collect_labels(labels_paths, train_names=None):
-    """Load (name, time, event) for every .npy label found under labels_paths.
-
-    If train_names is None, all .npy labels are loaded. Otherwise only labels
-    whose relative path (or filename stem) appears in train_names are kept.
-    """
-    names, times, events = [], [], []
-    for lp in labels_paths:
-        for root, _, files in os.walk(lp):
-            for f in files:
-                if not f.endswith(".npy"):
-                    continue
-                stem = os.path.splitext(f)[0]
-                rel = os.path.relpath(os.path.join(root, stem), lp).replace(os.sep, "/")
-                if train_names is not None and rel not in train_names and stem not in train_names:
-                    continue
-                y = np.load(os.path.join(root, f))
-                if y.ndim == 2:  # per-patch label array — labels are constant per bag
-                    y = y[0]
-                names.append(rel)
-                times.append(float(y[0]))
-                events.append(int(y[1]))
-    return np.array(names), np.array(times), np.array(events)
+from mil_utils import load_labels_table
 
 
 def plot_km(times, events, output_dir, time_unit="days"):
@@ -131,23 +93,16 @@ def main():
     p = argparse.ArgumentParser(
         description="Plot the Kaplan-Meier survival curve of the training cohort."
     )
-    p.add_argument("--labels_paths", nargs="+", required=True)
     p.add_argument(
-        "--train_csv",
-        default=None,
-        help="Optional CSV listing slide basenames to keep. "
-        "If omitted, every .npy label found under --labels_paths is used.",
+        "--labels_csv", required=True, help="Labels CSV written by define_labels.py."
+    )
+    p.add_argument(
+        "--split",
+        default="train",
+        choices=["train", "val", "all"],
+        help="Which slides of the labels CSV to plot.",
     )
     p.add_argument("--output_dir", default="results/train_survival")
-    p.add_argument(
-        "--group_csvs",
-        nargs="+",
-        default=None,
-        help=(
-            "define_labels.py CSV(s) mapping file_name -> biopsy_number, used to group "
-            "slides into biopsies instead of the biopsy-nested directory layout."
-        ),
-    )
     p.add_argument("--time_unit", default="days")
     p.add_argument(
         "--no_aggregate",
@@ -158,27 +113,21 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.train_csv is not None:
-        train_names = load_train_names(args.train_csv)
-        print(f"Filtering to {len(train_names)} names from {args.train_csv}")
-    else:
-        train_names = None
-        print("No --train_csv given; loading every label under --labels_paths")
-
-    names, times, events = collect_labels(args.labels_paths, train_names)
+    table = load_labels_table(args.labels_csv)
+    if args.split != "all":
+        table = table[table["split"] == args.split]
+    names = list(table.index)
+    times = table["time"].to_numpy(dtype=float)
+    events = table["event"].to_numpy(dtype=int)
     if len(names) == 0:
-        raise RuntimeError(
-            "No matching labels found — check --labels_paths"
-            + (" and --train_csv." if args.train_csv else ".")
-        )
+        raise RuntimeError(f"No slides in the '{args.split}' split of {args.labels_csv}.")
     print(f"Slides loaded: {len(names)}  |  events: {int(events.sum())}")
 
     # Aggregate slides to biopsies (mirrors evaluate_survival.py). Risks don't
     # exist here, so we pass zeros and discard the aggregated risk output.
-    group_map = load_group_map(args.group_csvs)
-    if not args.no_aggregate and (group_map is not None or any("/" in n for n in names)):
+    if not args.no_aggregate:
         _, times, events, biopsies = aggregate_by_biopsy(
-            np.zeros_like(times), times, events, list(names), group_map
+            np.zeros_like(times), times, events, names, table
         )
         print(
             f"Aggregated to {len(biopsies)} biopsies  |  events: {int(events.sum())}"
@@ -186,7 +135,7 @@ def main():
         out_ids = biopsies
         id_col = "biopsy"
     else:
-        out_ids = list(names)
+        out_ids = names
         id_col = "bag_name"
 
     # Save the underlying data alongside the figure

@@ -1,14 +1,16 @@
 """
 mil_utils.py — Shared utilities for MIL training and evaluation scripts.
 
-Provides bag-discovery, stain filtering, val-split loading, patch subsampling,
-biopsy-level sampling, and dataset construction — used by MIL.py,
-classification_MIL.py, regression_MIL.py, and evaluate_survival.py.
+Provides bag discovery, the labels table (biopsy grouping, stain selection and
+the train/val split), patch subsampling, biopsy-level sampling, and dataset
+construction — used by MIL.py, regression_MIL.py, multistain_MIL.py and the
+evaluation scripts.
 """
 
 import csv
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -17,7 +19,6 @@ import h5py
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import ConcatDataset
 
 # ---------------------------------------------------------------------------
 # Resolve local torchmil package (same logic as in the training scripts so
@@ -39,8 +40,8 @@ class BagDataset(ProcessedMILDataset):
     """ProcessedMILDataset without the unbounded in-memory bag cache.
 
     Upstream ``__getitem__`` stores every bag it has ever built in
-    ``self.loaded_bags`` and never evicts. One pass over the 31k-bag non-IgA
-    pretrain set therefore accumulates the entire feature archive in host RAM
+    ``self.loaded_bags`` and never evicts. One pass over a 31k-bag
+    training set therefore accumulates the entire feature archive in host RAM
     (tens of GB) and the process is killed by the OOM killer partway through
     the first epoch — a silent SIGKILL with no traceback.
 
@@ -57,25 +58,16 @@ class BagDataset(ProcessedMILDataset):
 
 
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
-    """Return relative bag paths (no extension) for flat or biopsy-nested layouts.
+    """Return the sorted stems of the bag files directly under base_dir.
 
-    Flat   : base_dir/slide.h5           → 'slide'
-    Nested : base_dir/biopsy_nr/slide.h5 → 'biopsy_nr/slide'
-    Always uses forward slashes so the result is portable across platforms.
+    Bags are stored flat (base_dir/<slide>.h5). Which biopsy a slide belongs to
+    comes from the labels CSV (see load_labels_table), never from folders.
     """
-    bags = []
-    for entry in os.scandir(base_dir):
-        if entry.is_file():
-            stem, ext = os.path.splitext(entry.name)
-            if ext in extensions:
-                bags.append(stem)
-        elif entry.is_dir():
-            for sub in os.scandir(entry.path):
-                if sub.is_file():
-                    stem, ext = os.path.splitext(sub.name)
-                    if ext in extensions:
-                        bags.append(f"{entry.name}/{stem}")
-    return sorted(bags)
+    return sorted(
+        os.path.splitext(e.name)[0]
+        for e in os.scandir(base_dir)
+        if e.is_file() and os.path.splitext(e.name)[1] in extensions
+    )
 
 
 def _bag_shape(file_path):
@@ -112,171 +104,135 @@ def drop_empty_bags(features_path, bag_names, file_ext=".h5"):
     return keep
 
 
-def get_filtered_bag_names(features_path, stain_csv, stain_filter):
-    """Return sorted bag names from features_path whose Stain matches stain_filter.
+# ---------------------------------------------------------------------------
+# Labels CSV: biopsy grouping, stains and the train/val split
+# ---------------------------------------------------------------------------
+def load_labels_table(labels_csv):
+    """Load a define_labels.py / define_regression_labels.py CSV, indexed by slide.
 
-    Returns None when stain_csv is None or 'none', meaning no filtering is applied
-    and ProcessedMILDataset will auto-discover all bags in features_path.
-
-    The stain CSV stores biopsy_number and file_name (slide stem) as separate
-    columns. This builds both the flat ('file_name') and nested
-    ('biopsy_number/file_name') candidate bag names and intersects them with the
-    bags actually on disk, so it works whether or not the WSI layout is nested.
+    One row per slide (index: file_name, the bag stem) with at least the
+    biopsy_number, stain and split columns. It is the single source for biopsy
+    grouping (bag_group), stain selection (select_bags) and the train/val split.
     """
-    if stain_csv is None or stain_csv.lower() == "none":
-        return None
-    df = pd.read_csv(stain_csv)
-    # define_labels.py writes the column as "stain", define_regression_labels.py
-    # as "Stain"; accept either so callers need not care which pipeline produced
-    # the CSV they are pointing at.
-    stain_col = next((c for c in ("stain", "Stain") if c in df.columns), None)
-    if stain_col is None:
-        raise KeyError(
-            f"{stain_csv} has no 'stain' or 'Stain' column "
-            f"(columns: {list(df.columns)})"
-        )
-    rows = df.loc[df[stain_col] == stain_filter]
-    matching = set(rows["file_name"].astype(str))
-    if "biopsy_number" in rows.columns:
-        matching |= set(
-            rows["biopsy_number"].astype(str) + "/" + rows["file_name"].astype(str)
-        )
-    available = set(discover_bags(features_path))
-    return sorted(matching & available)
+    df = pd.read_csv(
+        labels_csv, dtype={"file_name": str, "biopsy_number": str, "patient": str}
+    )
+    missing = {"file_name", "biopsy_number", "stain", "split"} - set(df.columns)
+    if missing:
+        raise KeyError(f"{labels_csv} is missing column(s) {sorted(missing)}.")
+    df["file_name"] = df["file_name"].str.strip()
+    if df["file_name"].duplicated().any():
+        raise ValueError(f"{labels_csv} lists some file_name more than once.")
+    return df.set_index("file_name")
 
 
-def load_val_names(val_csv):
-    """Load slide basenames from a CSV into a set.
+def bag_group(bag_name, table):
+    """Biopsy id of a bag, from the labels table."""
+    return table.at[bag_name, "biopsy_number"]
 
-    Accepts a CSV with a 'file_name' column (header row) or a headerless
-    single-column file (one basename per row). Returns None when val_csv is None.
+
+def canon_stain(name) -> str:
+    """Canonical key for a stain name: lowercase, alphanumerics only.
+
+    The registry stain column is free text with case and punctuation variants
+    ('Congo' / 'CONGO', 'IgG - IgM - IgA'), so names are compared on this key.
     """
-    if val_csv is None:
-        return None
-    raw = pd.read_csv(val_csv, header=None, dtype=str)
-    col = raw.iloc[:, 0].str.strip()
-    if col.iloc[0].lower() == "file_name":
-        col = col.iloc[1:]
-    return set(col)
+    if name is None:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
+class StainVocabulary:
+    """Ordered list of model stains, each optionally covering several source names.
+
+    A stain spec is a ``'|'``-separated alias group whose first element is the
+    display name, e.g. ``'HES|HE'`` maps both source stains onto one model stain.
+    ``index_of`` returns the model stain index for a raw CSV stain name, or None
+    when that stain is not part of the vocabulary.
+    """
+
+    def __init__(self, specs):
+        self.names = []
+        self._lookup = {}
+        for i, spec in enumerate(specs):
+            aliases = [a.strip() for a in str(spec).split("|") if a.strip()]
+            if not aliases:
+                raise ValueError(f"Empty stain spec: {spec!r}")
+            self.names.append(aliases[0])
+            for alias in aliases:
+                key = canon_stain(alias)
+                if key in self._lookup:
+                    raise ValueError(
+                        f"Stain alias {alias!r} is assigned to both "
+                        f"{self.names[self._lookup[key]]!r} and {aliases[0]!r}."
+                    )
+                self._lookup[key] = i
+
+    def __len__(self):
+        return len(self.names)
+
+    def index_of(self, raw_name):
+        return self._lookup.get(canon_stain(raw_name))
 
 
 def load_authorized_slides(authorized_csv):
-    """Load authorized slide basenames from a CSV/text file into a set.
+    """Load authorized slide stems from a CSV/text file into a set.
 
-    Same format as load_val_names: a CSV with a 'file_name' column (header row)
-    or a headerless single-column file (one basename per row). Returns None when
-    authorized_csv is None, meaning no restriction is applied.
-
-    Entries are normalised to the bare slide stem so the list matches biopsy-
-    nested bags on disk: any directory/biopsy prefix is stripped and a trailing
-    slide/feature extension is removed (e.g. 'biopsy_3/slide1.svs' and
-    'slide1.h5' both become 'slide1'). Matching against nested bags is then
-    handled by _bag_authorized.
+    Accepts a CSV with a 'file_name' column (header row) or a headerless
+    single-column file (one name per row). Returns None when authorized_csv is
+    None, meaning no restriction is applied. Entries are normalised to the bare
+    slide stem: any directory prefix and a trailing slide/feature extension are
+    removed (e.g. 'biopsy_3/slide1.svs' and 'slide1.h5' both become 'slide1').
     """
-    names = load_val_names(authorized_csv)
-    if names is None:
+    if authorized_csv is None:
         return None
+    col = pd.read_csv(authorized_csv, header=None, dtype=str).iloc[:, 0].str.strip()
+    if col.iloc[0].lower() == "file_name":
+        col = col.iloc[1:]
     slide_exts = {".svs", ".ndpi", ".tiff", ".tif", ".mrxs", ".scn", ".vms",
                   ".vmu", ".npy", ".h5", ".jpg", ".jpeg", ".png"}
     normalised = set()
-    for n in names:
+    for n in col:
         stem = os.path.basename(n.replace("\\", "/"))
         root, ext = os.path.splitext(stem)
-        if ext.lower() in slide_exts:
-            stem = root
-        normalised.add(stem)
+        normalised.add(root if ext.lower() in slide_exts else stem)
     return normalised
 
 
-def _bag_authorized(bag_name, authorized_slides):
-    """True when a bag (flat 'slide' or nested 'biopsy/slide') is authorized.
+def select_bags(
+    features_path, labels_path, table, stains=None, file_ext=".h5",
+    authorized_slides=None,
+):
+    """Bags on disk that are usable for training/evaluation, in sorted order.
 
-    Matches on either the full bag name or its file basename (the part after the
-    last '/'), so the authorized list may hold either form.
+    Keeps a bag when it is listed in the labels table, its stain is one of
+    ``stains`` (StainVocabulary specs; None keeps every stain), it is
+    authorized, it has a label file, and its feature file holds patches. Each
+    filter reports how many bags it dropped.
     """
-    return (
-        bag_name in authorized_slides
-        or bag_name.rsplit("/", 1)[-1] in authorized_slides
-    )
+    names = discover_bags(features_path, extensions=(file_ext,))
 
+    def _keep(names, keep, why):
+        kept = [n for n in names if keep(n)]
+        if len(kept) < len(names):
+            print(f"  Skipped {len(names) - len(kept)} bags {why}")
+        return kept
 
-def load_group_map(csvs, key="biopsy_number"):
-    """Map slide stem -> group id (biopsy by default) from define_labels.py CSVs.
-
-    This decouples biopsy grouping from the on-disk layout: with it, flat feature
-    directories ('slide.h5') group exactly like biopsy-nested ones
-    ('biopsy_nr/slide.h5'). Any column can serve as ``key`` (e.g. 'patient' in
-    the regression CSV). Returns None when no CSV is given, in which case
-    bag_group falls back to the directory prefix.
-    """
-    csvs = [c for c in (csvs or []) if c and str(c).lower() != "none"]
-    if not csvs:
-        return None
-    group_map = {}
-    for path in csvs:
-        df = pd.read_csv(path, dtype=str)
-        for col in ("file_name", key):
-            if col not in df.columns:
-                raise KeyError(f"{path} has no '{col}' column (columns: {list(df.columns)})")
-        df = df.dropna(subset=["file_name", key])
-        for stem, group in zip(df["file_name"].str.strip(), df[key].str.strip()):
-            if group_map.setdefault(stem, group) != group:
-                raise ValueError(
-                    f"Slide {stem!r} maps to both {group_map[stem]!r} and {group!r} "
-                    f"in the '{key}' column of {csvs}."
-                )
-    return group_map
-
-
-def bag_group(bag_name, group_map=None):
-    """Group id of a bag: from group_map when it knows the slide, else the path.
-
-    The path fallback is the biopsy directory for nested bags and the slide
-    itself for flat ones, so a flat layout without a group_map degrades to
-    one group per slide (see warn_if_ungrouped).
-    """
-    if group_map is not None:
-        group = group_map.get(bag_name.rsplit("/", 1)[-1])
-        if group is not None:
-            return group
-    return bag_name.rsplit("/", 1)[0] if "/" in bag_name else bag_name
-
-
-def warn_if_ungrouped(bag_names, group_map=None, where=""):
-    """Warn when every bag is its own group, i.e. biopsy grouping is a no-op.
-
-    That is what a flat layout without --group_csvs looks like, and it otherwise
-    passes silently: biopsy sampling, --max_biopsies and biopsy-level metrics
-    all quietly turn into slide-level ones.
-    """
-    if len(bag_names) > 1 and len({bag_group(n, group_map) for n in bag_names}) == len(bag_names):
-        print(
-            f"Warning: every bag{f' in {where}' if where else ''} is its own biopsy "
-            f"group ({len(bag_names)} bags). If biopsies have several slides, the "
-            f"layout is flat and --group_csvs is needed to group them."
+    names = _keep(names, lambda n: n in table.index, "not in the labels CSV")
+    if stains:
+        vocab = StainVocabulary(stains)
+        names = _keep(
+            names,
+            lambda n: vocab.index_of(table.at[n, "stain"]) is not None,
+            f"with a stain outside {vocab.names}",
         )
-
-
-def split_by_group(bag_names, val_names, group_map=None, where=""):
-    """Split bag_names into (train, val) whole biopsies at a time.
-
-    Bags and val_names are matched on the slide stem, so nested and flat val
-    lists split nested and flat bags alike (stems are unique across biopsies in
-    the label CSVs). If any slide of a group is listed, the
-    whole group goes to validation: no biopsy straddles the train/val boundary.
-    """
-    val_stems = {v.rsplit("/", 1)[-1] for v in val_names}
-    listed = {n for n in bag_names if n.rsplit("/", 1)[-1] in val_stems}
-    val_groups = {bag_group(n, group_map) for n in listed}
-    train, val = [], []
-    for n in bag_names:
-        (val if bag_group(n, group_map) in val_groups else train).append(n)
-    if len(val) > len(listed):
-        print(
-            f"  Moved {len(val) - len(listed)} unlisted bags into validation with "
-            f"the rest of their biopsy{f' in {where}' if where else ''}"
+    if authorized_slides is not None:
+        names = _keep(
+            names, lambda n: n in authorized_slides, "not in the authorized slides list"
         )
-    return train, val
+    labelled = set(discover_bags(labels_path, extensions=(".npy",)))
+    names = _keep(names, lambda n: n in labelled, f"with no label file in {labels_path}")
+    return drop_empty_bags(features_path, names, file_ext)
 
 
 def _subsample_adj(adj, idx):
@@ -344,30 +300,19 @@ def make_collate_fn(base_collate, max_patches=None):
     return _collate
 
 
-def get_bag_names(dataset):
-    """Extract ordered bag names from a ProcessedMILDataset or ConcatDataset."""
-    if isinstance(dataset, ConcatDataset):
-        names = []
-        for d in dataset.datasets:
-            names.extend(get_bag_names(d))
-        return names
-    return list(dataset.bag_names)
-
-
 class BiopsySampler(torch.utils.data.Sampler):
     """Sample exactly one slide per biopsy per epoch.
 
-    Slides are grouped by bag_group (group_map, else the biopsy directory
-    prefix). At each epoch, one slide is chosen at random from each biopsy
-    group, eliminating repeated survival labels in the Cox risk set for
-    biopsies with multiple slides.
+    Slides are grouped by biopsy (bag_group, from the labels table). At each
+    epoch, one slide is chosen at random from each biopsy group, eliminating
+    repeated survival labels in the Cox risk set for biopsies with multiple
+    slides.
     """
 
-    def __init__(self, dataset, group_map=None):
-        bag_names = get_bag_names(dataset)
+    def __init__(self, dataset, table):
         groups = {}
-        for i, name in enumerate(bag_names):
-            groups.setdefault(bag_group(name, group_map), []).append(i)
+        for i, name in enumerate(dataset.bag_names):
+            groups.setdefault(bag_group(name, table), []).append(i)
         self._groups = list(groups.values())
 
     def __iter__(self):
@@ -379,210 +324,83 @@ class BiopsySampler(torch.utils.data.Sampler):
         return len(self._groups)
 
 
-def _allocate_max_biopsies(train_names_per_ds, max_biopsies, group_map=None):
-    """Distribute a biopsy budget equally across datasets, redistributing surplus.
-
-    Each dataset gets an equal share of max_biopsies. If a dataset has fewer
-    biopsies than its share, all of them are kept and the leftover budget is
-    redistributed to the remaining datasets. All bags belonging to a selected
-    biopsy are included (no bag-level subsampling within a biopsy).
-
-    Returns a list of bag-name lists, one per input dataset.
-    """
-    biopsy_groups: list[dict] = []
-    for names in train_names_per_ds:
-        groups: dict = {}
-        for n in names:
-            groups.setdefault(bag_group(n, group_map), []).append(n)
-        biopsy_groups.append(groups)
-
-    n_avail = [len(g) for g in biopsy_groups]
-    selected_counts: list = [None] * len(train_names_per_ds)
-    budget = max_biopsies
-    undecided = list(range(len(train_names_per_ds)))
-
-    while undecided:
-        target = budget // len(undecided)
-        if target == 0:
-            for i in undecided:
-                selected_counts[i] = 0
-            break
-        newly_saturated = [i for i in undecided if n_avail[i] <= target]
-        if not newly_saturated:
-            # All remaining datasets exceed the target — assign equally and stop.
-            for i in undecided:
-                selected_counts[i] = target
-            break
-        for i in newly_saturated:
-            selected_counts[i] = n_avail[i]
-            budget -= n_avail[i]
-        undecided = [i for i in undecided if i not in newly_saturated]
-
-    result = []
-    for groups, count in zip(biopsy_groups, selected_counts):
-        all_biopsies = list(groups.keys())
-        if count is None or count >= len(all_biopsies):
-            chosen = all_biopsies
-        elif count == 0:
-            chosen = []
-        else:
-            chosen = random.sample(all_biopsies, count)
-        bags: list = []
-        for b in chosen:
-            bags.extend(groups[b])
-        result.append(bags)
-
-    return result
+def _sample_biopsies(bag_names, table, max_biopsies):
+    """Keep every slide of at most ``max_biopsies`` randomly chosen biopsies."""
+    groups = {}
+    for n in bag_names:
+        groups.setdefault(bag_group(n, table), []).append(n)
+    chosen = random.sample(sorted(groups), min(max_biopsies, len(groups)))
+    print(f"  max_biopsies: {len(chosen)}/{len(groups)} biopsies selected")
+    return sorted(n for b in chosen for n in groups[b])
 
 
 def build_dataset(
-    features_paths,
-    labels_paths,
-    coords_paths,
+    features_path,
+    labels_path,
+    coords_path,
     bag_keys,
     dist_thr,
-    val_names=None,
-    stain_csvs=None,
-    stain_filter=None,
+    table,
+    stains=None,
     scan_labels_fn=None,
     max_biopsies=None,
     file_ext=".h5",
     authorized_slides=None,
-    group_map=None,
 ):
-    """Build train and (optionally) val datasets from lists of feature/label paths.
+    """Build the train and val datasets from one feature/label folder.
 
     Parameters
     ----------
-    group_map : dict[str, str], optional
-        Slide stem -> biopsy id from load_group_map. Decides which bags form a
-        biopsy for the val split and max_biopsies; ``None`` groups by the
-        biopsy directory prefix of nested bag names.
+    table : DataFrame
+        From load_labels_table. Decides which bags exist (select_bags), the
+        biopsy of each bag, and the train/val split (its ``split`` column).
+    stains : list[str], optional
+        StainVocabulary specs (e.g. ``["PAS", "HES|HE"]``) of the stains to keep;
+        ``None`` keeps every stain.
     authorized_slides : set[str], optional
-        When provided, only bags whose file basename (or full bag name) is in
-        this set are included in the train and val datasets. Pass ``None`` to
-        keep all discovered bags.
+        When provided, only bags in this set are included.
     scan_labels_fn : callable(labels_path, bag_names) -> np.ndarray, optional
-        When provided, called on each train and val partition to collect scalar
-        labels (e.g. class integers or regression targets) for use by samplers
-        or metrics.  Pass ``None`` for survival training where labels live inside
-        the .npy bags themselves and no separate array is needed.
+        When provided, called on the train and val partitions to collect scalar
+        labels (e.g. regression targets) for use by samplers or metrics.  Pass
+        ``None`` for survival training where labels live inside the .npy bags
+        themselves and no separate array is needed.
     max_biopsies : int, optional
-        Cap on the total number of training biopsies across all datasets.
-        The budget is split equally; if one dataset has fewer biopsies than its
-        share, all of them are kept and the surplus is redistributed to the
-        others.  Has no effect on the validation set.
+        Cap on the number of training biopsies (all slides of a selected biopsy
+        are kept). Has no effect on the validation set.
 
     Returns
     -------
     (train_ds, val_ds, train_labels, val_labels)
-        val_ds is None when val_names is None.
+        val_ds is None when no bag is in the val split.
         train_labels and val_labels are None when scan_labels_fn is None.
     """
-    stain_csvs = stain_csvs if stain_csvs is not None else [None] * len(features_paths)
-    train_datasets, val_datasets = [], []
-    train_labels_parts, val_labels_parts = [], []
-
-    # --- Pass 1: collect and filter bag names per dataset --------------------
-    all_train_names: list = []
-    all_val_names_here: list = []
-
-    for fp, lp, cp, sc in zip(features_paths, labels_paths, coords_paths, stain_csvs):
-        filtered = get_filtered_bag_names(fp, sc, stain_filter)
-        available = filtered if filtered is not None else discover_bags(fp)
-
-        if authorized_slides is not None:
-            n_before = len(available)
-            available = [
-                n for n in available if _bag_authorized(n, authorized_slides)
-            ]
-            if len(available) < n_before:
-                print(
-                    f"  Excluded {n_before - len(available)} bags not in the "
-                    f"authorized slides list from {fp}"
-                )
-
-        labelled = set(discover_bags(lp, extensions=(".npy",)))
-        n_before = len(available)
-        available = [n for n in available if n in labelled]
-        if len(available) < n_before:
-            print(f"  Skipped {n_before - len(available)} bags with no label file in {lp}")
-
-        available = drop_empty_bags(fp, available, file_ext)
-
-        if val_names is not None:
-            train_names, val_names_here = split_by_group(available, val_names, group_map, fp)
-        else:
-            train_names = available
-            val_names_here = []
-
-        all_train_names.append(train_names)
-        all_val_names_here.append(val_names_here)
-
-    # --- Optional biopsy-level subsampling of the training set ---------------
-    for fp, names in zip(features_paths, all_train_names):
-        warn_if_ungrouped(names, group_map, fp)
-
+    names = select_bags(
+        features_path, labels_path, table, stains, file_ext, authorized_slides
+    )
+    split = table.loc[names, "split"].to_numpy()
+    train_names = [n for n, s in zip(names, split) if s == "train"]
+    val_names = [n for n, s in zip(names, split) if s == "val"]
     if max_biopsies is not None:
-        def _count_biopsies(names):
-            return len({bag_group(n, group_map) for n in names})
+        train_names = _sample_biopsies(train_names, table, max_biopsies)
 
-        before = [_count_biopsies(names) for names in all_train_names]
-        all_train_names = _allocate_max_biopsies(all_train_names, max_biopsies, group_map)
-        for fp, nb, names in zip(features_paths, before, all_train_names):
-            na = _count_biopsies(names)
-            print(f"  [{fp}] max_biopsies: {na}/{nb} biopsies selected ({len(names)} bags)")
-        print(
-            f"  Total: {sum(_count_biopsies(n) for n in all_train_names)}/"
-            f"{sum(before)} biopsies selected"
+    def _make(bag_names):
+        return BagDataset(
+            features_path=features_path,
+            labels_path=labels_path,
+            coords_path=coords_path,
+            bag_keys=bag_keys,
+            dist_thr=dist_thr,
+            bag_names=bag_names,
+            file_ext=file_ext,
+            label_ext=".npy",
         )
 
-    # --- Pass 2: build BagDataset objects ---------------------------
-    for fp, lp, cp, train_names, val_names_here in zip(
-        features_paths, labels_paths, coords_paths, all_train_names, all_val_names_here
-    ):
-        train_datasets.append(
-            BagDataset(
-                features_path=fp,
-                labels_path=lp,
-                coords_path=cp,
-                bag_keys=bag_keys,
-                dist_thr=dist_thr,
-                bag_names=train_names,
-                file_ext=file_ext,
-                label_ext=".npy",
-            )
-        )
-        if scan_labels_fn is not None:
-            train_labels_parts.append(scan_labels_fn(lp, train_names))
-
-        if val_names_here:
-            val_datasets.append(
-                BagDataset(
-                    features_path=fp,
-                    labels_path=lp,
-                    coords_path=cp,
-                    bag_keys=bag_keys,
-                    dist_thr=dist_thr,
-                    bag_names=val_names_here,
-                    file_ext=file_ext,
-                    label_ext=".npy",
-                )
-            )
-            if scan_labels_fn is not None:
-                val_labels_parts.append(scan_labels_fn(lp, val_names_here))
-
-    train_ds = (
-        train_datasets[0] if len(train_datasets) == 1 else ConcatDataset(train_datasets)
-    )
-    val_ds = (
-        (val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets))
-        if val_datasets
-        else None
-    )
-    train_labels = np.concatenate(train_labels_parts) if train_labels_parts else None
-    val_labels = np.concatenate(val_labels_parts) if val_labels_parts else None
-
+    train_ds = _make(train_names)
+    val_ds = _make(val_names) if val_names else None
+    train_labels = val_labels = None
+    if scan_labels_fn is not None:
+        train_labels = scan_labels_fn(labels_path, train_names)
+        val_labels = scan_labels_fn(labels_path, val_names) if val_names else None
     return train_ds, val_ds, train_labels, val_labels
 
 
@@ -701,25 +519,6 @@ class GpuMemLogger:
 # ---------------------------------------------------------------------------
 # Loss logging
 # ---------------------------------------------------------------------------
-def _val_segments(df, col):
-    """Yield (rows, label) pairs of validation points, one segment per phase.
-
-    Pretrain and finetune validate on different cohorts (non-IgA vs
-    IgA + registry), so their losses are not on a comparable scale.  Drawing one
-    line per phase keeps the plot from implying a continuous curve across the
-    phase boundary.  When only one phase has validation data the label stays the
-    plain "val ..." it has always been.
-    """
-    rows = df[df[col].notna()]
-    if rows.empty:
-        return
-    base = col.replace("val_", "val ").replace("_", " ")
-    phases = list(dict.fromkeys(rows["phase"]))
-    for phase in phases:
-        grp = rows[rows["phase"] == phase]
-        yield grp, base if len(phases) == 1 else f"{base} ({phase})"
-
-
 class LossLogger:
     """CSV loss log + loss-curve plot, shared by the MIL training scripts.
 
@@ -729,7 +528,7 @@ class LossLogger:
     val_mae / val_rmse and a second panel).
     """
 
-    COLUMNS = ["epoch", "phase", "train_loss", "val_loss"]
+    COLUMNS = ["epoch", "train_loss", "val_loss"]
 
     def __init__(self, log_dir: str):
         os.makedirs(log_dir, exist_ok=True)
@@ -742,17 +541,12 @@ class LossLogger:
         with open(self.csv_path, "a", newline="") as f:
             csv.writer(f).writerow(row)
 
-    def log(self, epoch, phase, train_loss, val_loss=None):
+    def log(self, epoch, train_loss, val_loss=None):
         self._append(
-            [
-                epoch,
-                phase,
-                f"{train_loss:.6f}",
-                "" if val_loss is None else f"{val_loss:.6f}",
-            ]
+            [epoch, f"{train_loss:.6f}", "" if val_loss is None else f"{val_loss:.6f}"]
         )
 
-    def save_plot(self, pretrain_epochs: int = 0):
+    def save_plot(self):
         try:
             import matplotlib.pyplot as plt
         except ImportError:
@@ -763,12 +557,9 @@ class LossLogger:
 
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(df["epoch"], df["train_loss"], label="train loss")
-        for grp, label in _val_segments(df, "val_loss"):
-            ax.plot(grp["epoch"], grp["val_loss"], linestyle="--", label=label)
-        if pretrain_epochs > 0:
-            ax.axvspan(
-                0.5, pretrain_epochs + 0.5, alpha=0.08, color="gray", label="pretrain"
-            )
+        val = df[df["val_loss"].notna()]
+        if not val.empty:
+            ax.plot(val["epoch"], val["val_loss"], linestyle="--", label="val loss")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()

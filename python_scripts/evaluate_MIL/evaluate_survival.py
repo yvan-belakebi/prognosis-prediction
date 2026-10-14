@@ -4,27 +4,24 @@ evaluate_survival.py — Evaluate a trained MIL survival model on the validation
 Produces:
   <output_dir>/km_curves.png        Kaplan-Meier curves stratified by predicted risk group
   <output_dir>/risk_distribution.png Histogram of risk scores split by event status
-  <output_dir>/risk_scores.csv       Per-slide risk score, time, and event
+  <output_dir>/risk_scores.csv       Per-biopsy risk score, time, and event
+  <output_dir>/risk_scores_per_slide.csv  Per-slide risk score, time, and event
 
 C-index and log-rank p-value are printed to stdout.
 
 Usage (ABMIL — no coords needed):
-    python python_scripts/MIL/evaluate_survival.py \\
+    python python_scripts/evaluate_MIL/evaluate_survival.py \\
         --model_type abmil \\
         --checkpoint checkpoints/abmil_model.pth \\
-        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
-        --labels_paths   WSI/IgA/labels        WSI/IgA_registry/labels \\
-        --val_csv validation_files_csvs/survival_validation_files.csv \\
+        --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
+        --labels_path   WSI/IgA/trident/labels \\
+        --labels_csv    label_csvs/labels.csv \\
+        --stains PAS \\
         --output_dir results/survival_eval
 
-Usage (DeepGraphSurv — coords auto-read from the features .h5, no --coords_paths needed):
-    python python_scripts/MIL/evaluate_survival.py \\
-        --model_type deepgraphsurv \\
-        --checkpoint checkpoints/deepgraphsurv_model.pth \\
-        --features_paths WSI/IgA/UNI2-h_feats \\
-        --labels_paths   WSI/IgA/labels \\
-        --val_csv validation_files_csvs/survival_validation_files.csv \\
-        --output_dir results/survival_eval
+Slides are taken from the labels CSV's val split (--split) and limited to --stains,
+which should match training. Risk scores are averaged per biopsy (biopsy_number in
+the labels CSV) before the C-index and the plots.
 """
 
 import argparse
@@ -36,7 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 
 # ---------------------------------------------------------------------------
 # Resolve local torchmil package
@@ -58,64 +55,44 @@ from torchmil.models import patch_gcn as patch_gcn_module
 from mil_utils import (
     BagDataset,
     bag_group,
-    discover_bags,
-    drop_empty_bags,
-    load_group_map,
-    load_val_names,
+    load_labels_table,
     make_collate_fn,
-    get_bag_names,
-    split_by_group,
-    warn_if_ungrouped,
+    select_bags,
 )
 from late_fusion import LateFusionSurv
 
 # ---------------------------------------------------------------------------
-# Dataset loading (val-only)
+# Dataset loading
 # ---------------------------------------------------------------------------
 
 
-def build_val_dataset(
-    features_paths, labels_paths, coords_paths, bag_keys, dist_thr, val_csv,
-    file_ext=".h5",
-    group_map=None,
+def build_eval_dataset(
+    features_path, labels_path, coords_path, bag_keys, dist_thr, table,
+    split="val", stains=None, file_ext=".h5",
 ):
-    val_names = load_val_names(val_csv)
-    if val_names is None:
-        raise ValueError("--val_csv is required for evaluation.")
-
-    datasets = []
-    for fp, lp, cp in zip(features_paths, labels_paths, coords_paths):
-        labelled = set(discover_bags(lp, extensions=(".npy",)))
-        available = discover_bags(fp)
-        available = drop_empty_bags(fp, [n for n in available if n in labelled], file_ext)
-        # Same whole-biopsy split as training, so the evaluated set matches it.
-        _, names_here = split_by_group(available, val_names, group_map, fp)
-        if names_here:
-            datasets.append(
-                BagDataset(
-                    features_path=fp,
-                    labels_path=lp,
-                    coords_path=cp,
-                    bag_keys=bag_keys,
-                    dist_thr=dist_thr,
-                    bag_names=names_here,
-                    file_ext=file_ext,
-                    label_ext=".npy",
-                )
-            )
-    if not datasets:
+    """Dataset of the bags in ``split`` (val / train / all of the labels CSV)."""
+    names = select_bags(features_path, labels_path, table, stains, file_ext)
+    if split != "all":
+        names = [n for n in names if table.at[n, "split"] == split]
+    if not names:
         raise RuntimeError(
-            "No validation bags found — check --val_csv and directory paths."
+            f"No bags in the '{split}' split — check --labels_csv, --stains and the "
+            "directory paths."
         )
-    return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+    return BagDataset(
+        features_path=features_path,
+        labels_path=labels_path,
+        coords_path=coords_path,
+        bag_keys=bag_keys,
+        dist_thr=dist_thr,
+        bag_names=names,
+        file_ext=file_ext,
+        label_ext=".npy",
+    )
 
 
-def aggregate_by_biopsy(risks, times, events, bag_names, group_map=None):
-    """Average per-slide risk scores within each biopsy.
-
-    Groups slides with mil_utils.bag_group: by group_map when given, else by the
-    biopsy directory prefix (the part before '/' in the bag name). For flat
-    names without a group_map, each slide is its own biopsy group.
+def aggregate_by_biopsy(risks, times, events, bag_names, table):
+    """Average per-slide risk scores within each biopsy (from the labels table).
 
     Returns (agg_risks, agg_times, agg_events, biopsy_ids).
     """
@@ -124,7 +101,7 @@ def aggregate_by_biopsy(risks, times, events, bag_names, group_map=None):
     biopsy_events = {}
 
     for name, risk, time, event in zip(bag_names, risks, times, events):
-        biopsy_id = bag_group(name, group_map)
+        biopsy_id = bag_group(name, table)
         biopsy_risks.setdefault(biopsy_id, []).append(risk)
         biopsy_times[biopsy_id] = time
         biopsy_events[biopsy_id] = event
@@ -520,14 +497,30 @@ def main():
     parser.add_argument(
         "--checkpoint", required=True, help="Path to saved model weights (.pth)."
     )
-    parser.add_argument("--features_paths", nargs="+", required=True)
-    parser.add_argument("--labels_paths", nargs="+", required=True)
+    parser.add_argument("--features_path", required=True, help="Flat features folder.")
+    parser.add_argument("--labels_path", required=True, help="Flat .npy labels folder.")
     parser.add_argument(
-        "--coords_paths",
+        "--labels_csv",
+        required=True,
+        help="Labels CSV: the biopsy, stain and train/val split of every slide.",
+    )
+    parser.add_argument(
+        "--split",
+        default="val",
+        choices=["val", "train", "all"],
+        help="Which slides of the labels CSV to evaluate.",
+    )
+    parser.add_argument(
+        "--stains",
         nargs="+",
         default=None,
+        help="Stains to evaluate on (default: all); should match training.",
+    )
+    parser.add_argument(
+        "--coords_path",
+        default=None,
         help="Required for deepgraphsurv / patchgcn. "
-             "When --file_ext .h5 and omitted, defaults to --features_paths.",
+             "When --file_ext .h5 and omitted, defaults to --features_path.",
     )
     parser.add_argument(
         "--file_ext",
@@ -535,19 +528,7 @@ def main():
         choices=[".h5", ".npy"],
         help="File extension for feature bags (default: .h5). Use .npy for the legacy pipeline.",
     )
-    parser.add_argument(
-        "--val_csv", required=True, help="CSV listing validation slide basenames."
-    )
     parser.add_argument("--output_dir", default="results/survival_eval")
-    parser.add_argument(
-        "--group_csvs",
-        nargs="+",
-        default=None,
-        help=(
-            "define_labels.py CSV(s) mapping file_name -> biopsy_number, used to group "
-            "slides into biopsies instead of the biopsy-nested directory layout."
-        ),
-    )
     parser.add_argument(
         "--n_groups",
         type=int,
@@ -611,13 +592,11 @@ def main():
     is_graph = args.model_type in ("deepgraphsurv", "patchgcn")
     bag_keys = ["X", "Y", "adj", "coords"] if is_graph else ["X", "Y"]
 
-    n = len(args.features_paths)
-    if is_graph and args.coords_paths is None:
+    if is_graph and args.coords_path is None:
         if args.file_ext == ".h5":
-            args.coords_paths = args.features_paths
+            args.coords_path = args.features_path
         else:
-            parser.error(f"--coords_paths is required for {args.model_type}.")
-    coords_paths = args.coords_paths if args.coords_paths is not None else [None] * n
+            parser.error(f"--coords_path is required for {args.model_type}.")
 
     os.makedirs(args.output_dir, exist_ok=True)
     if args.cpu_inference:
@@ -627,18 +606,19 @@ def main():
     print(f"Device: {device}")
 
     # --- Dataset -------------------------------------------------------------
-    group_map = load_group_map(args.group_csvs)
-    val_dataset = build_val_dataset(
-        args.features_paths,
-        args.labels_paths,
-        coords_paths,
+    table = load_labels_table(args.labels_csv)
+    val_dataset = build_eval_dataset(
+        args.features_path,
+        args.labels_path,
+        args.coords_path,
         bag_keys,
         args.dist_thr,
-        args.val_csv,
+        table,
+        split=args.split,
+        stains=args.stains,
         file_ext=args.file_ext,
-        group_map=group_map,
     )
-    print(f"Val bags: {len(val_dataset)}")
+    print(f"Evaluated bags ({args.split}): {len(val_dataset)}")
 
     base_collate = partial(collate_fn, sparse=not is_graph)
     _collate = make_collate_fn(base_collate, args.max_patches)
@@ -703,7 +683,7 @@ def main():
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     # --- Inference -----------------------------------------------------------
-    bag_names = get_bag_names(val_dataset)
+    bag_names = list(val_dataset.bag_names)
     risks, times, events = get_risk_scores(
         model, loader, device, args.model_type, use_diagnosis=args.use_diagnosis
     )
@@ -721,26 +701,18 @@ def main():
     )
     print(f"Per-slide risk scores → {slide_csv}")
 
-    # Aggregate to one score per biopsy when biopsies are known (a group map or
-    # a biopsy prefix in the bag names)
-    warn_if_ungrouped(bag_names, group_map, "the evaluated set")
-    if group_map is not None or any("/" in n for n in bag_names):
-        risks, times, events, biopsy_ids = aggregate_by_biopsy(
-            risks, times, events, bag_names, group_map
-        )
-        print(
-            f"Biopsy aggregation: {len(bag_names)} slides → {len(biopsy_ids)} biopsies"
-            f"  |  events after aggregation: {int(events.sum())}"
-        )
-        csv_path = os.path.join(args.output_dir, "risk_scores.csv")
-        pd.DataFrame({"biopsy": biopsy_ids, "risk": risks, "time": times, "event": events}).to_csv(
-            csv_path, index=False
-        )
-    else:
-        csv_path = os.path.join(args.output_dir, "risk_scores.csv")
-        pd.DataFrame({"bag_name": bag_names, "risk": risks, "time": times, "event": events}).to_csv(
-            csv_path, index=False
-        )
+    # Aggregate to one score per biopsy
+    risks, times, events, biopsy_ids = aggregate_by_biopsy(
+        risks, times, events, bag_names, table
+    )
+    print(
+        f"Biopsy aggregation: {len(bag_names)} slides → {len(biopsy_ids)} biopsies"
+        f"  |  events after aggregation: {int(events.sum())}"
+    )
+    csv_path = os.path.join(args.output_dir, "risk_scores.csv")
+    pd.DataFrame({"biopsy": biopsy_ids, "risk": risks, "time": times, "event": events}).to_csv(
+        csv_path, index=False
+    )
     print(f"Biopsy risk scores → {csv_path}")
 
     c_index = concordance_index(risks, times, events)

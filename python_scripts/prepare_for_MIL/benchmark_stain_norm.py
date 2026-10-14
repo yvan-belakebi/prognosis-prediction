@@ -40,7 +40,7 @@ Usage:
     python python_scripts/prepare_for_MIL/benchmark_stain_norm.py \\
         --wsi_dir         data/raw_wsi/IgA \\
         --job_dir         WSI/IgA/trident \\
-        --labels_csv      label_csvs/labels_unfiltered.csv \\
+        --labels_csv      label_csvs/labels.csv \\
         --macenko_refs_dir  stain_refs_macenko/IgA \\
         --vahadane_refs_dir stain_refs_vahadane/IgA \\
         --backbone uni_v2 --mag 20 --patch_size 224 --overlap 0 \\
@@ -300,7 +300,7 @@ def main():
         "--mapping_csv",
         default=None,
         help=(
-            "Optional old_name->new_name CSV (reorganize_wsi_dirs.py --rename output, "
+            "Optional old_name->new_name CSV (e.g. "
             "slide_name_mapping.csv). When the on-disk slides are raw-named but --labels_csv "
             "is keyed by the anonymized name, this translates each raw stem to its anonymized "
             "name before the stain lookup. Files are still read/written under their raw "

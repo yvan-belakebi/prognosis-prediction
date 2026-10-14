@@ -11,26 +11,20 @@ normalises the per-patch attention weights, and overlays them as a colour heatma
 (blue = low → yellow = high) on a spatial canvas reconstructed from patch coordinates.
 
 Usage:
-    # Survival ABMIL — coords auto-read from the features .h5 (no --coords_paths needed)
-    python python_scripts/MIL/visualize_attention.py \\
+    # Survival ABMIL — coords auto-read from the features .h5 (no --coords_path needed)
+    python python_scripts/evaluate_MIL/visualize_attention.py \\
         --label_csv      results/eval/risk_scores.csv \\
-        --features_paths WSI/IgA/UNI2-h_feats \\
+        --labels_csv     label_csvs/labels.csv \\
+        --features_path  WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
         --checkpoint     runs/abmil_survival/best_model.pth \\
         --model_type     abmil --task survival \\
         --patch_size     256
 
-    # Regression DSMIL, two datasets — coords embedded in features .h5
-    python python_scripts/MIL/visualize_attention.py \\
-        --label_csv      label_csvs/labels.csv \\
-        --features_paths WSI/IgA/UNI2-h_feats WSI/IgA_registry/UNI2-h_feats \\
-        --checkpoint     runs/dsmil_reg/best_model.pth \\
-        --model_type     dsmil --task regression \\
-        --patch_size     256
-
     # Survival DeepGraphSurv — coords auto-read from features .h5 for adjacency
-    python python_scripts/MIL/visualize_attention.py \\
+    python python_scripts/evaluate_MIL/visualize_attention.py \\
         --label_csv      results/eval/risk_scores.csv \\
-        --features_paths WSI/IgA/UNI2-h_feats \\
+        --labels_csv     label_csvs/labels.csv \\
+        --features_path  WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 \\
         --checkpoint     runs/dgs_survival/best_model.pth \\
         --model_type     deepgraphsurv --task survival \\
         --patch_size     256 --dist_thr 1.5 --n_layers_rep 1 --n_layers_att 1 --K 5
@@ -42,7 +36,6 @@ columns — including the risk_scores.csv produced by evaluate_survival.py.
 import argparse
 import os
 import sys
-from functools import lru_cache
 
 import h5py
 import matplotlib.pyplot as plt
@@ -68,7 +61,7 @@ _mil_dir = os.path.join(_project_root, "python_scripts", "MIL")
 if os.path.isdir(_mil_dir) and _mil_dir not in sys.path:
     sys.path.insert(0, _mil_dir)
 
-from mil_utils import load_authorized_slides, _bag_authorized, discover_bags
+from mil_utils import load_authorized_slides, load_labels_table
 
 from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
@@ -136,81 +129,31 @@ def load_label_csv(path: str) -> pd.DataFrame:
     return df.dropna(subset=["biopsy", "time", "event"]).reset_index(drop=True)
 
 
-@lru_cache(maxsize=None)
-def _slide_stem_index(base_path: str) -> dict:
-    """Map an unambiguous bare slide stem to its "biopsy/slide" bag name.
+def _find_bag_file(base_path, bag_name, table=None) -> tuple[str | None, str]:
+    """Locate bag_name under base_path, returning (file_path, resolved_slide).
 
-    Built once per base_path (via discover_bags, which knows the biopsy-nested
-    layout).  Lets a label that stores only the slide stem ("32965911") resolve
-    to a slide nested under a biopsy directory with a *different* name
-    ("36074-06/32965911").  Stems found under more than one biopsy are dropped
-    so we never silently pick the wrong slide.
+    bag_name is either a slide stem (base_path/<slide>.h5) or, when ``table``
+    (the define_labels.py labels table) is given, a biopsy_number: the biopsy's
+    first slide (sorted by name) that exists on disk is then used.
     """
-    groups: dict = {}
-    for bag in discover_bags(base_path):
-        if "/" in bag:  # flat layout already handled by direct lookup
-            groups.setdefault(bag.rsplit("/", 1)[-1], []).append(bag)
-    return {stem: bags[0] for stem, bags in groups.items() if len(bags) == 1}
-
-
-def _find_bag_file(base_paths: list, bag_name: str) -> tuple[str | None, str]:
-    """Search base_paths for bag_name, returning (file_path, resolved_bag_name).
-
-    Supports four layouts:
-      flat   : base_path/slide.h5           bag_name = "slide"
-      nested : base_path/biopsy/slide.h5    bag_name = "biopsy/slide"
-      biopsy : base_path/biopsy/slide.h5    bag_name = "biopsy"  (directory match:
-                                             first slide inside is selected)
-      stem   : base_path/biopsy/slide.h5    bag_name = "slide"   (bare slide stem
-                                             nested under a differently-named
-                                             biopsy directory — resolved via
-                                             _slide_stem_index)
-
-    resolved_bag_name equals bag_name for the first two layouts.  For the biopsy
-    and stem layouts it becomes "biopsy/slide" so the coords directory can be
-    searched with the same specific slide path.
-    """
-    for base_path in base_paths:
-        # Direct file: flat ("slide") or already-nested ("biopsy/slide")
+    candidates = [bag_name]
+    if table is not None:
+        candidates += sorted(table.index[table["biopsy_number"] == bag_name])
+    for name in candidates:
         for ext in (".h5", ".npy"):
-            p = os.path.join(base_path, bag_name + ext)
+            p = os.path.join(base_path, name + ext)
             if os.path.isfile(p):
-                return p, bag_name
-        # Biopsy-level: bag_name is a directory — pick the first slide inside
-        biopsy_dir = os.path.join(base_path, bag_name)
-        if os.path.isdir(biopsy_dir):
-            for entry in sorted(os.scandir(biopsy_dir), key=lambda e: e.name):
-                if entry.is_file() and os.path.splitext(entry.name)[1] in (
-                    ".h5",
-                    ".npy",
-                ):
-                    slide_stem = os.path.splitext(entry.name)[0]
-                    resolved = f"{bag_name}/{slide_stem}"
-                    return entry.path, resolved
-        # Bare slide stem nested under a differently-named biopsy directory
-        nested = _slide_stem_index(base_path).get(bag_name) if "/" not in bag_name else None
-        if nested:
-            for ext in (".h5", ".npy"):
-                p = os.path.join(base_path, nested + ext)
-                if os.path.isfile(p):
-                    return p, nested
+                return p, name
     return None, bag_name
 
 
-def _biopsy_authorized(biopsy_name, features_paths: list, authorized_slides) -> bool:
-    """True when the biopsy — or the slide it resolves to — is authorized.
-
-    Handles flat ('slide'), nested ('biopsy/slide'), and biopsy-level ('biopsy')
-    IDs.  A flat/nested name is matched directly (or by its slide-stem basename).
-    A biopsy-level directory is resolved through _find_bag_file to the slide that
-    load_bag would actually load, then re-checked, so authorization matches what
-    is shown.
-    """
+def _biopsy_authorized(biopsy_name, features_path, table, authorized_slides) -> bool:
+    """True when the ID — or the slide it resolves to — is authorized."""
     name = str(biopsy_name)
-    if _bag_authorized(name, authorized_slides):
+    if name in authorized_slides:
         return True
-    _, resolved = _find_bag_file(features_paths, name)
-    return resolved != name and _bag_authorized(resolved, authorized_slides)
+    _, resolved = _find_bag_file(features_path, name, table)
+    return resolved in authorized_slides
 
 
 def _load_array(file_path: str, h5_key: str) -> np.ndarray:
@@ -220,25 +163,23 @@ def _load_array(file_path: str, h5_key: str) -> np.ndarray:
     return np.load(file_path)
 
 
-def load_bag(bag_name: str, features_paths: list, coords_paths: list | None):
+def load_bag(bag_name: str, features_path: str, coords_path: str | None, table=None):
     """Return (X, coords) where X is (N, D) and coords is (N, 2) or None.
 
-    Searches each directory in features_paths / coords_paths in order.
-    Supports flat, biopsy-nested ("biopsy/slide"), and biopsy-level ("biopsy")
-    bag names — see _find_bag_file for resolution rules.
+    bag_name is a slide stem, or a biopsy_number resolved through ``table`` —
+    see _find_bag_file.
 
     Coord loading priority:
       1. "coords" key inside the features .h5 file — guaranteed to be aligned with
          features because compute_feats_clam.py writes both keys from the same
          CLAM coordinate file.
-      2. Separate coords file from coords_paths — legacy fallback; prints a warning
+      2. Separate coords file from coords_path — legacy fallback; prints a warning
          when patch counts differ.
     """
-    feat_file, resolved = _find_bag_file(features_paths, bag_name)
+    feat_file, resolved = _find_bag_file(features_path, bag_name, table)
     if feat_file is None:
-        searched = ", ".join(features_paths)
         raise FileNotFoundError(
-            f"No feature file found for '{bag_name}' in [{searched}]"
+            f"No feature file found for '{bag_name}' in {features_path}"
         )
     if resolved != bag_name:
         print(f"  Biopsy-level ID '{bag_name}' → slide '{resolved}'")
@@ -257,8 +198,8 @@ def load_bag(bag_name: str, features_paths: list, coords_paths: list | None):
         X = X[np.newaxis, :]
 
     # Fall back to separate coords file when h5 did not contain coords
-    if coords is None and coords_paths:
-        coord_file, _ = _find_bag_file(coords_paths, resolved)
+    if coords is None and coords_path:
+        coord_file, _ = _find_bag_file(coords_path, resolved)
         if coord_file is not None:
             coords = _load_array(coord_file, "coords")
             n_feats, n_coords = len(X), len(coords)
@@ -477,7 +418,7 @@ def run_inference(
                 raise ValueError(
                     "deepgraphsurv requires patch coordinates.  "
                     "Ensure the features .h5 contains an embedded 'coords' key "
-                    "(produced by compute_feats_clam.py), or supply --coords_paths."
+                    "(produced by compute_feats_clam.py), or supply --coords_path."
                 )
             adj = _build_adj(coords, dist_thr).to(device)  # (1, N, N)
             pred, att = model(X_t, adj, mask_t, return_att=True)
@@ -731,20 +672,21 @@ def main():
         help="CSV with biopsy/bag_name, time, event columns.",
     )
     parser.add_argument(
-        "--features_paths",
-        nargs="+",
-        required=True,
-        help="One or more directories with bag feature files (.h5 or .npy). "
-        "Biopsies are looked up in each directory in order.",
+        "--labels_csv",
+        default=None,
+        help="Labels CSV from define_labels.py. Needed when --label_csv IDs are "
+        "biopsies: each biopsy is shown through its first slide on disk.",
     )
     parser.add_argument(
-        "--coords_paths",
-        nargs="+",
+        "--features_path",
+        required=True,
+        help="Flat folder with bag feature files (.h5 or .npy).",
+    )
+    parser.add_argument(
+        "--coords_path",
         default=None,
-        help="One or more directories with patch coordinate files (.h5 or .npy), "
-        "in the same order as --features_paths.  "
-        "Optional when features are CLAM-style .h5 files that already contain "
-        "an embedded 'coords' key (produced by compute_feats_clam.py).",
+        help="Folder with patch coordinate files (.h5 or .npy). Optional when the "
+        "features .h5 files already contain an embedded 'coords' key.",
     )
     parser.add_argument(
         "--authorized_slides_csv",
@@ -911,6 +853,7 @@ def main():
     # 1. Labels
     print("\nLoading labels …")
     label_df = load_label_csv(args.label_csv)
+    table = load_labels_table(args.labels_csv) if args.labels_csv else None
 
     authorized_slides = load_authorized_slides(args.authorized_slides_csv)
     if authorized_slides is not None:
@@ -918,7 +861,7 @@ def main():
         label_df = label_df[
             label_df["biopsy"].map(
                 lambda b: _biopsy_authorized(
-                    b, args.features_paths, authorized_slides
+                    b, args.features_path, table, authorized_slides
                 )
             )
         ].reset_index(drop=True)
@@ -936,7 +879,7 @@ def main():
 
     # 3. Infer feat_dim from the first available biopsy
     first_row = next(v for v in selected.values() if v is not None)
-    X_tmp, _ = load_bag(first_row["biopsy"], args.features_paths, coords_paths=None)
+    X_tmp, _ = load_bag(first_row["biopsy"], args.features_path, None, table)
     feat_dim = X_tmp.shape[-1]
     print(f"\nFeature dimension: {feat_dim}")
 
@@ -959,7 +902,7 @@ def main():
         print(f"\n[{category}] {biopsy_name}")
 
         try:
-            X, coords = load_bag(biopsy_name, args.features_paths, args.coords_paths)
+            X, coords = load_bag(biopsy_name, args.features_path, args.coords_path, table)
         except FileNotFoundError as e:
             print(f"  Skipping — {e}")
             results[category] = None

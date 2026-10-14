@@ -1,14 +1,11 @@
 """
 apply_slide_rename.py — Apply an existing old_name -> new_name mapping to slide artifacts.
 
-Renames files across one or more directories using the mapping produced by
-reorganize_wsi_dirs.py --rename:
+Renames files across one or more directories using an existing mapping, e.g.
     followup_data/derived/renamed/slide_name_mapping.csv
     (columns: biopsy_number, old_name, new_name)
 
-Unlike reorganize_wsi_dirs.py --rename (which rebuilds the plan from the source metadata
-CSVs and assumes filename stem == slide name), this script just APPLIES an existing mapping
-and understands TRIDENT's '_patches' coord-file suffix:
+It just APPLIES the mapping, and understands TRIDENT's '_patches' coord-file suffix:
 
     {old}_patches.h5   ->  {new}_patches.h5      (coords)
     {old}.svs/.ndpi    ->  {new}.svs/.ndpi       (raw WSI)
@@ -90,7 +87,7 @@ def main():
     parser.add_argument(
         "--mapping_csv",
         default="followup_data/derived/renamed/slide_name_mapping.csv",
-        help="CSV with old_name / new_name columns (reorganize_wsi_dirs.py --rename output).",
+        help="CSV with old_name / new_name columns.",
     )
     parser.add_argument(
         "--dirs",

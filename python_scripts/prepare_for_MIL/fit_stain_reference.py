@@ -159,7 +159,7 @@ def _build_biopsy_lookup(wsi_dir, slide_exts):
     """Map slide_id -> biopsy_nr by scanning a nested raw-WSI dir.
 
     TRIDENT coord files are flat (no biopsy subdir), so the biopsy_nr is recovered from the
-    raw-WSI layout (mirrors reorganize_trident_feats.py / run_clam_tiling.py discovery).
+    raw-WSI layout (mirrors run_clam_tiling.py discovery).
     """
 
     def _matches(name):
