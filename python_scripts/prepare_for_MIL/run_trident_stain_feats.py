@@ -17,7 +17,7 @@ Segmentation and patching are stain-independent, so run them ONCE with stock TRI
     python python_scripts/prepare_for_MIL/run_trident_stain_feats.py \\
         --wsi_dir       data/raw_wsi/IgA \\
         --job_dir       WSI/IgA/trident \\
-        --labels_csv    label_csvs/labels_unfiltered.csv \\
+        --labels_csv    label_csvs/labels.csv \\
         --stain_refs_dir stain_refs/IgA \\
         --backbone      uni_v2 \\
         --mag 20 --patch_size 224 --overlap 0 --batch_size 256
@@ -25,8 +25,8 @@ Segmentation and patching are stain-independent, so run them ONCE with stock TRI
 Outputs (stock TRIDENT layout — features + coords in one .h5 per slide):
     {job_dir}/{mag}x_{ps}px_{ov}px_overlap/features_{enc_name}/{slide_id}.h5
 
-Use reorganize_trident_feats.py afterwards to fold these into the biopsy-nested
-{backbone}_feats/{biopsy_nr}/{slide_id}.h5 layout consumed by ProcessedMILDataset.
+This flat folder is used as-is by the MIL scripts (--features_path); which biopsy
+each slide belongs to comes from the labels CSV.
 
 Notes:
     * Slides not present in --labels_csv, or whose stain has no reference .pt, are extracted
@@ -138,7 +138,7 @@ def main():
         "--mapping_csv",
         default=None,
         help=(
-            "Optional old_name->new_name CSV (reorganize_wsi_dirs.py --rename output, "
+            "Optional old_name->new_name CSV (e.g. "
             "slide_name_mapping.csv). When the on-disk slides are raw-named but --labels_csv "
             "is keyed by the anonymized name, this translates each anonymized 'file_name' back "
             "to its raw name so TRIDENT can locate the file on disk. The stain assignment still "
