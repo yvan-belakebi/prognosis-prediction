@@ -47,6 +47,11 @@ if (
 ):
     sys.path.insert(0, _torchmil_root)
 
+# mil_utils and late_fusion live in python_scripts/MIL
+_mil_dir = os.path.abspath(os.path.join(_script_dir, "..", "MIL"))
+if _mil_dir not in sys.path:
+    sys.path.insert(0, _mil_dir)
+
 from torchmil.data import collate_fn
 from torchmil.models import abmil as abmil_module
 from torchmil.models import deepgraphsurv as dgs_module
