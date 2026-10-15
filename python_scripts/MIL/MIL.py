@@ -197,7 +197,13 @@ def load_last_checkpoint(path, model, optimizer, args, device, parser):
             print(f"Warning: --{k} was {saved[k]!r} in the checkpoint, now {v!r}.")
     model.load_state_dict(state["model"])
     optimizer.load_state_dict(state["optimizer"])
-    torch.set_rng_state(state["torch_rng"])
+    # The optimizer state carries the old learning rate; --lr on the resume
+    # command line wins, so it can be lowered mid-run.
+    for group in optimizer.param_groups:
+        group["lr"] = args.lr
+    # map_location moved every tensor to `device`, but the CPU generator only
+    # accepts a CPU ByteTensor.
+    torch.set_rng_state(state["torch_rng"].cpu())
     random.setstate(state["python_rng"])
     return state["epoch"], state["best_cindex"], state["best_epoch"]
 
