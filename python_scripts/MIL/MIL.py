@@ -197,10 +197,16 @@ def load_last_checkpoint(path, model, optimizer, args, device, parser):
             print(f"Warning: --{k} was {saved[k]!r} in the checkpoint, now {v!r}.")
     model.load_state_dict(state["model"])
     optimizer.load_state_dict(state["optimizer"])
-    # The optimizer state carries the old learning rate; --lr on the resume
-    # command line wins, so it can be lowered mid-run.
+    # The optimizer state carries the old learning rate and weight decay; the
+    # resume command line wins, so either can be changed mid-run. Checkpoints
+    # from before --weight_decay were saved by Adam, whose state carries
+    # decoupled_weight_decay=False; it is forced back on so the decay stays
+    # AdamW's (PyTorch versions without the key always decouple in AdamW).
     for group in optimizer.param_groups:
         group["lr"] = args.lr
+        group["weight_decay"] = args.weight_decay
+        if "decoupled_weight_decay" in group:
+            group["decoupled_weight_decay"] = True
     # map_location moved every tensor to `device`, but the CPU generator only
     # accepts a CPU ByteTensor.
     torch.set_rng_state(state["torch_rng"].cpu())
@@ -426,6 +432,13 @@ def main():
         ),
     )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.0,
+        help="AdamW weight decay, a regulariser against overfitting (0 = plain Adam). "
+             "Typical values 1e-4 to 1e-2.",
+    )
     parser.add_argument("--att_dim", type=int, default=128, help="Attention dimension.")
     parser.add_argument(
         "--hidden_dim",
@@ -651,7 +664,12 @@ def main():
         risk_fn = lambda m, batch: _forward(m, batch, args.model_type)  # noqa: E731
 
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # AdamW: weight decay applied directly to the weights, not added to the
+    # gradient as Adam's L2 term is (which Adam's per-weight scaling then
+    # mostly cancels). With --weight_decay 0 it is identical to Adam.
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     checkpoint_name = args.checkpoint_name or f"{args.model_type}_model.pth"
