@@ -99,7 +99,7 @@ all; '|' merges source names, e.g. "HES|HE"; matching ignores case and punctuati
 train/val split is the labels CSV's split column; --biopsy_sampling and --max_biopsies group
 slides by its biopsy_number column.
 
-python python_scripts/MIL/MIL.py --model_type abmil --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --stains PAS --checkpoint_dir checkpoints --log_dir results/losses
+python python_scripts/MIL/MIL.py --model_type abmil --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --stains PAS "HE|HES" --checkpoint_dir checkpoints --log_dir results/losses
 
 python python_scripts/MIL/regression_MIL.py --model_type transmil --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels_regression --labels_csv label_csvs/labels_regression.csv --stains PAS --checkpoint_dir checkpoints_regression_transmil --log_dir results/losses_regression_transmil --dropout 0.1 --save_every 5 --batch_size 1
 
@@ -108,6 +108,10 @@ python python_scripts/evaluate_MIL/visualize_attention.py --features_path WSI/Ig
 
 6) Survival model evaluation (val split of the labels CSV, risk averaged per biopsy)
 python python_scripts/evaluate_MIL/evaluate_survival.py --model_type abmil --checkpoint checkpoints/abmil_model.pth --features_path WSI/IgA/trident/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv --stains PAS
+
+# Cohort survival (no model): Kaplan-Meier curve with one point per biopsy, plus patient/event
+# counts, median follow-up and survival, and n-year survival with 95% CI (--split train|val|all)
+python python_scripts/evaluate_MIL/plot_train_survival.py --labels_csv label_csvs/labels.csv --split all --years 1 3 5 10 --output_dir results/cohort_survival
 
 7) Multi-stain fusion (UNICORN-style)
 
