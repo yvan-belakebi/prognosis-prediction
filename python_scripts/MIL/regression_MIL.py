@@ -82,10 +82,8 @@ def _forward(model, batch, model_type: str) -> torch.Tensor:
     if model_type == "transmil":
         return model(batch["X"])
     if model_type == "patchgcn":
-        adj = batch["adj"]
-        if adj.is_sparse:
-            adj = adj.to_dense()
-        return model(batch["X"], adj.float(), batch["mask"])
+        # Sparse adjacency kept as is: a dense one is B x N x N (see MIL._forward).
+        return model(batch["X"], batch["adj"].float(), batch["mask"])
     return model(batch["X"], batch["mask"])
 
 
@@ -450,7 +448,7 @@ def main():
         )
 
     _collate = make_collate_fn(
-        partial(collate_fn, sparse=not is_graph),
+        partial(collate_fn, sparse=True),
         max_patches=args.max_patches,
     )
 

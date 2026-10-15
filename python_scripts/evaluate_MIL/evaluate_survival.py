@@ -127,10 +127,8 @@ def aggregate_by_biopsy(risks, times, events, bag_names, table):
 def _forward(model, batch, model_type):
     if model_type == "abmil":
         return model(batch["X"], batch["mask"])
-    adj = batch["adj"]
-    if adj.is_sparse:
-        adj = adj.to_dense()
-    return model(batch["X"], adj.float(), batch["mask"])
+    # Sparse adjacency kept as is: a dense one is B x N x N (see MIL._forward).
+    return model(batch["X"], batch["adj"].float(), batch["mask"])
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +623,7 @@ def main():
     )
     print(f"Evaluated bags ({args.split}): {len(val_dataset)}")
 
-    base_collate = partial(collate_fn, sparse=not is_graph)
+    base_collate = partial(collate_fn, sparse=True)
     _collate = make_collate_fn(base_collate, args.max_patches)
 
     # num_workers=0: avoids spawning RAM-heavy worker processes for a one-shot eval

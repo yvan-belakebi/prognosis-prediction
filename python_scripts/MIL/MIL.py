@@ -158,12 +158,11 @@ def _forward(model, batch, model_type: str) -> torch.Tensor:
     # transmil pools with self-attention over all instances and takes no mask.
     if model_type == "transmil":
         return model(batch["X"])
-    # deepgraphsurv: adj may be sparse (COO) and/or float64 from numpy; normalise both.
-    adj = batch["adj"]
-    if adj.is_sparse:
-        adj = adj.to_dense()
-    adj = adj.float()
-    return model(batch["X"], adj, batch["mask"])
+    # Graph models: the adjacency stays sparse COO (their layers use torch.bmm,
+    # which accepts it). A dense one is B x N x N floats — 1.5 GB for a single
+    # 20k-patch slide — which is what ran out of memory. Only the float64 values
+    # from numpy are cast.
+    return model(batch["X"], batch["adj"].float(), batch["mask"])
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +335,13 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size.")
     parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes that load bags and build graphs while the "
+             "GPU trains (0 = load in the main process).",
+    )
+    parser.add_argument(
         "--accumulation_steps",
         type=int,
         default=1,
@@ -480,13 +486,16 @@ def main():
     print(f"Train bags: {len(train_dataset)}{val_info}")
 
     # Subsample patches before adj is built to avoid OOM on large slides.
+    # sparse=True keeps the graph models' adjacency sparse (see _forward).
     _collate = make_collate_fn(
-        partial(
-            collate_fn, sparse=(args.model_type not in ("deepgraphsurv", "patchgcn"))
-        ),
-        max_patches=args.max_patches,
+        partial(collate_fn, sparse=True), max_patches=args.max_patches
     )
 
+    # Workers read the .h5 bags and build the graphs in parallel with the GPU
+    # step; with num_workers=0 that all happened between steps and the GPU sat
+    # idle. The val loader's workers are not persistent: they are re-created
+    # each epoch from the fixed seed in val_epoch, so validation stays
+    # deterministic.
     _train_sampler = BiopsySampler(train_dataset, table) if args.biopsy_sampling else None
     train_loader = DataLoader(
         train_dataset,
@@ -494,10 +503,13 @@ def main():
         shuffle=(_train_sampler is None),
         sampler=_train_sampler,
         collate_fn=_collate,
+        num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
     )
     val_loader = (
         DataLoader(
-            val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=_collate
+            val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=_collate,
+            num_workers=args.num_workers,
         )
         if val_dataset is not None
         else None

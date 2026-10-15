@@ -33,7 +33,9 @@ if (
 ):
     sys.path.insert(0, _torchmil_root)
 
+from scipy.spatial import cKDTree  # noqa: E402
 from torchmil.datasets import ProcessedMILDataset  # noqa: E402
+from torchmil.utils import add_self_loops, normalize_adj  # noqa: E402
 
 
 class BagDataset(ProcessedMILDataset):
@@ -76,6 +78,27 @@ class BagDataset(ProcessedMILDataset):
             coords = f["coords"][:]
             step = f["coords"].attrs.get("patch_size_level0")
         return coords / float(step) if step else coords
+
+    def _build_adj(self, bag_dict):
+        """Upstream's graph, built with one vectorised KD-tree query.
+
+        torchmil's build_adj runs a Python loop with one KD-tree query per
+        patch (~0.7 s for a 20k-patch slide), done again for every bag on
+        every epoch — enough to leave the GPU idle. query_pairs returns the
+        same edge set in one call (~40x faster). Feature-weighted edges
+        (adj_with_dist) still go through upstream.
+        """
+        if self.adj_with_dist:
+            return super()._build_adj(bag_dict)
+        coords = bag_dict["coords"]
+        n = coords.shape[0]
+        pairs = cKDTree(coords).query_pairs(self.dist_thr, output_type="ndarray")
+        edge_index = np.concatenate([pairs, pairs[:, ::-1]]).T.astype(np.int64)
+        edge_weight = np.ones(edge_index.shape[1])
+        norm_edge_weight = normalize_adj(edge_index, edge_weight, n_nodes=n)
+        if n == 1:
+            edge_index, norm_edge_weight = add_self_loops(edge_index, norm_edge_weight, n)
+        return edge_index, edge_weight, norm_edge_weight
 
 
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
@@ -303,22 +326,30 @@ def make_collate_fn(base_collate, max_patches=None):
     ProcessedMILDataset pre-computes adj in __getitem__, so both adj and the
     patch-level tensors (X, coords) are filtered here — before collate_fn stacks
     and pads them — to keep them aligned.
-    """
 
-    def _collate(bags):
+    Returns a picklable object rather than a closure, so DataLoader workers can
+    receive it under the 'spawn' start method (Windows, macOS) as well as fork.
+    """
+    return _Collate(base_collate, max_patches)
+
+
+class _Collate:
+    def __init__(self, base_collate, max_patches):
+        self.base_collate = base_collate
+        self.max_patches = max_patches
+
+    def __call__(self, bags):
         out = []
         for bag in bags:
             x = bag["X"]
             keep = torch.isfinite(x).all(dim=1)
             if not bool(keep.all()) and bool(keep.any()):
                 bag = _select_rows(bag, keep.nonzero(as_tuple=True)[0])
-            if max_patches is not None and bag["X"].shape[0] > max_patches:
-                idx = torch.randperm(bag["X"].shape[0])[:max_patches]
+            if self.max_patches is not None and bag["X"].shape[0] > self.max_patches:
+                idx = torch.randperm(bag["X"].shape[0])[: self.max_patches]
                 bag = _select_rows(bag, idx)
             out.append(bag)
-        return base_collate(out)
-
-    return _collate
+        return self.base_collate(out)
 
 
 class BiopsySampler(torch.utils.data.Sampler):
