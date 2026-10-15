@@ -85,6 +85,55 @@ from mil_utils import (
 )
 from late_fusion import LateFusionSurv
 
+_evaluate_dir = os.path.abspath(os.path.join(_script_dir, "..", "evaluate_MIL"))
+if _evaluate_dir not in sys.path:
+    sys.path.insert(0, _evaluate_dir)
+from evaluate_survival import aggregate_by_biopsy, concordance_index  # noqa: E402
+
+
+class SurvivalLogger(LossLogger):
+    """Loss log with the biopsy-level validation C-index, plotted in a second panel."""
+
+    COLUMNS = ["epoch", "train_loss", "val_loss", "val_cindex"]
+
+    def log(self, epoch, train_loss, val_loss=None, val_cindex=None):
+        self._append(
+            [
+                epoch,
+                f"{train_loss:.6f}",
+                "" if val_loss is None else f"{val_loss:.6f}",
+                "" if val_cindex is None else f"{val_cindex:.4f}",
+            ]
+        )
+
+    def save_plot(self):
+        import matplotlib.pyplot as plt
+
+        df = pd.read_csv(self.csv_path)
+        for col in ("val_loss", "val_cindex"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        val = df[df["val_loss"].notna()]
+
+        fig, (ax_loss, ax_c) = plt.subplots(1, 2, figsize=(12, 4))
+        ax_loss.plot(df["epoch"], df["train_loss"], label="train loss (per batch)")
+        if not val.empty:
+            ax_loss.plot(val["epoch"], val["val_loss"], linestyle="--",
+                         label="val loss (whole set)")
+            ax_c.plot(val["epoch"], val["val_cindex"], color="tab:green",
+                      label="val C-index (per biopsy)")
+            ax_c.axhline(0.5, color="gray", linestyle=":", linewidth=1)
+            ax_c.legend()
+        ax_loss.set_ylabel("Cox loss")
+        ax_loss.legend()
+        ax_c.set_ylabel("C-index")
+        for ax in (ax_loss, ax_c):
+            ax.set_xlabel("Epoch")
+            ax.grid(True, linestyle=":", alpha=0.6)
+        fig.tight_layout()
+        fig.savefig(self.plot_path, dpi=150)
+        plt.close(fig)
+        print(f"Loss plot saved to {self.plot_path}")
+
 
 # ---------------------------------------------------------------------------
 # Survival loss
@@ -151,16 +200,32 @@ def train_epoch(
     return total_loss / len(loader)
 
 
-def val_epoch(model, loader, device, risk_fn) -> float:
+def val_epoch(model, loader, device, risk_fn, bag_names, table):
+    """Return (val_loss, val_cindex) over the whole validation set.
+
+    The Cox loss uses the whole val set as one risk set instead of averaging
+    per-batch losses: with the small batches graph models need, most batches
+    hold zero or one event, so a per-batch average is mostly noise. The C-index
+    is computed per biopsy (slide risks averaged, as in evaluate_survival.py).
+
+    ``bag_names`` must be in loader order (shuffle=False). Patch subsampling
+    (--max_patches) runs under a fixed seed, so every epoch scores the same
+    patches; the training RNG stream is left untouched.
+    """
     model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
+    risks, labels = [], []
+    with torch.no_grad(), torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
         for batch in loader:
             batch = batch.to(device)
-            risk = risk_fn(model, batch)
-            loss = cox_ph_loss(risk, batch["Y"][:, 0].float(), batch["Y"][:, 1].float())
-            total_loss += loss.item()
-    return total_loss / len(loader)
+            risks.append(risk_fn(model, batch).reshape(-1).float().cpu())
+            labels.append(batch["Y"][:, :2].float().cpu())
+    risk, y = torch.cat(risks), torch.cat(labels)
+    loss = cox_ph_loss(risk, y[:, 0], y[:, 1]).item()
+    b_risk, b_time, b_event, _ = aggregate_by_biopsy(
+        risk.numpy(), y[:, 0].numpy(), y[:, 1].numpy(), bag_names, table
+    )
+    return loss, concordance_index(b_risk, b_time, b_event)
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +388,9 @@ def main():
         "--dist_thr",
         type=float,
         default=1.5,
-        help="Adjacency distance threshold (deepgraphsurv).",
+        help="Adjacency distance threshold (deepgraphsurv / patchgcn), in patches: "
+             "TRIDENT coords are divided by their patch spacing, so 1.5 links each "
+             "patch to its 8 neighbours.",
     )
     parser.add_argument(
         "--max_patches",
@@ -495,9 +562,13 @@ def main():
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     checkpoint_name = args.checkpoint_name or f"{args.model_type}_model.pth"
+    best_path = os.path.join(
+        args.checkpoint_dir, f"{os.path.splitext(checkpoint_name)[0]}_best.pth"
+    )
+    best_cindex, best_epoch = -1.0, None
 
     log_dir = args.log_dir or args.checkpoint_dir
-    logger = LossLogger(log_dir)
+    logger = SurvivalLogger(log_dir)
     print(f"Loss log: {logger.csv_path}")
 
     mem_logger = None
@@ -522,11 +593,18 @@ def main():
         )
 
         if val_loader is not None:
-            val_loss = val_epoch(model, val_loader, device, risk_fn)
-            logger.log(epoch, train_loss, val_loss)
+            val_loss, val_cindex = val_epoch(
+                model, val_loader, device, risk_fn, val_dataset.bag_names, table
+            )
+            logger.log(epoch, train_loss, val_loss, val_cindex)
+            improved = val_cindex > best_cindex
+            if improved:
+                best_cindex, best_epoch = val_cindex, epoch
+                torch.save(model.state_dict(), best_path)
             print(
                 f"[Epoch {epoch:>3d}/{args.epochs}]"
                 f" train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
+                f"  val_C={val_cindex:.4f}" + ("  *best" if improved else "")
             )
         else:
             logger.log(epoch, train_loss)
@@ -540,6 +618,10 @@ def main():
     final_path = os.path.join(args.checkpoint_dir, checkpoint_name)
     torch.save(model.state_dict(), final_path)
     print(f"Model saved to {final_path}")
+    if best_epoch is not None:
+        print(
+            f"Best val C-index {best_cindex:.4f} at epoch {best_epoch} → {best_path}"
+        )
 
     logger.save_plot()
 

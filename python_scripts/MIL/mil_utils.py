@@ -56,6 +56,27 @@ class BagDataset(ProcessedMILDataset):
             self.loaded_bags.pop(self.bag_names[index], None)
         return bag
 
+    def _load_coords(self, name):
+        """Patch coordinates in patch units, so ``dist_thr`` counts patches.
+
+        TRIDENT stores level-0 pixel coordinates — neighbouring patches are
+        ``patch_size_level0`` apart (448 for 224 px at 20x on a 40x scan) — and
+        records that step as an attribute of the 'coords' dataset. Upstream
+        builds the graph from the raw values, so with the default dist_thr of
+        1.5 no two patches are ever neighbours and the graph models silently
+        run on an empty graph. Dividing by the step puts neighbours 1 apart
+        whatever the scan magnification: dist_thr 1.5 then links each patch to
+        its 8 neighbours. Coordinates without the attribute (legacy .npy) are
+        returned unchanged.
+        """
+        path = os.path.join(self.coords_path, name + self.file_ext)
+        if not path.endswith(".h5"):
+            return super()._load_coords(name)
+        with h5py.File(path, "r") as f:
+            coords = f["coords"][:]
+            step = f["coords"].attrs.get("patch_size_level0")
+        return coords / float(step) if step else coords
+
 
 def discover_bags(base_dir, extensions=(".npy", ".h5")):
     """Return the sorted stems of the bag files directly under base_dir.

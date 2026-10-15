@@ -164,7 +164,9 @@ def _load_array(file_path: str, h5_key: str) -> np.ndarray:
 
 
 def load_bag(bag_name: str, features_path: str, coords_path: str | None, table=None):
-    """Return (X, coords) where X is (N, D) and coords is (N, 2) or None.
+    """Return (X, coords, step): X is (N, D), coords is (N, 2) pixel coordinates
+    or None, and step is the patch spacing in those pixels (TRIDENT's
+    'patch_size_level0' attribute) or None when the file does not record it.
 
     bag_name is a slide stem, or a biopsy_number resolved through ``table`` —
     see _find_bag_file.
@@ -185,12 +187,13 @@ def load_bag(bag_name: str, features_path: str, coords_path: str | None, table=N
         print(f"  Biopsy-level ID '{bag_name}' → slide '{resolved}'")
 
     # Load features; also check for an aligned coords key in the same h5 file
-    coords = None
+    coords = step = None
     if feat_file.endswith(".h5"):
         with h5py.File(feat_file, "r") as f:
             X = f["features"][:]
             if "coords" in f:
                 coords = f["coords"][:]
+                step = f["coords"].attrs.get("patch_size_level0")
     else:
         X = np.load(feat_file)
 
@@ -212,7 +215,7 @@ def load_bag(bag_name: str, features_path: str, coords_path: str | None, table=N
                     f"by compute_feats_clam.py) to guarantee alignment."
                 )
 
-    return X, coords
+    return X, coords, step
 
 
 # ---------------------------------------------------------------------------
@@ -371,9 +374,10 @@ def _build_adj(coords: np.ndarray, dist_thr: float) -> torch.Tensor:
 
     Returns a tensor of shape (1, N, N), matching DeepGraphSurv's expected input.
 
-    When coords are in pixel space (as produced by patches_to_coords.py), dist_thr
-    must be in the same unit — e.g. 1.5 * tile_size (~336 for 224 px tiles, ~384
-    for 256 px tiles).  Use the same value that was set during training.
+    TRIDENT coords arrive here divided by their patch spacing (as in training),
+    so dist_thr counts patches: 1.5 links each patch to its 8 neighbours. Legacy
+    coords without the spacing attribute stay in pixels and need dist_thr in
+    pixels too — use the value set during training.
     """
     if coords.max() > 500 and dist_thr < 10:
         print(
@@ -764,7 +768,8 @@ def main():
         "--dist_thr",
         type=float,
         default=1.5,
-        help="Adjacency distance threshold (DeepGraphSurv).",
+        help="Adjacency distance threshold (DeepGraphSurv), in patches for TRIDENT "
+        "features (1.5 = the 8 neighbours).",
     )
 
     # --- Stratification ---
@@ -879,7 +884,7 @@ def main():
 
     # 3. Infer feat_dim from the first available biopsy
     first_row = next(v for v in selected.values() if v is not None)
-    X_tmp, _ = load_bag(first_row["biopsy"], args.features_path, None, table)
+    X_tmp, _, _ = load_bag(first_row["biopsy"], args.features_path, None, table)
     feat_dim = X_tmp.shape[-1]
     print(f"\nFeature dimension: {feat_dim}")
 
@@ -902,7 +907,9 @@ def main():
         print(f"\n[{category}] {biopsy_name}")
 
         try:
-            X, coords = load_bag(biopsy_name, args.features_path, args.coords_path, table)
+            X, coords, step = load_bag(
+                biopsy_name, args.features_path, args.coords_path, table
+            )
         except FileNotFoundError as e:
             print(f"  Skipping — {e}")
             results[category] = None
@@ -913,7 +920,9 @@ def main():
             args.model_type,
             X,
             device,
-            coords=coords,
+            # The graph is built in patch units, as in training (BagDataset);
+            # the canvas below keeps the pixel coordinates.
+            coords=coords / float(step) if coords is not None and step else coords,
             dist_thr=args.dist_thr,
         )
         print(
