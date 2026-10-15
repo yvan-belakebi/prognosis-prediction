@@ -31,6 +31,12 @@ Usage (TransMIL — self-attention pooling, no coords/adjacency needed):
     # TransMIL attends over every instance and takes no padding mask, so keep
     # --batch_size small (or use --max_patches) on large bags.
 
+Resuming: every epoch writes <checkpoint_name>_last.pth (weights + optimizer +
+epoch + best val C-index). To continue an interrupted or finished run, repeat the
+same command with --resume and the total number of epochs wanted:
+    python python_scripts/MIL/MIL.py <same arguments> --epochs 80 \\
+        --resume checkpoints/deepgraphsurv_model_last.pth
+
 Usage (diagnosis-code late fusion): first regenerate labels with the code +
 vocabulary, then pass --use_diagnosis (works with any --model_type):
     python python_scripts/prepare_for_MIL/define_labels.py --with_diagnosis ...
@@ -133,6 +139,67 @@ class SurvivalLogger(LossLogger):
         fig.savefig(self.plot_path, dpi=150)
         plt.close(fig)
         print(f"Loss plot saved to {self.plot_path}")
+
+
+# ---------------------------------------------------------------------------
+# Resumable checkpoints
+# ---------------------------------------------------------------------------
+# Arguments that define the weight shapes: resuming with any of them changed
+# cannot load the weights, so it is refused with a clear message.
+_ARCH_ARGS = (
+    "model_type", "att_dim", "hidden_dim", "n_layers", "n_heads", "n_layers_rep",
+    "n_layers_att", "K", "n_gcn_layers", "mlp_depth", "use_diagnosis", "diag_dim",
+)
+
+
+def save_last_checkpoint(path, model, optimizer, epoch, best_cindex, best_epoch, args):
+    """Write everything needed to resume after ``epoch``, atomically.
+
+    The weights-only checkpoints (_epochN, _best, final) stay as they are for the
+    evaluation scripts; this one adds the optimizer state (Adam's moment
+    estimates), the epoch, the best val C-index so far, the RNG states and the
+    run's arguments. It is written to a temporary file and renamed, so a crash
+    during the save leaves the previous checkpoint intact.
+    """
+    import random
+
+    state = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "best_cindex": best_cindex,
+        "best_epoch": best_epoch,
+        "args": vars(args),
+        "torch_rng": torch.get_rng_state(),
+        "python_rng": random.getstate(),
+    }
+    tmp = path + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def load_last_checkpoint(path, model, optimizer, args, device, parser):
+    """Restore a save_last_checkpoint file; return (epoch, best_cindex, best_epoch)."""
+    import random
+
+    state = torch.load(path, map_location=device, weights_only=False)
+    saved = state["args"]
+    changed = [k for k in _ARCH_ARGS if saved.get(k) != getattr(args, k)]
+    if changed:
+        parser.error(
+            "--resume: the checkpoint was trained with a different architecture ("
+            + ", ".join(f"{k}={saved.get(k)!r}, now {getattr(args, k)!r}" for k in changed)
+            + "). Pass the same values to resume."
+        )
+    ignore = {"resume", "epochs", "num_workers", "mem_debug"}
+    for k, v in sorted(vars(args).items()):
+        if k not in ignore and k not in _ARCH_ARGS and k in saved and saved[k] != v:
+            print(f"Warning: --{k} was {saved[k]!r} in the checkpoint, now {v!r}.")
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    torch.set_rng_state(state["torch_rng"])
+    random.setstate(state["python_rng"])
+    return state["epoch"], state["best_cindex"], state["best_epoch"]
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +491,14 @@ def main():
         help="Save a checkpoint every N epochs (0 = only final).",
     )
     parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume from a <checkpoint_name>_last.pth (written every epoch): restores "
+             "the weights, optimizer, epoch and best val C-index, continues up to "
+             "--epochs, and appends to the existing loss log. Pass the same "
+             "architecture arguments as the original run.",
+    )
+    parser.add_argument(
         "--biopsy_sampling",
         action="store_true",
         help=(
@@ -577,10 +652,25 @@ def main():
     best_path = os.path.join(
         args.checkpoint_dir, f"{os.path.splitext(checkpoint_name)[0]}_best.pth"
     )
-    best_cindex, best_epoch = -1.0, None
+    last_path = os.path.join(
+        args.checkpoint_dir, f"{os.path.splitext(checkpoint_name)[0]}_last.pth"
+    )
+    best_cindex, best_epoch, start_epoch = -1.0, None, 1
+    if args.resume:
+        done, best_cindex, best_epoch = load_last_checkpoint(
+            args.resume, model, optimizer, args, device, parser
+        )
+        start_epoch = done + 1
+        best_info = (
+            f", best val C-index {best_cindex:.4f} at epoch {best_epoch}"
+            if best_epoch is not None else ""
+        )
+        print(f"Resumed from {args.resume}: {done} epochs done{best_info}.")
+        if start_epoch > args.epochs:
+            print(f"Nothing to do: --epochs {args.epochs} already reached.")
 
     log_dir = args.log_dir or args.checkpoint_dir
-    logger = SurvivalLogger(log_dir)
+    logger = SurvivalLogger(log_dir, resume_epoch=start_epoch - 1 if args.resume else None)
     print(f"Loss log: {logger.csv_path}")
 
     mem_logger = None
@@ -591,7 +681,7 @@ def main():
         print(f"GPU memory trace: {mem_logger.path}")
 
     # --- Training ------------------------------------------------------------
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         if mem_logger is not None:
             mem_logger.set_phase(f"epoch{epoch}")
         train_loss = train_epoch(
@@ -626,6 +716,10 @@ def main():
             ckpt = os.path.join(args.checkpoint_dir, f"{args.model_type}_epoch{epoch}.pth")
             torch.save(model.state_dict(), ckpt)
             print(f"  → checkpoint: {ckpt}")
+
+        save_last_checkpoint(
+            last_path, model, optimizer, epoch, best_cindex, best_epoch, args
+        )
 
     final_path = os.path.join(args.checkpoint_dir, checkpoint_name)
     torch.save(model.state_dict(), final_path)

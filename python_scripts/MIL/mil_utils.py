@@ -582,10 +582,22 @@ class LossLogger:
 
     COLUMNS = ["epoch", "train_loss", "val_loss"]
 
-    def __init__(self, log_dir: str):
+    def __init__(self, log_dir: str, resume_epoch: int = None):
+        """Start a new log, or — with ``resume_epoch`` — continue the existing one.
+
+        On resume, rows after ``resume_epoch`` are dropped (epochs logged after
+        the checkpoint was written, e.g. by a run that then crashed) and new
+        rows are appended, so the log and plot cover the whole training.
+        """
         os.makedirs(log_dir, exist_ok=True)
         self.csv_path = os.path.join(log_dir, "loss_log.csv")
         self.plot_path = os.path.join(log_dir, "loss_curves.png")
+        if resume_epoch is not None and os.path.isfile(self.csv_path):
+            df = pd.read_csv(self.csv_path)
+            if list(df.columns) == self.COLUMNS:
+                df[df["epoch"] <= resume_epoch].to_csv(self.csv_path, index=False)
+                return
+            print(f"Warning: {self.csv_path} has other columns — starting a new log.")
         with open(self.csv_path, "w", newline="") as f:
             csv.writer(f).writerow(self.COLUMNS)
 
