@@ -40,7 +40,6 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(__file__))
 from val_split import select_val_patients  # noqa: E402
 
-
 # ── input ─────────────────────────────────────────────────────────────────────
 
 
@@ -56,11 +55,13 @@ def add_source_args(parser):
         "--query",
         default=None,
         help="Optional pandas query selecting the rows to keep, "
-        "e.g. \"is_IgA == True\".",
+        'e.g. "is_IgA == True".',
     )
     parser.add_argument("--slide_col", default="ANON_name", help="Slide stem column.")
     parser.add_argument("--biopsy_col", default="biop_number", help="Biopsy id column.")
-    parser.add_argument("--patient_col", default="ID_diagnosis", help="Patient id column.")
+    parser.add_argument(
+        "--patient_col", default="AnonymizedID", help="Patient id column."
+    )
     parser.add_argument("--stain_col", default="Stain", help="Stain column.")
     parser.add_argument(
         "--diagnosis_col",
@@ -100,8 +101,13 @@ def load_source(args):
 def assign_split(df, value_col, args, agg="first"):
     """Add a split column: val for a stratified sample of patients, else train."""
     val_patients = select_val_patients(
-        df, "patient", value_col,
-        frac=args.val_frac, n_bins=args.n_bins, random_state=args.random_state, agg=agg,
+        df,
+        "patient",
+        value_col,
+        frac=args.val_frac,
+        n_bins=args.n_bins,
+        random_state=args.random_state,
+        agg=agg,
     )
     df["split"] = np.where(df["patient"].isin(val_patients), "val", "train")
     return df
@@ -109,11 +115,15 @@ def assign_split(df, value_col, args, agg="first"):
 
 def add_split_args(parser):
     parser.add_argument(
-        "--val_frac", type=float, default=0.2,
+        "--val_frac",
+        type=float,
+        default=0.2,
         help="Fraction of patients assigned to validation.",
     )
     parser.add_argument(
-        "--n_bins", type=int, default=4,
+        "--n_bins",
+        type=int,
+        default=4,
         help="Quantile strata for stratified patient sampling.",
     )
     parser.add_argument("--random_state", type=int, default=42)
@@ -196,7 +206,9 @@ def main():
     )
     add_split_args(parser)
     parser.add_argument(
-        "--labels_dir", required=True, help="Output folder for the per-slide .npy labels."
+        "--labels_dir",
+        required=True,
+        help="Output folder for the per-slide .npy labels.",
     )
     parser.add_argument(
         "--labels_csv", default="label_csvs/labels.csv", help="Output labels CSV."
@@ -214,7 +226,8 @@ def main():
 
     df = load_source(args)
     df["time"] = pd.to_numeric(
-        df[args.time_col].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0], errors="coerce"
+        df[args.time_col].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0],
+        errors="coerce",
     )
     df["event"] = df[args.event_col].notna().astype(int)
     df["diagnosis"] = (
@@ -232,16 +245,28 @@ def main():
     code_map = None
     if args.with_diagnosis:
         code_map, n_codes = build_diagnosis_code_map(df["diagnosis"])
-        codes_path = os.path.join(os.path.dirname(args.labels_csv), "diagnosis_codes.json")
+        codes_path = os.path.join(
+            os.path.dirname(args.labels_csv), "diagnosis_codes.json"
+        )
         os.makedirs(os.path.dirname(codes_path) or ".", exist_ok=True)
         with open(codes_path, "w", encoding="utf-8") as f:
-            json.dump({"n_codes": n_codes, "codes": code_map}, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {"n_codes": n_codes, "codes": code_map}, f, ensure_ascii=False, indent=2
+            )
 
     n_npy = write_npy_labels(df, args.labels_dir, code_map=code_map)
     write_labels_csv(
         df,
-        ["file_name", "biopsy_number", "patient", "stain", "time", "event",
-         "diagnosis", "split"],
+        [
+            "file_name",
+            "biopsy_number",
+            "patient",
+            "stain",
+            "time",
+            "event",
+            "diagnosis",
+            "split",
+        ],
         args.labels_csv,
     )
 
