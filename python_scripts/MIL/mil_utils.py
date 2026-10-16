@@ -134,16 +134,29 @@ def drop_empty_bags(features_path, bag_names, file_ext=".h5"):
 
     Only file headers are read, so the scan is cheap even for tens of
     thousands of bags.
+
+    Files that cannot be read at all (e.g. truncated by an interrupted feature
+    extraction: "file signature not found") are skipped too, and listed, so one
+    bad file does not stop a run; re-extract them to use those slides.
     """
-    keep = []
+    keep, unreadable = [], []
     for name in bag_names:
-        shape = _bag_shape(os.path.join(features_path, name + file_ext))
+        try:
+            shape = _bag_shape(os.path.join(features_path, name + file_ext))
+        except OSError:
+            unreadable.append(name)
+            continue
         if len(shape) >= 2 and shape[0] > 0:
             keep.append(name)
-    if len(keep) < len(bag_names):
+    n_empty = len(bag_names) - len(keep) - len(unreadable)
+    if n_empty:
+        print(f"  Skipped {n_empty} bags with no patches in {features_path}")
+    if unreadable:
+        shown = ", ".join(f"{n}{file_ext}" for n in unreadable[:20])
+        more = f" (+{len(unreadable) - 20} more)" if len(unreadable) > 20 else ""
         print(
-            f"  Skipped {len(bag_names) - len(keep)} bags with no patches in "
-            f"{features_path}"
+            f"  Skipped {len(unreadable)} unreadable (corrupt or truncated) feature "
+            f"files in {features_path}: {shown}{more}"
         )
     return keep
 
@@ -265,11 +278,19 @@ def select_bags(
     names = _keep(names, lambda n: n in table.index, "not in the labels CSV")
     if stains:
         vocab = StainVocabulary(stains)
+        on_disk = names
         names = _keep(
             names,
             lambda n: vocab.index_of(table.at[n, "stain"]) is not None,
             f"with a stain outside {vocab.names}",
         )
+        if not names:
+            counts = table.loc[on_disk, "stain"].value_counts()
+            available = ", ".join(f"{s!r} ({c})" for s, c in counts.items())
+            raise ValueError(
+                f"No bag has a stain matching {vocab.names}. Stain names of the bags "
+                f"in {features_path} (slide counts): {available}"
+            )
     if authorized_slides is not None:
         names = _keep(
             names, lambda n: n in authorized_slides, "not in the authorized slides list"
