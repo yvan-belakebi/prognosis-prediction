@@ -1,0 +1,31 @@
+Using device: cuda
+  Skipped 11727 bags not in the labels CSV
+  Skipped 46554 bags with a stain outside ['Trichrome']
+Traceback (most recent call last):
+  File "/data/yvan-files/prognosis-prediction/python_scripts/MIL/MIL.py", line 760, in <module>
+    main()
+  File "/data/yvan-files/prognosis-prediction/python_scripts/MIL/MIL.py", line 567, in main
+    train_dataset, val_dataset, _, _ = build_dataset(
+                                       ^^^^^^^^^^^^^^
+  File "/data/yvan-files/prognosis-prediction/python_scripts/MIL/mil_utils.py", line 429, in build_dataset
+    names = select_bags(
+            ^^^^^^^^^^^^
+  File "/data/yvan-files/prognosis-prediction/python_scripts/MIL/mil_utils.py", line 279, in select_bags
+    return drop_empty_bags(features_path, names, file_ext)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/yvan-files/prognosis-prediction/python_scripts/MIL/mil_utils.py", line 140, in drop_empty_bags
+    shape = _bag_shape(os.path.join(features_path, name + file_ext))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/yvan-files/prognosis-prediction/python_scripts/MIL/mil_utils.py", line 120, in _bag_shape
+    with h5py.File(file_path, "r") as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/yvan-files/prognosis-prediction/.trident_venv/lib64/python3.11/site-packages/h5py/_hl/files.py", line 555, in __init__
+    fid = make_fid(name, mode, userblock_size, fapl, fcpl, swmr=swmr)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/yvan-files/prognosis-prediction/.trident_venv/lib64/python3.11/site-packages/h5py/_hl/files.py", line 232, in make_fid
+    fid = h5f.open(name, flags, fapl=fapl)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "h5py/_objects.pyx", line 54, in h5py._objects.with_phil.wrapper
+  File "h5py/_objects.pyx", line 55, in h5py._objects.with_phil.wrapper
+  File "h5py/h5f.pyx", line 106, in h5py.h5f.open
+OSError: Unable to synchronously open file (file signature not found)

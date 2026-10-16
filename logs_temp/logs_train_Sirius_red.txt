@@ -1,0 +1,40 @@
+/data/yvan-files/prognosis-prediction/python_scripts/external_repositories/torchmil/torchmil/datasets/processed_mil_dataset.py:325: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /pytorch/aten/src/ATen/Context.cpp:760.)
+  bag_dict["adj"] = torch.sparse_coo_tensor(
+Using device: cuda
+  Skipped 11727 bags not in the labels CSV
+  Skipped 50687 bags with a stain outside ['Sirius red']
+Train bags: 689 | Val bags: 176
+Loss log: results/losses/Sirius_red/loss_log.csv
+[Epoch   1/25] train_loss=3.1538  val_loss=4.9205  val_C=0.5844  *best
+[Epoch   2/25] train_loss=3.0090  val_loss=4.6823  val_C=0.7258  *best
+[Epoch   3/25] train_loss=2.7899  val_loss=4.6691  val_C=0.7267  *best
+[Epoch   4/25] train_loss=2.8192  val_loss=4.7035  val_C=0.7026
+[Epoch   5/25] train_loss=2.7170  val_loss=4.6370  val_C=0.7141
+  → checkpoint: checkpoints/Sirius_red/deepgraphsurv_epoch5.pth
+[Epoch   6/25] train_loss=2.6561  val_loss=4.6729  val_C=0.7051
+[Epoch   7/25] train_loss=2.5386  val_loss=4.7799  val_C=0.6863
+[Epoch   8/25] train_loss=2.5359  val_loss=4.6186  val_C=0.7239
+[Epoch   9/25] train_loss=2.5068  val_loss=4.6936  val_C=0.7055
+[Epoch  10/25] train_loss=2.4783  val_loss=4.6160  val_C=0.7148
+  → checkpoint: checkpoints/Sirius_red/deepgraphsurv_epoch10.pth
+[Epoch  11/25] train_loss=2.4123  val_loss=4.6800  val_C=0.7124
+[Epoch  12/25] train_loss=2.3688  val_loss=4.6679  val_C=0.7090
+[Epoch  13/25] train_loss=2.3276  val_loss=4.7593  val_C=0.7015
+[Epoch  14/25] train_loss=2.1559  val_loss=4.7992  val_C=0.7047
+[Epoch  15/25] train_loss=2.1202  val_loss=4.8825  val_C=0.6985
+  → checkpoint: checkpoints/Sirius_red/deepgraphsurv_epoch15.pth
+[Epoch  16/25] train_loss=2.0691  val_loss=4.7658  val_C=0.7118
+[Epoch  17/25] train_loss=2.0490  val_loss=5.0620  val_C=0.7085
+[Epoch  18/25] train_loss=2.1937  val_loss=4.8276  val_C=0.7132
+[Epoch  19/25] train_loss=1.9468  val_loss=5.1245  val_C=0.7062
+[Epoch  20/25] train_loss=1.8448  val_loss=4.9465  val_C=0.7214
+  → checkpoint: checkpoints/Sirius_red/deepgraphsurv_epoch20.pth
+[Epoch  21/25] train_loss=1.7117  val_loss=4.9956  val_C=0.7152
+[Epoch  22/25] train_loss=1.6529  val_loss=5.1456  val_C=0.7094
+[Epoch  23/25] train_loss=1.6383  val_loss=5.1318  val_C=0.7115
+[Epoch  24/25] train_loss=1.6325  val_loss=5.1732  val_C=0.7222
+[Epoch  25/25] train_loss=1.6157  val_loss=5.2475  val_C=0.7000
+  → checkpoint: checkpoints/Sirius_red/deepgraphsurv_epoch25.pth
+Model saved to checkpoints/Sirius_red/deepgraphsurv_model.pth
+Best val C-index 0.7267 at epoch 3 → checkpoints/Sirius_red/deepgraphsurv_model_best.pth
+Loss plot saved to results/losses/Sirius_red/loss_curves.png

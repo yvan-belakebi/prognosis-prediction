@@ -1,0 +1,40 @@
+/data/yvan-files/prognosis-prediction/python_scripts/external_repositories/torchmil/torchmil/datasets/processed_mil_dataset.py:325: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /pytorch/aten/src/ATen/Context.cpp:760.)
+  bag_dict["adj"] = torch.sparse_coo_tensor(
+Using device: cuda
+  Skipped 11727 bags not in the labels CSV
+  Skipped 47045 bags with a stain outside ['PASM']
+Train bags: 3604 | Val bags: 903
+Loss log: results/losses/PASM/loss_log.csv
+[Epoch   1/25] train_loss=2.8699  val_loss=6.2578  val_C=0.7335  *best
+[Epoch   2/25] train_loss=2.7141  val_loss=6.1587  val_C=0.7587  *best
+[Epoch   3/25] train_loss=2.6404  val_loss=6.1810  val_C=0.7606  *best
+[Epoch   4/25] train_loss=2.5682  val_loss=6.1638  val_C=0.7613  *best
+[Epoch   5/25] train_loss=2.5399  val_loss=6.2777  val_C=0.7561
+  → checkpoint: checkpoints/PASM/deepgraphsurv_epoch5.pth
+[Epoch   6/25] train_loss=2.4959  val_loss=6.2092  val_C=0.7619  *best
+[Epoch   7/25] train_loss=2.4813  val_loss=6.2490  val_C=0.7605
+[Epoch   8/25] train_loss=2.4395  val_loss=6.3062  val_C=0.7542
+[Epoch   9/25] train_loss=2.3937  val_loss=6.2570  val_C=0.7668  *best
+[Epoch  10/25] train_loss=2.3440  val_loss=6.2680  val_C=0.7611
+  → checkpoint: checkpoints/PASM/deepgraphsurv_epoch10.pth
+[Epoch  11/25] train_loss=2.2964  val_loss=6.2719  val_C=0.7554
+[Epoch  12/25] train_loss=2.2399  val_loss=6.5487  val_C=0.7623
+[Epoch  13/25] train_loss=2.2385  val_loss=6.2739  val_C=0.7605
+[Epoch  14/25] train_loss=2.1474  val_loss=6.3474  val_C=0.7615
+[Epoch  15/25] train_loss=2.0914  val_loss=6.4416  val_C=0.7603
+  → checkpoint: checkpoints/PASM/deepgraphsurv_epoch15.pth
+[Epoch  16/25] train_loss=2.0352  val_loss=6.4678  val_C=0.7619
+[Epoch  17/25] train_loss=2.0124  val_loss=6.6282  val_C=0.7606
+[Epoch  18/25] train_loss=1.9838  val_loss=6.5131  val_C=0.7590
+[Epoch  19/25] train_loss=1.8829  val_loss=6.7153  val_C=0.7570
+[Epoch  20/25] train_loss=1.9004  val_loss=6.5974  val_C=0.7496
+  → checkpoint: checkpoints/PASM/deepgraphsurv_epoch20.pth
+[Epoch  21/25] train_loss=1.7942  val_loss=6.7867  val_C=0.7559
+[Epoch  22/25] train_loss=1.8088  val_loss=6.6890  val_C=0.7568
+[Epoch  23/25] train_loss=1.7330  val_loss=6.9484  val_C=0.7525
+[Epoch  24/25] train_loss=1.7293  val_loss=7.0768  val_C=0.7489
+[Epoch  25/25] train_loss=1.6884  val_loss=7.0950  val_C=0.7454
+  → checkpoint: checkpoints/PASM/deepgraphsurv_epoch25.pth
+Model saved to checkpoints/PASM/deepgraphsurv_model.pth
+Best val C-index 0.7668 at epoch 9 → checkpoints/PASM/deepgraphsurv_model_best.pth
+Loss plot saved to results/losses/PASM/loss_curves.png

@@ -1,0 +1,40 @@
+/data/yvan-files/prognosis-prediction/python_scripts/external_repositories/torchmil/torchmil/datasets/processed_mil_dataset.py:325: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /pytorch/aten/src/ATen/Context.cpp:760.)
+  bag_dict["adj"] = torch.sparse_coo_tensor(
+Using device: cuda
+  Skipped 11727 bags not in the labels CSV
+  Skipped 46303 bags with a stain outside ['Congo']
+Train bags: 4206 | Val bags: 1043
+Loss log: results/losses/Congo/loss_log.csv
+[Epoch   1/25] train_loss=2.8435  val_loss=6.2443  val_C=0.7618  *best
+[Epoch   2/25] train_loss=2.6487  val_loss=6.2625  val_C=0.7613
+[Epoch   3/25] train_loss=2.5678  val_loss=6.2763  val_C=0.7622  *best
+[Epoch   4/25] train_loss=2.5415  val_loss=6.2770  val_C=0.7633  *best
+[Epoch   5/25] train_loss=2.5142  val_loss=6.2768  val_C=0.7649  *best
+  → checkpoint: checkpoints/Congo/deepgraphsurv_epoch5.pth
+[Epoch   6/25] train_loss=2.4802  val_loss=6.3491  val_C=0.7628
+[Epoch   7/25] train_loss=2.4311  val_loss=6.3267  val_C=0.7638
+[Epoch   8/25] train_loss=2.3781  val_loss=6.3755  val_C=0.7639
+[Epoch   9/25] train_loss=2.3327  val_loss=6.3889  val_C=0.7753  *best
+[Epoch  10/25] train_loss=2.3032  val_loss=6.4699  val_C=0.7664
+  → checkpoint: checkpoints/Congo/deepgraphsurv_epoch10.pth
+[Epoch  11/25] train_loss=2.2905  val_loss=6.3929  val_C=0.7725
+[Epoch  12/25] train_loss=2.2145  val_loss=6.7228  val_C=0.7694
+[Epoch  13/25] train_loss=2.1801  val_loss=6.4413  val_C=0.7630
+[Epoch  14/25] train_loss=2.1651  val_loss=6.5182  val_C=0.7669
+[Epoch  15/25] train_loss=2.1087  val_loss=6.4468  val_C=0.7661
+  → checkpoint: checkpoints/Congo/deepgraphsurv_epoch15.pth
+[Epoch  16/25] train_loss=2.0892  val_loss=6.7139  val_C=0.7600
+[Epoch  17/25] train_loss=2.0334  val_loss=6.7331  val_C=0.7646
+[Epoch  18/25] train_loss=1.9528  val_loss=6.9290  val_C=0.7563
+[Epoch  19/25] train_loss=1.9588  val_loss=6.9416  val_C=0.7584
+[Epoch  20/25] train_loss=1.8923  val_loss=6.7453  val_C=0.7573
+  → checkpoint: checkpoints/Congo/deepgraphsurv_epoch20.pth
+[Epoch  21/25] train_loss=1.8834  val_loss=7.0577  val_C=0.7561
+[Epoch  22/25] train_loss=1.8349  val_loss=6.9683  val_C=0.7508
+[Epoch  23/25] train_loss=1.8350  val_loss=6.9672  val_C=0.7510
+[Epoch  24/25] train_loss=1.7971  val_loss=7.0986  val_C=0.7543
+[Epoch  25/25] train_loss=1.7368  val_loss=7.3479  val_C=0.7554
+  → checkpoint: checkpoints/Congo/deepgraphsurv_epoch25.pth
+Model saved to checkpoints/Congo/deepgraphsurv_model.pth
+Best val C-index 0.7753 at epoch 9 → checkpoints/Congo/deepgraphsurv_model_best.pth
+Loss plot saved to results/losses/Congo/loss_curves.png
