@@ -87,6 +87,7 @@ from mil_utils import (
     GpuMemLogger,
     build_dataset,
     BiopsySampler,
+    EventStratifiedBatchSampler,
     LossLogger,
 )
 from late_fusion import LateFusionSurv
@@ -527,6 +528,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--event_sampling",
+        action="store_true",
+        help=(
+            "Event-stratified batches: every training batch gets the same share of "
+            "events (the Cox loss only learns from events ranked within their "
+            "batch) and a spread of follow-up times. Combines with "
+            "--biopsy_sampling."
+        ),
+    )
+    parser.add_argument(
         "--max_biopsies",
         type=int,
         default=None,
@@ -590,15 +601,31 @@ def main():
     # idle. The val loader's workers are not persistent: they are re-created
     # each epoch from the fixed seed in val_epoch, so validation stays
     # deterministic.
-    _train_sampler = BiopsySampler(train_dataset, table) if args.biopsy_sampling else None
+    if args.event_sampling:
+        _batch_sampler = EventStratifiedBatchSampler(
+            train_dataset, table, args.batch_size, one_per_biopsy=args.biopsy_sampling
+        )
+        lo, hi = _batch_sampler.events_per_batch()
+        print(
+            f"Event-stratified batches: {len(_batch_sampler)} per epoch, "
+            f"{lo}-{hi} events each"
+        )
+        _loader_kwargs = dict(batch_sampler=_batch_sampler)
+    else:
+        _train_sampler = (
+            BiopsySampler(train_dataset, table) if args.biopsy_sampling else None
+        )
+        _loader_kwargs = dict(
+            batch_size=args.batch_size,
+            shuffle=(_train_sampler is None),
+            sampler=_train_sampler,
+        )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
-        shuffle=(_train_sampler is None),
-        sampler=_train_sampler,
         collate_fn=_collate,
         num_workers=args.num_workers,
         persistent_workers=args.num_workers > 0,
+        **_loader_kwargs,
     )
     val_loader = (
         DataLoader(

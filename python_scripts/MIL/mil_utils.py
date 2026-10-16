@@ -376,6 +376,63 @@ class BiopsySampler(torch.utils.data.Sampler):
         return len(self._groups)
 
 
+class EventStratifiedBatchSampler(torch.utils.data.Sampler):
+    """Batches with an even share of events, spread over follow-up time.
+
+    The Cox loss is computed within each batch: every event is ranked against
+    the batch members still at risk at its time. With random batches the event
+    count varies a lot from batch to batch (and can be zero, which gives no
+    gradient at all), so some steps learn from a handful of comparisons and
+    others from many. Here events and censored samples are dealt out
+    separately, so every batch gets floor/ceil(n_events / n_batches) events.
+
+    Within each group, samples are sorted by follow-up time and dealt one
+    chunk of ``n_batches`` at a time, each chunk's members going to different
+    batches in random order. Every batch thus spans the whole range of times,
+    which gives each event more comparisons in its risk set. Batch membership
+    is still re-randomised every epoch.
+
+    With ``one_per_biopsy`` the unit is the biopsy, as in BiopsySampler: each
+    epoch draws one slide per biopsy. Event and time come from the labels table.
+    Uses Python's ``random``, whose state --resume restores.
+    """
+
+    def __init__(self, dataset, table, batch_size, one_per_biopsy=False):
+        names = dataset.bag_names
+        units = {}
+        for i, name in enumerate(names):
+            key = bag_group(name, table) if one_per_biopsy else name
+            units.setdefault(key, []).append(i)
+        self._units = list(units.values())
+        first = [names[u[0]] for u in self._units]
+        self._event = table.loc[first, "event"].to_numpy(dtype=int)
+        self._time = table.loc[first, "time"].to_numpy(dtype=float)
+        self.n_batches = max(1, -(-len(self._units) // batch_size))  # ceil
+
+    def events_per_batch(self):
+        """(min, max) events per batch — fixed by construction."""
+        n_events = int(self._event.sum())
+        return n_events // self.n_batches, -(-n_events // self.n_batches)
+
+    def __iter__(self):
+        batches = [[] for _ in range(self.n_batches)]
+        for flag in (1, 0):
+            group = np.flatnonzero(self._event == flag)
+            group = group[np.argsort(self._time[group], kind="stable")]
+            for start in range(0, len(group), self.n_batches):
+                chunk = group[start:start + self.n_batches]
+                slots = random.sample(range(self.n_batches), len(chunk))
+                for unit, slot in zip(chunk, slots):
+                    batches[slot].append(random.choice(self._units[unit]))
+        random.shuffle(batches)
+        for batch in batches:
+            random.shuffle(batch)
+            yield batch
+
+    def __len__(self):
+        return self.n_batches
+
+
 def _sample_biopsies(bag_names, table, max_biopsies):
     """Keep every slide of at most ``max_biopsies`` randomly chosen biopsies."""
     groups = {}
