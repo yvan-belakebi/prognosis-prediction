@@ -208,7 +208,7 @@ def main():
     p.add_argument(
         "--split",
         default="train",
-        choices=["train", "val", "all"],
+        choices=["train", "val", "test", "all"],
         help="Which slides of the labels CSV to plot ('all' = full dataset).",
     )
     p.add_argument("--output_dir", default="results/train_survival")
@@ -281,7 +281,10 @@ def main():
     pd.DataFrame(rows).to_csv(summary_path, index=False)
     print(f"Per-{id_col} table → {data_path}\nSummary → {summary_path}")
 
-    split_name = {"all": "Full dataset", "train": "Training set", "val": "Validation set"}
+    split_name = {
+        "all": "Full dataset", "train": "Training set", "val": "Validation set",
+        "test": "Test set",
+    }
     plot_km(
         times, events, horizons, lines,
         f"{split_name[args.split]} — Kaplan-Meier survival "

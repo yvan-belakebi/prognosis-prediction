@@ -132,16 +132,23 @@ def index_biopsies(
 
 
 def split_records(records, table):
-    """Split records into (train, val) by the labels table's split column.
+    """Split records into (train, val, test) by the labels table's split column.
 
-    A biopsy goes to validation when any of its slides is in the val split
-    (define_labels.py splits by patient, so a biopsy's slides always agree).
+    define_labels.py splits by patient, so a biopsy's slides always share one
+    split; a biopsy whose slides disagree is an error rather than a guess. Only
+    biopsies explicitly in "train" are trained on — in particular, test biopsies
+    never are.
     """
-    train, val = [], []
+    out = {"train": [], "val": [], "test": []}
     for rec in records:
-        is_val = (table.loc[rec["bag_names"], "split"] == "val").any()
-        (val if is_val else train).append(rec)
-    return train, val
+        splits = set(table.loc[rec["bag_names"], "split"])
+        if len(splits) != 1 or not splits <= out.keys():
+            raise ValueError(
+                f"Biopsy {rec['biopsy']} has slides in splits {sorted(splits)}; "
+                "expected exactly one of train / val / test."
+            )
+        out[splits.pop()].append(rec)
+    return out["train"], out["val"], out["test"]
 
 
 # ---------------------------------------------------------------------------

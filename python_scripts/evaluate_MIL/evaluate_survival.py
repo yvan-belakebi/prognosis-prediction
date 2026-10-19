@@ -510,7 +510,7 @@ def main():
     parser.add_argument(
         "--split",
         default="val",
-        choices=["val", "train", "all"],
+        choices=["val", "train", "test", "all"],
         help="Which slides of the labels CSV to evaluate.",
     )
     parser.add_argument(

@@ -1,5 +1,5 @@
 """
-val_split.py — Stratified patient-level train/validation split.
+val_split.py — Stratified patient-level train/validation/test splits.
 
 Shared by define_labels.py (survival) and define_regression_labels.py
 (regression) so the splitting logic lives in one place.
@@ -48,4 +48,21 @@ def select_val_patients(
             _sample, include_groups=False
         )
     )[patient_col].tolist()
+
+
+def select_patients_by_event(df, patient_col, event_col, frac, random_state):
+    """Return patient IDs for a held-out set, stratified by event status.
+
+    A patient counts as an event when any of their slides carries an event
+    (a patient with several biopsies can have different outcomes per biopsy).
+    ``frac`` of the event patients and ``frac`` of the event-free patients are
+    sampled, so the held-out set has the cohort's event rate.
+    """
+    patient_event = df.groupby(patient_col)[event_col].max().reset_index()
+    picked = []
+    for _, g in patient_event.groupby(event_col):
+        n = round(frac * len(g))
+        if n:
+            picked += g.sample(n=n, random_state=random_state)[patient_col].tolist()
+    return picked
 

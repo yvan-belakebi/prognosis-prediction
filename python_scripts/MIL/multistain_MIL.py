@@ -444,8 +444,13 @@ def main():
             "Point --labels_path at the right label folder."
         )
 
-    train_records, val_records = split_records(records, table)
-    print(f"Biopsies — train: {len(train_records)} | val: {len(val_records)}")
+    # Test biopsies are held out entirely; evaluate them at the end with
+    # analyze_stain_weights.py --split test.
+    train_records, val_records, test_records = split_records(records, table)
+    print(
+        f"Biopsies — train: {len(train_records)} | val: {len(val_records)}"
+        f" | test (held out): {len(test_records)}"
+    )
 
     # --- Label normalisation (regression only) --------------------------------
     # The head is LayerNorm -> Linear with default init, so it starts predicting ~0

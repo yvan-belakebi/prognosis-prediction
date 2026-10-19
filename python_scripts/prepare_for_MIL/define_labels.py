@@ -1,5 +1,5 @@
 """
-define_labels.py — Build survival labels and the train/val split for MIL.py.
+define_labels.py — Build survival labels and the train/val/test split for MIL.py.
 
 One registry-style input CSV (one row per slide) is turned into:
 
@@ -9,12 +9,17 @@ One registry-style input CSV (one row per slide) is turned into:
   <labels_csv>                   One row per slide: file_name, biopsy_number,
                                  patient, stain, time, event, diagnosis, split.
                                  The single source of truth downstream: biopsy
-                                 grouping, stain selection and the train/val
-                                 split are all read from it (--labels_csv).
+                                 grouping, stain selection and the
+                                 train/val/test split are all read from it
+                                 (--labels_csv).
   <labels_csv dir>/diagnosis_codes.json   With --with_diagnosis only.
 
-Validation patients (not slides) are sampled, stratified by follow-up time, so
-every slide of a patient lands in the same split (see val_split.py).
+Patients (not slides) are split, so every slide of a patient lands in the same
+split (see val_split.py): first a test set (--test_frac, default 20%) stratified
+by event status, then a validation set (--val_frac, default 20%) stratified by
+follow-up time; the rest is train. The test set is for the final comparison of
+models (e.g. stain fusion strategies): training and checkpoint selection never
+see it — evaluate it once, at the end, with evaluate_survival.py --split test.
 
 Run from the project root:
     python python_scripts/prepare_for_MIL/define_labels.py \\
@@ -36,9 +41,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-# Shared stratified train/val split helper.
+# Shared stratified patient-level split helpers.
 sys.path.insert(0, os.path.dirname(__file__))
-from val_split import select_val_patients  # noqa: E402
+from val_split import select_patients_by_event, select_val_patients  # noqa: E402
 
 # ── input ─────────────────────────────────────────────────────────────────────
 
@@ -98,19 +103,53 @@ def load_source(args):
     return df
 
 
-def assign_split(df, value_col, args, agg="first"):
-    """Add a split column: val for a stratified sample of patients, else train."""
+def assign_split(df, value_col, args, agg="first", event_col=None):
+    """Add a split column: test, val or train, assigned per patient.
+
+    The test patients are drawn first — stratified by event status when
+    ``event_col`` is given (survival), else by ``value_col`` quantile
+    (regression) — so the test set does not change when --val_frac does. Val
+    patients are then drawn from the rest, stratified by ``value_col``
+    quantile. Both fractions are of all patients: the defaults give 60/20/20.
+    """
+    test_patients = []
+    if args.test_frac > 0:
+        if event_col is not None:
+            test_patients = select_patients_by_event(
+                df, "patient", event_col, args.test_frac, args.random_state
+            )
+        else:
+            test_patients = select_val_patients(
+                df, "patient", value_col, frac=args.test_frac,
+                n_bins=args.n_bins, random_state=args.random_state, agg=agg,
+            )
+    is_test = df["patient"].isin(test_patients)
     val_patients = select_val_patients(
-        df,
+        df[~is_test],
         "patient",
         value_col,
-        frac=args.val_frac,
+        # Rescaled so --val_frac stays a fraction of all patients.
+        frac=args.val_frac / (1 - args.test_frac),
         n_bins=args.n_bins,
         random_state=args.random_state,
         agg=agg,
     )
-    df["split"] = np.where(df["patient"].isin(val_patients), "val", "train")
+    df["split"] = np.where(
+        is_test, "test", np.where(df["patient"].isin(val_patients), "val", "train")
+    )
     return df
+
+
+def print_split_summary(df, extra=lambda part: ""):
+    for split in ("train", "val", "test"):
+        part = df[df["split"] == split]
+        if part.empty:
+            continue
+        print(
+            f"  {split:5s} — slides: {len(part):>6d}  biopsies: "
+            f"{part['biopsy_number'].nunique():>5d}  patients: "
+            f"{part['patient'].nunique():>5d}{extra(part)}"
+        )
 
 
 def add_split_args(parser):
@@ -118,7 +157,15 @@ def add_split_args(parser):
         "--val_frac",
         type=float,
         default=0.2,
-        help="Fraction of patients assigned to validation.",
+        help="Fraction of all patients assigned to validation.",
+    )
+    parser.add_argument(
+        "--test_frac",
+        type=float,
+        default=0.2,
+        help="Fraction of all patients held out as a test set, drawn first "
+        "(stratified by event for survival labels). Never used for training or "
+        "model selection; 0 disables it.",
     )
     parser.add_argument(
         "--n_bins",
@@ -240,7 +287,7 @@ def main():
     if len(df) < n_rows:
         print(f"Dropped {n_rows - len(df)} slides with no follow-up time.")
 
-    df = assign_split(df, "time", args)
+    df = assign_split(df, "time", args, event_col="event")
 
     code_map = None
     if args.with_diagnosis:
@@ -271,13 +318,15 @@ def main():
     )
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    for split in ("train", "val"):
-        part = df[df["split"] == split]
-        print(
-            f"  {split:5s} — slides: {len(part):>6d}  biopsies: "
-            f"{part['biopsy_number'].nunique():>5d}  patients: "
-            f"{part['patient'].nunique():>5d}  events: {int(part['event'].sum()):>5d}"
-        )
+    # Event counts per slide over-count multi-slide biopsies; report per biopsy.
+    print_split_summary(
+        df,
+        lambda part: (
+            f"  biopsy events: "
+            f"{int(part.groupby('biopsy_number')['event'].first().sum()):>5d} "
+            f"({100 * part.groupby('biopsy_number')['event'].first().mean():.1f}%)"
+        ),
+    )
     print("\nOutputs:")
     print(f"  {args.labels_dir}/  ({n_npy} .npy files)")
     print(f"  {args.labels_csv}")

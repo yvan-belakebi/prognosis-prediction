@@ -15,9 +15,10 @@ file are dropped at load time, so nothing has to be passed at training time.  Th
 filter runs before the validation split, so the quantile strata are built on
 plausible values.
 
-Validation split: patients are sampled stratified by eGFR quantile, so the value
-distribution is preserved across train/val and all slides of a patient stay in the
-same split.
+Train/val/test split: patients are sampled stratified by eGFR quantile — the test
+set first (--test_frac, default 20%), then validation (--val_frac, default 20%) —
+so the value distribution is preserved across splits and all slides of a patient
+stay in the same split.
 
 Run from the project root:
     python python_scripts/prepare_for_MIL/define_regression_labels.py \\
@@ -41,6 +42,7 @@ from define_labels import (  # noqa: E402
     add_split_args,
     assign_split,
     load_source,
+    print_split_summary,
     write_labels_csv,
 )
 
@@ -125,14 +127,9 @@ def main():
         args.labels_csv,
     )
 
-    for split in ("train", "val"):
-        part = df[df["split"] == split]
-        print(
-            f"  {split:5s} — slides: {len(part):>6d}  biopsies: "
-            f"{part['biopsy_number'].nunique():>5d}  patients: "
-            f"{part['patient'].nunique():>5d}  eGFR: {part['eGFR'].mean():.1f} "
-            f"± {part['eGFR'].std():.1f}"
-        )
+    print_split_summary(
+        df, lambda part: f"  eGFR: {part['eGFR'].mean():.1f} ± {part['eGFR'].std():.1f}"
+    )
     print("\nOutputs:")
     print(f"  {args.labels_dir}/  ({len(df)} .npy files)")
     print(f"  {args.labels_csv}")

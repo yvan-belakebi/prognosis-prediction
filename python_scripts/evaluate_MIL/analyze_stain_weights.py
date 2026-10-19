@@ -644,7 +644,7 @@ def main():
     parser.add_argument(
         "--split",
         default="val",
-        choices=["val", "train", "all"],
+        choices=["val", "train", "test", "all"],
         help="Which biopsies to analyse, by the labels CSV's split column.",
     )
     parser.add_argument("--authorized_slides_csv", default=None)
@@ -698,8 +698,10 @@ def main():
         authorized_slides=load_authorized_slides(args.authorized_slides_csv),
         min_stains=args.min_stains,
     )
-    train_recs, val_recs = split_records(records, table)
-    records = {"val": val_recs, "train": train_recs, "all": records}[args.split]
+    train_recs, val_recs, test_recs = split_records(records, table)
+    records = {
+        "val": val_recs, "train": train_recs, "test": test_recs, "all": records
+    }[args.split]
     if not records:
         parser.error(f"No biopsies in the '{args.split}' split.")
     print(f"Analysing {len(records)} biopsies ({args.split} split)")
