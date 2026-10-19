@@ -49,6 +49,7 @@ import random
 import sys
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -69,7 +70,14 @@ _evaluate_dir = os.path.abspath(os.path.join(_script_dir, "..", "evaluate_MIL"))
 if _evaluate_dir not in sys.path:
     sys.path.insert(0, _evaluate_dir)
 
-from mil_utils import load_authorized_slides, load_labels_table, LossLogger  # noqa: E402
+from mil_utils import (  # noqa: E402
+    EventStratifiedBatchSampler,
+    LossLogger,
+    load_authorized_slides,
+    load_labels_table,
+    load_last_checkpoint,
+    save_last_checkpoint,
+)
 from multistain_data import (  # noqa: E402
     MultiStainBiopsyDataset,
     StainVocabulary,
@@ -82,9 +90,14 @@ from evaluate_survival import concordance_index  # noqa: E402
 
 
 class MultiStainLogger(LossLogger):
-    """Loss log with one extra metric column (C-index for survival, MAE for regression)."""
+    """Loss log with one extra metric column (C-index for survival, MAE for
+    regression), plotted in a second panel next to the losses."""
 
     COLUMNS = ["epoch", "train_loss", "val_loss", "val_metric"]
+
+    def __init__(self, log_dir, metric_name, resume_epoch=None):
+        super().__init__(log_dir, resume_epoch=resume_epoch)
+        self.metric_name = metric_name
 
     def log(self, epoch, train_loss, val_loss=None, val_metric=None):
         self._append(
@@ -95,6 +108,46 @@ class MultiStainLogger(LossLogger):
                 "" if val_metric is None else f"{val_metric:.4f}",
             ]
         )
+
+    def save_plot(self):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available — skipping loss plot.")
+            return
+        df = pd.read_csv(self.csv_path)
+        for col in ("val_loss", "val_metric"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        val = df[df["val_loss"].notna()]
+
+        fig, (ax_loss, ax_m) = plt.subplots(1, 2, figsize=(12, 4))
+        ax_loss.plot(df["epoch"], df["train_loss"], label="train loss (per batch)")
+        if not val.empty:
+            ax_loss.plot(val["epoch"], val["val_loss"], linestyle="--",
+                         label="val loss (whole set)")
+            ax_m.plot(val["epoch"], val["val_metric"], color="tab:green",
+                      label=f"val {self.metric_name}")
+            if self.metric_name == "c-index":
+                ax_m.axhline(0.5, color="gray", linestyle=":", linewidth=1)
+            ax_m.legend()
+        ax_loss.set_ylabel("Loss")
+        ax_loss.legend()
+        ax_m.set_ylabel(self.metric_name)
+        for ax in (ax_loss, ax_m):
+            ax.set_xlabel("Epoch")
+            ax.grid(True, linestyle=":", alpha=0.6)
+        fig.tight_layout()
+        fig.savefig(self.plot_path, dpi=150)
+        plt.close(fig)
+        print(f"Loss plot saved to {self.plot_path}")
+
+
+# Arguments that define the weight shapes (--stains sets the number of stain
+# encoders): resuming with any of them changed is refused.
+_ARCH_ARGS = (
+    "task", "stains", "d_model", "stain_layers", "agg_layers", "n_heads",
+    "pool_att_dim", "no_gated_pool", "share_stain_encoder",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +190,17 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
 
 @torch.no_grad()
 def val_epoch(model, loader, device, task, criterion):
-    """Return (avg_loss, metric, preds, targets).
+    """Return (loss, metric, preds, targets).
 
     ``metric`` is the C-index (survival) or the MAE (regression, in whatever units
     the labels were fed in — see the normalisation block in main()).  ``preds`` and
     ``targets`` are returned so the caller can build the residual plot without a
     second pass over the validation set.
+
+    The survival loss is the Cox loss over the whole validation set as one risk
+    set, as in MIL.py: averaged over batches, most small batches hold zero or one
+    event and the average is mostly noise. Regression keeps the per-batch mean,
+    which does not depend on the batch composition.
     """
     model.eval()
     total_loss = 0.0
@@ -150,21 +208,22 @@ def val_epoch(model, loader, device, task, criterion):
     for batch in loader:
         Y = batch["Y"].to(device)
         pred = _predict(model, batch, device)
-        if task == "survival":
-            loss = cox_ph_loss(pred, Y[:, 0], Y[:, 1])
-        else:
-            loss = criterion(pred, Y[:, 0])
-        total_loss += loss.item()
-        preds.append(pred.cpu())
-        targets.append(Y.cpu())
+        if task != "survival":
+            total_loss += criterion(pred, Y[:, 0]).item()
+        preds.append(pred.float().cpu())
+        targets.append(Y.float().cpu())
 
-    preds = torch.cat(preds).numpy()
-    targets = torch.cat(targets).numpy()
+    preds_t, targets_t = torch.cat(preds), torch.cat(targets)
+    if task == "survival":
+        loss = cox_ph_loss(preds_t, targets_t[:, 0], targets_t[:, 1]).item()
+    else:
+        loss = total_loss / max(len(loader), 1)
+    preds, targets = preds_t.numpy(), targets_t.numpy()
     if task == "survival":
         metric = concordance_index(preds, targets[:, 0], targets[:, 1])
     else:
         metric = float(np.abs(preds - targets[:, 0]).mean())
-    return total_loss / max(len(loader), 1), metric, preds, targets
+    return loss, metric, preds, targets
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +393,24 @@ def main():
     parser.add_argument(
         "--save_every", type=int, default=10, help="Checkpoint every N epochs (0 = final only)."
     )
+    parser.add_argument(
+        "--event_sampling",
+        action="store_true",
+        help="Event-stratified batches (survival only): every training batch gets the "
+             "same share of events and a spread of follow-up times, as in MIL.py.",
+    )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume from a <checkpoint_name>_last.pth (written every epoch): restores "
+             "the weights, optimizer, epoch and best val metric, continues up to "
+             "--epochs, and appends to the existing loss log. Pass the same "
+             "architecture arguments as the original run.",
+    )
 
     args = parser.parse_args()
+    if args.event_sampling and args.task != "survival":
+        parser.error("--event_sampling only applies to --task survival.")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -417,13 +492,32 @@ def main():
         else None
     )
 
+    if args.event_sampling:
+        # Labels are raw [time, event] for survival (only regression is z-scored).
+        batch_sampler = EventStratifiedBatchSampler.from_labels(
+            [r["label"][1] for r in train_records],
+            [r["label"][0] for r in train_records],
+            args.batch_size,
+        )
+        lo, hi = batch_sampler.events_per_batch()
+        print(
+            f"Event-stratified batches: {len(batch_sampler)} per epoch, "
+            f"{lo}-{hi} events each"
+        )
+        loader_kwargs = dict(batch_sampler=batch_sampler)
+    else:
+        loader_kwargs = dict(
+            batch_size=args.batch_size,
+            shuffle=True,
+            # A short last batch makes a tiny Cox risk set; stratified batches
+            # are all near batch_size, so they need no dropping.
+            drop_last=(args.task == "survival" and len(train_ds) > args.batch_size),
+        )
     train_loader = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
-        drop_last=(args.task == "survival" and len(train_ds) > args.batch_size),
         worker_init_fn=_seed_worker,
+        **loader_kwargs,
     )
     val_loader = (
         DataLoader(
@@ -460,9 +554,28 @@ def main():
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     checkpoint_name = args.checkpoint_name or f"multistain_{args.task}.pth"
+    last_path = os.path.join(
+        args.checkpoint_dir, f"{os.path.splitext(checkpoint_name)[0]}_last.pth"
+    )
+    best_metric, best_epoch, start_epoch = None, None, 1
+    if args.resume:
+        done, best_metric, best_epoch = load_last_checkpoint(
+            args.resume, model, optimizer, args, device, parser, _ARCH_ARGS
+        )
+        start_epoch = done + 1
+        best_info = (
+            f", best val metric {best_metric:.4f} at epoch {best_epoch}"
+            if best_epoch is not None else ""
+        )
+        print(f"Resumed from {args.resume}: {done} epochs done{best_info}.")
+        if start_epoch > args.epochs:
+            print(f"Nothing to do: --epochs {args.epochs} already reached.")
+
     log_dir = args.log_dir or args.checkpoint_dir
-    logger = MultiStainLogger(log_dir)
     metric_name = "c-index" if args.task == "survival" else f"MAE({args.label_name})"
+    logger = MultiStainLogger(
+        log_dir, metric_name, resume_epoch=start_epoch - 1 if args.resume else None
+    )
     print(f"Loss log: {logger.csv_path}  |  val metric: {metric_name}")
 
     with open(os.path.join(args.checkpoint_dir, "multistain_config.json"), "w") as f:
@@ -493,8 +606,7 @@ def main():
         )
 
     # --- Training -------------------------------------------------------------
-    best_metric = None
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         train_loss = train_epoch(
             model,
             train_loader,
@@ -523,7 +635,7 @@ def main():
                 metric > best_metric if args.task == "survival" else metric < best_metric
             )
             if improved:
-                best_metric = metric
+                best_metric, best_epoch = metric, epoch
                 torch.save(
                     model.state_dict(),
                     os.path.join(args.checkpoint_dir, f"multistain_{args.task}_best.pth"),
@@ -537,11 +649,15 @@ def main():
             torch.save(model.state_dict(), ckpt)
             print(f"  → checkpoint: {ckpt}")
 
+        save_last_checkpoint(
+            last_path, model, optimizer, epoch, best_metric, best_epoch, args
+        )
+
     final_path = os.path.join(args.checkpoint_dir, checkpoint_name)
     torch.save(model.state_dict(), final_path)
     print(f"Model saved to {final_path}")
     if best_metric is not None:
-        print(f"Best val {metric_name}: {best_metric:.4f}")
+        print(f"Best val {metric_name}: {best_metric:.4f} at epoch {best_epoch}")
 
     logger.save_plot()
 

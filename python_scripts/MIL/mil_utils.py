@@ -413,22 +413,40 @@ class EventStratifiedBatchSampler(torch.utils.data.Sampler):
     which gives each event more comparisons in its risk set. Batch membership
     is still re-randomised every epoch.
 
-    With ``one_per_biopsy`` the unit is the biopsy, as in BiopsySampler: each
-    epoch draws one slide per biopsy. Event and time come from the labels table.
-    Uses Python's ``random``, whose state --resume restores.
+    A unit is a list of dataset indices sharing one label, of which each epoch
+    draws one: build with ``from_bags`` (slides; with ``one_per_biopsy`` the unit
+    is the biopsy, as in BiopsySampler) or ``from_labels`` (one index per unit,
+    e.g. the biopsy records of multistain_MIL.py). Uses Python's ``random``,
+    whose state --resume restores.
     """
 
-    def __init__(self, dataset, table, batch_size, one_per_biopsy=False):
+    def __init__(self, units, event, time, batch_size):
+        self._units = units
+        self._event = np.asarray(event, dtype=int)
+        self._time = np.asarray(time, dtype=float)
+        self.n_batches = max(1, -(-len(self._units) // batch_size))  # ceil
+
+    @classmethod
+    def from_bags(cls, dataset, table, batch_size, one_per_biopsy=False):
+        """Slides of a BagDataset; event and time from the labels table."""
         names = dataset.bag_names
         units = {}
         for i, name in enumerate(names):
             key = bag_group(name, table) if one_per_biopsy else name
             units.setdefault(key, []).append(i)
-        self._units = list(units.values())
-        first = [names[u[0]] for u in self._units]
-        self._event = table.loc[first, "event"].to_numpy(dtype=int)
-        self._time = table.loc[first, "time"].to_numpy(dtype=float)
-        self.n_batches = max(1, -(-len(self._units) // batch_size))  # ceil
+        units = list(units.values())
+        first = [names[u[0]] for u in units]
+        return cls(
+            units,
+            table.loc[first, "event"].to_numpy(dtype=int),
+            table.loc[first, "time"].to_numpy(dtype=float),
+            batch_size,
+        )
+
+    @classmethod
+    def from_labels(cls, event, time, batch_size):
+        """One dataset index per unit, with its event flag and follow-up time."""
+        return cls([[i] for i in range(len(event))], event, time, batch_size)
 
     def events_per_batch(self):
         """(min, max) events per batch — fixed by construction."""
@@ -532,6 +550,78 @@ def build_dataset(
         train_labels = scan_labels_fn(labels_path, train_names)
         val_labels = scan_labels_fn(labels_path, val_names) if val_names else None
     return train_ds, val_ds, train_labels, val_labels
+
+
+# ---------------------------------------------------------------------------
+# Resumable checkpoints (MIL.py, multistain_MIL.py)
+# ---------------------------------------------------------------------------
+def save_last_checkpoint(path, model, optimizer, epoch, best_metric, best_epoch, args):
+    """Write everything needed to resume after ``epoch``, atomically.
+
+    The weights-only checkpoints (_epochN, _best, final) stay as they are for the
+    evaluation scripts; this one adds the optimizer state (Adam's moment
+    estimates), the epoch, the best val metric so far, the torch / Python /
+    NumPy RNG states and the run's arguments. It is written to a temporary file
+    and renamed, so a crash during the save leaves the previous checkpoint intact.
+    """
+    state = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "best_metric": best_metric,
+        "best_epoch": best_epoch,
+        "args": vars(args),
+        "torch_rng": torch.get_rng_state(),
+        "python_rng": random.getstate(),
+        "numpy_rng": np.random.get_state(),
+    }
+    tmp = path + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def load_last_checkpoint(path, model, optimizer, args, device, parser, arch_args):
+    """Restore a save_last_checkpoint file; return (epoch, best_metric, best_epoch).
+
+    ``arch_args`` names the arguments that define the weight shapes: a resume
+    with any of them changed cannot load the weights, so it is refused with a
+    clear message. Other changed arguments only print a warning; --lr and
+    --weight_decay from the resume command line override the saved ones.
+    """
+    state = torch.load(path, map_location=device, weights_only=False)
+    saved = state["args"]
+    changed = [k for k in arch_args if saved.get(k) != getattr(args, k)]
+    if changed:
+        parser.error(
+            "--resume: the checkpoint was trained with a different architecture ("
+            + ", ".join(f"{k}={saved.get(k)!r}, now {getattr(args, k)!r}" for k in changed)
+            + "). Pass the same values to resume."
+        )
+    ignore = {"resume", "epochs", "num_workers", "mem_debug"}
+    for k, v in sorted(vars(args).items()):
+        if k not in ignore and k not in arch_args and k in saved and saved[k] != v:
+            print(f"Warning: --{k} was {saved[k]!r} in the checkpoint, now {v!r}.")
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    # The optimizer state carries the old learning rate and weight decay; the
+    # resume command line wins, so either can be changed mid-run. Checkpoints
+    # from before --weight_decay were saved by Adam, whose state carries
+    # decoupled_weight_decay=False; it is forced back on so the decay stays
+    # AdamW's (PyTorch versions without the key always decouple in AdamW).
+    for group in optimizer.param_groups:
+        group["lr"] = args.lr
+        group["weight_decay"] = args.weight_decay
+        if "decoupled_weight_decay" in group:
+            group["decoupled_weight_decay"] = True
+    # map_location moved every tensor to `device`, but the CPU generator only
+    # accepts a CPU ByteTensor.
+    torch.set_rng_state(state["torch_rng"].cpu())
+    random.setstate(state["python_rng"])
+    if "numpy_rng" in state:  # absent in MIL.py checkpoints from before 2026-10-19
+        np.random.set_state(state["numpy_rng"])
+    # "best_cindex" is the key MIL.py checkpoints used before it was shared.
+    best = state.get("best_metric", state.get("best_cindex"))
+    return state["epoch"], best, state["best_epoch"]
 
 
 # ---------------------------------------------------------------------------

@@ -82,6 +82,8 @@ from torchmil.models import patch_gcn as patch_gcn_module
 
 from mil_utils import (
     load_authorized_slides,
+    load_last_checkpoint,
+    save_last_checkpoint,
     load_labels_table,
     make_collate_fn,
     GpuMemLogger,
@@ -151,68 +153,6 @@ _ARCH_ARGS = (
     "model_type", "att_dim", "hidden_dim", "n_layers", "n_heads", "n_layers_rep",
     "n_layers_att", "K", "n_gcn_layers", "mlp_depth", "use_diagnosis", "diag_dim",
 )
-
-
-def save_last_checkpoint(path, model, optimizer, epoch, best_cindex, best_epoch, args):
-    """Write everything needed to resume after ``epoch``, atomically.
-
-    The weights-only checkpoints (_epochN, _best, final) stay as they are for the
-    evaluation scripts; this one adds the optimizer state (Adam's moment
-    estimates), the epoch, the best val C-index so far, the RNG states and the
-    run's arguments. It is written to a temporary file and renamed, so a crash
-    during the save leaves the previous checkpoint intact.
-    """
-    import random
-
-    state = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "epoch": epoch,
-        "best_cindex": best_cindex,
-        "best_epoch": best_epoch,
-        "args": vars(args),
-        "torch_rng": torch.get_rng_state(),
-        "python_rng": random.getstate(),
-    }
-    tmp = path + ".tmp"
-    torch.save(state, tmp)
-    os.replace(tmp, path)
-
-
-def load_last_checkpoint(path, model, optimizer, args, device, parser):
-    """Restore a save_last_checkpoint file; return (epoch, best_cindex, best_epoch)."""
-    import random
-
-    state = torch.load(path, map_location=device, weights_only=False)
-    saved = state["args"]
-    changed = [k for k in _ARCH_ARGS if saved.get(k) != getattr(args, k)]
-    if changed:
-        parser.error(
-            "--resume: the checkpoint was trained with a different architecture ("
-            + ", ".join(f"{k}={saved.get(k)!r}, now {getattr(args, k)!r}" for k in changed)
-            + "). Pass the same values to resume."
-        )
-    ignore = {"resume", "epochs", "num_workers", "mem_debug"}
-    for k, v in sorted(vars(args).items()):
-        if k not in ignore and k not in _ARCH_ARGS and k in saved and saved[k] != v:
-            print(f"Warning: --{k} was {saved[k]!r} in the checkpoint, now {v!r}.")
-    model.load_state_dict(state["model"])
-    optimizer.load_state_dict(state["optimizer"])
-    # The optimizer state carries the old learning rate and weight decay; the
-    # resume command line wins, so either can be changed mid-run. Checkpoints
-    # from before --weight_decay were saved by Adam, whose state carries
-    # decoupled_weight_decay=False; it is forced back on so the decay stays
-    # AdamW's (PyTorch versions without the key always decouple in AdamW).
-    for group in optimizer.param_groups:
-        group["lr"] = args.lr
-        group["weight_decay"] = args.weight_decay
-        if "decoupled_weight_decay" in group:
-            group["decoupled_weight_decay"] = True
-    # map_location moved every tensor to `device`, but the CPU generator only
-    # accepts a CPU ByteTensor.
-    torch.set_rng_state(state["torch_rng"].cpu())
-    random.setstate(state["python_rng"])
-    return state["epoch"], state["best_cindex"], state["best_epoch"]
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +542,7 @@ def main():
     # each epoch from the fixed seed in val_epoch, so validation stays
     # deterministic.
     if args.event_sampling:
-        _batch_sampler = EventStratifiedBatchSampler(
+        _batch_sampler = EventStratifiedBatchSampler.from_bags(
             train_dataset, table, args.batch_size, one_per_biopsy=args.biopsy_sampling
         )
         lo, hi = _batch_sampler.events_per_batch()
@@ -709,7 +649,7 @@ def main():
     best_cindex, best_epoch, start_epoch = -1.0, None, 1
     if args.resume:
         done, best_cindex, best_epoch = load_last_checkpoint(
-            args.resume, model, optimizer, args, device, parser
+            args.resume, model, optimizer, args, device, parser, _ARCH_ARGS
         )
         start_epoch = done + 1
         best_info = (
