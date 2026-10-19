@@ -146,7 +146,7 @@ class MultiStainLogger(LossLogger):
 # encoders): resuming with any of them changed is refused.
 _ARCH_ARGS = (
     "task", "stains", "d_model", "stain_layers", "agg_layers", "n_heads",
-    "pool_att_dim", "no_gated_pool", "share_stain_encoder",
+    "pool_att_dim", "no_gated_pool", "share_stain_encoder", "per_slide",
 )
 
 
@@ -154,7 +154,12 @@ _ARCH_ARGS = (
 # Train / validation loops
 # ---------------------------------------------------------------------------
 def _predict(model, batch, device):
-    return model(batch["X"].to(device), batch["stain_mask"].to(device))
+    slide_mask = batch.get("slide_mask")
+    return model(
+        batch["X"].to(device),
+        batch["stain_mask"].to(device),
+        slide_mask=None if slide_mask is None else slide_mask.to(device),
+    )
 
 
 def _seed_worker(worker_id):
@@ -332,8 +337,25 @@ def main():
         "--patches_per_stain",
         type=int,
         default=512,
-        help="Patches sampled per stain per biopsy. Drives memory: one sample costs "
-             "n_stains x patches_per_stain x feat_dim floats.",
+        help="Patches sampled per stain per biopsy — per slide with --per_slide. "
+             "Drives memory: one sample costs n_stains x patches_per_stain x feat_dim "
+             "floats (x max_slides with --per_slide).",
+    )
+    parser.add_argument(
+        "--per_slide",
+        action="store_true",
+        help="Encode each slide of a stain separately and let an attention pool "
+             "weight the slides into the stain token, instead of pooling all the "
+             "stain's patches into one bag. --patches_per_stain then counts patches "
+             "per slide.",
+    )
+    parser.add_argument(
+        "--max_slides",
+        type=int,
+        default=4,
+        help="With --per_slide: slide slots per stain. A stain with more slides "
+             "uses a random subset each training epoch and the first ones (by name) "
+             "for validation.",
     )
     parser.add_argument(
         "--stain_dropout",
@@ -482,6 +504,8 @@ def main():
         patches_per_stain=args.patches_per_stain,
         random_subsample=True,
         stain_dropout=args.stain_dropout,
+        per_slide=args.per_slide,
+        max_slides=args.max_slides,
     )
     # Validation keeps every stain (and the deterministic patch selection) so the
     # metric measures the model, not the draw.
@@ -492,6 +516,8 @@ def main():
             patches_per_stain=args.patches_per_stain,
             random_subsample=False,
             feat_dim=train_ds.feat_dim,
+            per_slide=args.per_slide,
+            max_slides=args.max_slides,
         )
         if val_records
         else None
@@ -548,6 +574,7 @@ def main():
         gated=not args.no_gated_pool,
         out_dim=1,
         share_stain_encoder=args.share_stain_encoder,
+        per_slide=args.per_slide,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: feat_dim={train_ds.feat_dim}, {n_params / 1e6:.1f}M parameters")
@@ -600,6 +627,8 @@ def main():
                 "pool_att_dim": args.pool_att_dim,
                 "gated": not args.no_gated_pool,
                 "share_stain_encoder": args.share_stain_encoder,
+                "per_slide": args.per_slide,
+                "max_slides": args.max_slides,
                 # Inverse transform for the model output: raw = pred * std + mean.
                 # Identity (0, 1) for survival, where the Cox score has no units.
                 "label_name": args.label_name,

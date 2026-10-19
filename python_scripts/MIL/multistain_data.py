@@ -243,6 +243,13 @@ class MultiStainBiopsyDataset(Dataset):
         stain_dropout: Probability of masking out each *available* stain, drawn
             independently per stain on every access (see ``__getitem__``). Training-time
             augmentation only — leave at 0.0 for validation / inference.
+        per_slide: Keep the slides of a stain apart instead of pooling their
+            patches: ``X`` becomes ``(n_stains, max_slides, patches_per_stain, D)``
+            — ``patches_per_stain`` patches *per slide* — with a ``slide_mask``
+            ``(n_stains, max_slides)``, for MultiStainFusion(per_slide=True).
+        max_slides: Slide slots per stain in per-slide mode. A stain with more
+            slides uses a fresh random subset of them on each training access and
+            the first ``max_slides`` (by name) otherwise.
     """
 
     def __init__(
@@ -253,11 +260,15 @@ class MultiStainBiopsyDataset(Dataset):
         random_subsample: bool = True,
         feat_dim: int = None,
         stain_dropout: float = 0.0,
+        per_slide: bool = False,
+        max_slides: int = 4,
     ) -> None:
         self.records = list(records)
         self.n_stains = n_stains
         self.patches_per_stain = patches_per_stain
         self.random_subsample = random_subsample
+        self.per_slide = per_slide
+        self.max_slides = max_slides
         self.stain_dropout = float(stain_dropout)
         if not 0.0 <= self.stain_dropout < 1.0:
             raise ValueError(f"stain_dropout must be in [0, 1), got {stain_dropout}.")
@@ -292,8 +303,47 @@ class MultiStainBiopsyDataset(Dataset):
         keep = [s for s in stain_ids if np.random.rand() >= self.stain_dropout]
         return keep or [stain_ids[np.random.randint(len(stain_ids))]]
 
+    def _slide_paths(self, paths) -> list:
+        """At most ``max_slides`` of a stain's slides for this access."""
+        paths = sorted(paths)
+        if len(paths) <= self.max_slides:
+            return paths
+        if self.random_subsample:
+            pick = np.random.choice(len(paths), self.max_slides, replace=False)
+            return [paths[k] for k in sorted(pick)]
+        return paths[: self.max_slides]
+
+    def _getitem_per_slide(self, rec):
+        X = torch.zeros(
+            self.n_stains, self.max_slides, self.patches_per_stain, self.feat_dim,
+            dtype=torch.float32,
+        )
+        slide_mask = torch.zeros(self.n_stains, self.max_slides, dtype=torch.bool)
+        for stain_idx in self._keep_stains(rec):
+            for slot, path in enumerate(self._slide_paths(rec["slides"][stain_idx])):
+                bag = _read_stain_bag([path], self.patches_per_stain, self.random_subsample)
+                if bag is None:
+                    continue
+                X[stain_idx, slot] = bag
+                slide_mask[stain_idx, slot] = True
+
+        if not bool(slide_mask.any()):
+            # Same guard as the pooled path: one zero-filled slide keeps the sample
+            # valid instead of an all-False mask (undefined softmax).
+            print(f"[WARN] {rec['biopsy']}: no usable patches; using a zero bag.")
+            slide_mask[next(iter(rec["slides"]), 0), 0] = True
+
+        return {
+            "X": X,
+            "slide_mask": slide_mask,
+            "stain_mask": slide_mask.any(-1),
+            "Y": torch.as_tensor(rec["label"], dtype=torch.float32).view(-1),
+        }
+
     def __getitem__(self, i):
         rec = self.records[i]
+        if self.per_slide:
+            return self._getitem_per_slide(rec)
         X = torch.zeros(
             self.n_stains, self.patches_per_stain, self.feat_dim, dtype=torch.float32
         )

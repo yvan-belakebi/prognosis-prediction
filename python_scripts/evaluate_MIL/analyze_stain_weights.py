@@ -179,6 +179,8 @@ def build_model_from_config(cfg: dict) -> MultiStainFusion:
         gated=cfg["gated"],
         out_dim=1,
         share_stain_encoder=cfg["share_stain_encoder"],
+        # Absent in configs written before per-slide encoding existed.
+        per_slide=cfg.get("per_slide", False),
     )
 
 
@@ -228,6 +230,12 @@ def decompose(head: nn.Module, a: torch.Tensor, t: torch.Tensor, mask: torch.Ten
     return contrib, const
 
 
+def _slide_mask(batch, device):
+    """The batch's slide mask (per-slide models), else None."""
+    m = batch.get("slide_mask")
+    return None if m is None else m.to(device)
+
+
 @torch.no_grad()
 def collect(model, loader, device, check_tol=1e-4):
     """Run the model and return predictions, contributions, attention and masks."""
@@ -241,7 +249,9 @@ def collect(model, loader, device, check_tol=1e-4):
         for batch in loader:
             X = batch["X"].to(device)
             mask = batch["stain_mask"].to(device)
-            pred, stain_att, _ = model(X, mask, return_att=True)
+            pred, stain_att, _ = model(
+                X, mask, return_att=True, slide_mask=_slide_mask(batch, device)
+            )
 
             a = torch.softmax(stain_att.masked_fill(~mask, -torch.inf), dim=1)
             contrib, const = decompose(model.head, a, captured["t"], mask)
@@ -290,7 +300,7 @@ def predict_with_mask(model, loader, device, drop_stain=None):
             mask = mask.clone()
             mask[can_drop, drop_stain] = False
             keep = can_drop
-        preds.append(model(X, mask).cpu())
+        preds.append(model(X, mask, slide_mask=_slide_mask(batch, device)).cpu())
         usable.append(keep.cpu())
     return torch.cat(preds).numpy(), torch.cat(usable).numpy()
 
@@ -712,6 +722,8 @@ def main():
         patches_per_stain=args.patches_per_stain or cfg["patches_per_stain"],
         random_subsample=False,
         feat_dim=cfg["feat_dim"],
+        per_slide=cfg.get("per_slide", False),
+        max_slides=cfg.get("max_slides", 4),
     )
     loader = DataLoader(
         ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
