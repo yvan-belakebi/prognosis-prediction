@@ -44,7 +44,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from mil_utils import StainVocabulary, bag_group, canon_stain, discover_bags  # noqa: F401
+from mil_utils import (  # noqa: F401
+    StainVocabulary,
+    bag_group,
+    canon_stain,
+    discover_bags,
+    drop_empty_bags,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,14 +77,16 @@ def index_biopsies(
          "bag_names": [bag name, ...]}
 
     Slides are dropped when they are not in the table, have no label file, have
-    a stain outside ``vocab``, or are excluded by ``authorized_slides``.
-    Biopsies left with fewer than ``min_stains`` stains are dropped.
+    a stain outside ``vocab``, are excluded by ``authorized_slides``, or their
+    feature file is empty or unreadable (a truncated .h5 from an interrupted
+    extraction — listed by drop_empty_bags rather than crashing a worker
+    mid-epoch). Biopsies left with fewer than ``min_stains`` stains are dropped.
     """
     bags = discover_bags(features_path, extensions=(file_ext,))
     labelled = set(discover_bags(labels_path, extensions=(".npy",)))
 
     dropped = {"unauthorized": 0, "no_label": 0, "not_in_csv": 0, "other_stain": 0}
-    groups = {}
+    candidates = []
     for bag in bags:
         if authorized_slides is not None and bag not in authorized_slides:
             dropped["unauthorized"] += 1
@@ -93,7 +101,16 @@ def index_biopsies(
         if stain_idx is None:
             dropped["other_stain"] += 1
             continue
+        candidates.append((bag, stain_idx))
 
+    # Header-only check of the slides that would be used.
+    usable = set(drop_empty_bags(features_path, [b for b, _ in candidates], file_ext))
+    dropped["empty_or_unreadable"] = len(candidates) - len(usable)
+
+    groups = {}
+    for bag, stain_idx in candidates:
+        if bag not in usable:
+            continue
         biopsy = bag_group(bag, table)
         rec = groups.setdefault(
             biopsy, {"biopsy": biopsy, "label": None, "slides": {}, "bag_names": []}
@@ -114,7 +131,8 @@ def index_biopsies(
             f"    dropped slides — no label: {dropped['no_label']}, "
             f"not in labels CSV: {dropped['not_in_csv']}, "
             f"stain not in vocabulary: {dropped['other_stain']}, "
-            f"not authorized: {dropped['unauthorized']}"
+            f"not authorized: {dropped['unauthorized']}, "
+            f"empty or unreadable: {dropped['empty_or_unreadable']}"
         )
         if n_short:
             print(f"    dropped {n_short} biopsies with < {min_stains} stain(s)")

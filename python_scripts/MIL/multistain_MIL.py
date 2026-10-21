@@ -352,8 +352,8 @@ def main():
     parser.add_argument(
         "--max_slides",
         type=int,
-        default=4,
-        help="With --per_slide: slide slots per stain. A stain with more slides "
+        default=None,
+        help="With --per_slide (default 4): slide slots per stain. A stain with more slides "
              "uses a random subset each training epoch and the first ones (by name) "
              "for validation.",
     )
@@ -431,6 +431,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.max_slides is not None and not args.per_slide:
+        parser.error("--max_slides only applies with --per_slide.")
+    if args.per_slide and args.max_slides is None:
+        args.max_slides = 4
     if args.event_sampling and args.task != "survival":
         parser.error("--event_sampling only applies to --task survival.")
 

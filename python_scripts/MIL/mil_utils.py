@@ -212,7 +212,11 @@ class StainVocabulary:
         self.names = []
         self._lookup = {}
         for i, spec in enumerate(specs):
-            aliases = [a.strip() for a in str(spec).split("|") if a.strip()]
+            # Strip list punctuation too: `--stains ["HE", "PAS"]` reaches argparse
+            # as '[HE,' and 'PAS]', which would otherwise become the display names.
+            aliases = [
+                a.strip(" []'\",") for a in str(spec).split("|") if a.strip(" []'\",")
+            ]
             if not aliases:
                 raise ValueError(f"Empty stain spec: {spec!r}")
             self.names.append(aliases[0])
