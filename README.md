@@ -169,3 +169,17 @@ python python_scripts/evaluate_MIL/analyze_stain_weights.py --checkpoint checkpo
 # what looks like stain importance is really panel-composition signal.
 # The ablation is most meaningful when the model was trained with --stain_dropout > 0,
 # which makes a masked stain in-distribution rather than a distribution shift.
+
+8) Stain fusion: voting over single-stain models
+
+Combines the per-stain MIL.py models from train_per_stain.sh without training anything: each
+model's per-biopsy risk becomes a percentile of its own training-split scores (rank voting), and a
+biopsy's fused risk is the mean over the stains it has (missing stains do not vote). With
+--weighting cindex each stain votes with weight max(C_val - 0.5, 0), fixed on the validation split.
+
+# Score every stain model on train/val/test, fuse (unweighted and C-index-weighted), and compare
+# each fusion with each single stain on the test split (results/compare/voting_*_vs_*_test.txt)
+./vote_across_stains.sh
+
+# Or fuse existing evaluate_survival.py outputs directly
+python python_scripts/evaluate_MIL/fuse_votes.py --models HE_HES PAS PASM Congo Trichrome Sirius_red Immune --pattern "results/eval/{split}/{model}/risk_scores.csv" --method rank --weighting cindex --output_dir results/eval/voting_rank_cindex
