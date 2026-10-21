@@ -314,3 +314,142 @@ class MultiStainFusion(nn.Module):
                 slide_att[b_idx, s] = s_att.masked_fill(~m, float("nan"))
                 patch_att[b_idx[pairs[0]], s, pairs[1]] = att
         return tokens, stain_mask, ((slide_att, patch_att) if return_att else None)
+
+
+# ---------------------------------------------------------------------------
+# Early fusion
+# ---------------------------------------------------------------------------
+class _StainWeightedSum(nn.Module):
+    """z = sum_s A_s * t_s — a named step so tools can hook the per-stain terms.
+
+    analyze_stain_weights.py hooks the ``stain_pool`` module's input to read the
+    per-stain tokens, exactly as for MultiStainFusion.
+    """
+
+    def forward(self, t: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        return (A.unsqueeze(-1) * t).sum(1)
+
+
+class EarlyFusionMIL(nn.Module):
+    """Early fusion: one attention-pooled bag of the patches of every stain.
+
+    Every patch of every stain goes through the same projection; a learned stain
+    embedding is added so the model knows which stain a patch shows; then one
+    gated attention pool runs over all patches of the biopsy at once, so patches
+    of different stains compete directly for attention. Unlike MultiStainFusion
+    there is no stain-specific encoder and no per-stain token stage. With
+    ``n_layers > 0`` a transformer runs over the joint bag first, letting patches
+    of different stains attend to each other (cost grows with the square of the
+    total patch count, so keep the bag small).
+
+    The stains come from different, unregistered sections, so there is no
+    pixel-level correspondence to fuse: the patch level is as early as fusion can
+    happen here.
+
+    Takes and returns exactly what MultiStainFusion does — pooled ``X`` (B, S, P, D)
+    or per-slide ``X`` (B, S, M, P, D) with ``slide_mask`` — so the same training,
+    evaluation and analysis code runs on both. ``stain_att`` is log A_s, where
+    A_s is the share of the attention that falls on stain s: the attention-pooled
+    vector regroups exactly as z = sum_s A_s t_s, t_s being the attention-weighted
+    mean of stain s's patches, which is the per-stain form analyze_stain_weights.py
+    decomposes.
+
+    Arguments:
+        in_dim: Patch feature dimension.
+        n_stains: Size of the stain vocabulary.
+        d_model: Working dimension.
+        n_layers: Transformer layers over the joint bag (0 = attention pooling only).
+        n_heads: Attention heads of that transformer.
+        dropout: Dropout rate.
+        pool_att_dim: Hidden dimension of the attention-pooling MLP.
+        gated: Use gated attention pooling.
+        out_dim: Head outputs — 1 for a Cox risk score or a regression target.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        n_stains: int,
+        d_model: int = 256,
+        n_layers: int = 0,
+        n_heads: int = 8,
+        dropout: float = 0.1,
+        pool_att_dim: int = 128,
+        gated: bool = True,
+        out_dim: int = 1,
+    ) -> None:
+        super().__init__()
+        self.n_stains = n_stains
+        self.out_dim = out_dim
+        self.proj = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.stain_emb = nn.Parameter(torch.zeros(n_stains, d_model))
+        nn.init.normal_(self.stain_emb, std=0.02)
+        self.encoder = (
+            _transformer(d_model, n_layers, n_heads, dropout) if n_layers > 0 else None
+        )
+        self.patch_pool = AttentionPool(in_dim=d_model, att_dim=pool_att_dim, gated=gated)
+        self.stain_pool = _StainWeightedSum()
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model), nn.Dropout(dropout), nn.Linear(d_model, out_dim)
+        )
+
+    def forward(
+        self,
+        X: torch.Tensor,
+        stain_mask: torch.Tensor,
+        return_att: bool = False,
+        slide_mask: torch.Tensor = None,
+    ):
+        """Same contract as MultiStainFusion.forward (see there)."""
+        per_slide = X.dim() == 5
+        if per_slide:
+            if slide_mask is None:
+                raise ValueError("Per-slide input (B, S, M, P, D) needs a slide_mask.")
+            B, S, M, P, _ = X.shape
+            slide_mask = slide_mask.bool() & stain_mask.bool().unsqueeze(-1)
+            patch_mask = slide_mask.unsqueeze(-1).expand(B, S, M, P)
+        else:
+            B, S, P, _ = X.shape
+            M = 1
+            patch_mask = stain_mask.bool().unsqueeze(-1).expand(B, S, P)
+        if S != self.n_stains:
+            raise ValueError(f"X has {S} stains but the model was built for {self.n_stains}.")
+        stain_mask = patch_mask.reshape(B, S, -1).any(-1)
+
+        # One joint bag of S * M * P patches, each carrying its stain embedding.
+        n = M * P
+        H = self.proj(X.reshape(B, S * n, X.shape[-1]))
+        H = H + self.stain_emb.repeat_interleave(n, dim=0).unsqueeze(0)
+        mask = patch_mask.reshape(B, S * n)
+        if self.encoder is not None:
+            H = self.encoder(H, src_key_padding_mask=~mask)
+
+        _, logits = self.patch_pool(H, mask.float(), return_att=True)  # (B, S*n)
+        a = torch.softmax(logits.masked_fill(~mask, float("-inf")), dim=1)
+
+        # Regroup z = sum_i a_i h_i by stain: A_s = attention mass of stain s,
+        # t_s = attention-weighted mean of its patches.
+        a_s = a.reshape(B, S, n)
+        A = a_s.sum(-1)  # (B, S)
+        t = (a_s.unsqueeze(-1) * H.reshape(B, S, n, -1)).sum(2)
+        t = t / A.clamp_min(1e-12).unsqueeze(-1)
+        z = self.stain_pool(t, A)
+
+        out = self.head(z)
+        if self.out_dim == 1:
+            out = out.squeeze(-1)
+        if not return_att:
+            return out
+        stain_att = torch.log(A.clamp_min(1e-30)).masked_fill(~stain_mask, float("nan"))
+        patch_att = logits.masked_fill(~mask, float("nan"))
+        if per_slide:
+            patch_att = patch_att.reshape(B, S, M, P)
+            # Slide "attention": the log attention mass of each slide.
+            slide_att = torch.log(a.reshape(B, S, M, P).sum(-1).clamp_min(1e-30))
+            return out, stain_att, (slide_att.masked_fill(~slide_mask, float("nan")), patch_att)
+        return out, stain_att, patch_att.reshape(B, S, P)

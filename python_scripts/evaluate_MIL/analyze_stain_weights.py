@@ -91,7 +91,7 @@ from multistain_data import (  # noqa: E402
     index_biopsies,
     split_records,
 )
-from multistain_model import MultiStainFusion  # noqa: E402
+from multistain_model import EarlyFusionMIL, MultiStainFusion  # noqa: E402
 from evaluate_survival import concordance_index  # noqa: E402
 
 
@@ -166,7 +166,20 @@ def new_figure(theme: dict, **kwargs):
 # ---------------------------------------------------------------------------
 # Model reconstruction
 # ---------------------------------------------------------------------------
-def build_model_from_config(cfg: dict) -> MultiStainFusion:
+def build_model_from_config(cfg: dict):
+    # "fusion" is absent in configs written before early fusion existed.
+    if cfg.get("fusion", "unicorn") == "early":
+        return EarlyFusionMIL(
+            in_dim=cfg["feat_dim"],
+            n_stains=len(cfg["stain_names"]),
+            d_model=cfg["d_model"],
+            n_layers=cfg.get("early_layers", 0),
+            n_heads=cfg["n_heads"],
+            dropout=cfg["dropout"],
+            pool_att_dim=cfg["pool_att_dim"],
+            gated=cfg["gated"],
+            out_dim=1,
+        )
     return MultiStainFusion(
         in_dim=cfg["feat_dim"],
         n_stains=len(cfg["stain_names"]),

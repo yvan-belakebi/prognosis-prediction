@@ -196,3 +196,15 @@ were ordered rather than from the images. Run as part of ./vote_across_stains.sh
 
 python python_scripts/evaluate_MIL/fuse_late.py --models HE_HES PAS PASM Congo Trichrome Sirius_red Immune --pattern "results/eval/{split}/{model}/risk_scores.csv" --output_dir results/eval/late_fusion
 # Writes test/risk_scores.csv (for compare_cindex.py), coefficients.csv, cv.csv and summary.csv.
+
+10) Stain fusion: early fusion (one bag of all stains' patches)
+
+multistain_MIL.py --fusion early: every patch of every stain goes through one shared projection, a
+learned stain embedding is added, and a single attention pool runs over the patches of all stains
+at once, so patches of different stains compete directly (no stain-specific encoders, no per-stain
+token stage as in UNICORN). --early_layers N adds N transformer layers over the joint bag first
+(cost grows with the square of the total patch count). Everything else is shared with UNICORN:
+--per_slide, --stain_dropout, --event_sampling, --resume, the val C-index / best checkpoint, the
+test split, and analyze_stain_weights.py (per-stain contributions and ablation).
+
+python python_scripts/MIL/multistain_MIL.py --task survival --fusion early --features_path WSI/whole_registry/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/whole_registry/labels --labels_csv label_csvs/labels_super_stain.csv --stains HE-HES Congo Trichrome PAS PASM Immune --patches_per_stain 512 --stain_dropout 0.2 --event_sampling --checkpoint_dir checkpoints_early --log_dir results/losses_early

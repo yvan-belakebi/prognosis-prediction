@@ -84,7 +84,7 @@ from multistain_data import (  # noqa: E402
     index_biopsies,
     split_records,
 )
-from multistain_model import MultiStainFusion  # noqa: E402
+from multistain_model import EarlyFusionMIL, MultiStainFusion  # noqa: E402
 from MIL import cox_ph_loss  # noqa: E402
 from evaluate_survival import concordance_index  # noqa: E402
 
@@ -147,6 +147,7 @@ class MultiStainLogger(LossLogger):
 _ARCH_ARGS = (
     "task", "stains", "d_model", "stain_layers", "agg_layers", "n_heads",
     "pool_att_dim", "no_gated_pool", "share_stain_encoder", "per_slide",
+    "fusion", "early_layers",
 )
 
 
@@ -368,6 +369,23 @@ def main():
     )
 
     # --- Model ---------------------------------------------------------------
+    parser.add_argument(
+        "--fusion",
+        default="unicorn",
+        choices=["unicorn", "early"],
+        help="unicorn: per-stain encoders -> one token per stain -> transformer "
+             "aggregator. early: one shared projection + stain embedding for every "
+             "patch, then a single attention pool over the patches of all stains "
+             "(--stain_layers, --agg_layers and --share_stain_encoder do not apply).",
+    )
+    parser.add_argument(
+        "--early_layers",
+        type=int,
+        default=0,
+        help="--fusion early: transformer layers over the joint bag of all stains' "
+             "patches before pooling (0 = attention pooling only). Cost grows with "
+             "the square of n_stains x patches_per_stain (x max_slides).",
+    )
     parser.add_argument("--d_model", type=int, default=256, help="Token dimension.")
     parser.add_argument(
         "--stain_layers", type=int, default=2, help="Layers per stain encoder."
@@ -431,6 +449,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.early_layers and args.fusion != "early":
+        parser.error("--early_layers only applies with --fusion early.")
     if args.max_slides is not None and not args.per_slide:
         parser.error("--max_slides only applies with --per_slide.")
     if args.per_slide and args.max_slides is None:
@@ -566,22 +586,38 @@ def main():
     )
 
     # --- Model ---------------------------------------------------------------
-    model = MultiStainFusion(
-        in_dim=train_ds.feat_dim,
-        n_stains=len(vocab),
-        d_model=args.d_model,
-        stain_layers=args.stain_layers,
-        agg_layers=args.agg_layers,
-        n_heads=args.n_heads,
-        dropout=args.dropout,
-        pool_att_dim=args.pool_att_dim,
-        gated=not args.no_gated_pool,
-        out_dim=1,
-        share_stain_encoder=args.share_stain_encoder,
-        per_slide=args.per_slide,
-    ).to(device)
+    if args.fusion == "early":
+        model = EarlyFusionMIL(
+            in_dim=train_ds.feat_dim,
+            n_stains=len(vocab),
+            d_model=args.d_model,
+            n_layers=args.early_layers,
+            n_heads=args.n_heads,
+            dropout=args.dropout,
+            pool_att_dim=args.pool_att_dim,
+            gated=not args.no_gated_pool,
+            out_dim=1,
+        ).to(device)
+    else:
+        model = MultiStainFusion(
+            in_dim=train_ds.feat_dim,
+            n_stains=len(vocab),
+            d_model=args.d_model,
+            stain_layers=args.stain_layers,
+            agg_layers=args.agg_layers,
+            n_heads=args.n_heads,
+            dropout=args.dropout,
+            pool_att_dim=args.pool_att_dim,
+            gated=not args.no_gated_pool,
+            out_dim=1,
+            share_stain_encoder=args.share_stain_encoder,
+            per_slide=args.per_slide,
+        ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model: feat_dim={train_ds.feat_dim}, {n_params / 1e6:.1f}M parameters")
+    print(
+        f"Model: {args.fusion} fusion, feat_dim={train_ds.feat_dim}, "
+        f"{n_params / 1e6:.1f}M parameters"
+    )
 
     criterion = nn.MSELoss() if args.loss == "mse" else nn.L1Loss()
     optimizer = torch.optim.AdamW(
@@ -631,6 +667,8 @@ def main():
                 "pool_att_dim": args.pool_att_dim,
                 "gated": not args.no_gated_pool,
                 "share_stain_encoder": args.share_stain_encoder,
+                "fusion": args.fusion,
+                "early_layers": args.early_layers,
                 "per_slide": args.per_slide,
                 "max_slides": args.max_slides,
                 # Inverse transform for the model output: raw = pred * std + mean.
