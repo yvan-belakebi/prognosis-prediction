@@ -205,8 +205,10 @@ def concordance_index(risks, times, events, block=2000):
         discordant += int(np.sum(mask_B & (rj < ri)))
         tied += int(np.sum(mask_B & (rj == ri)))
 
+    # Harrell's definition: a comparable pair with tied risks counts half. (Counting
+    # it as 0 deflates any score with ties — a constant scored 0.0 instead of 0.5.)
     total = concordant + discordant + tied
-    return concordant / total if total > 0 else 0.5
+    return (concordant + 0.5 * tied) / total if total > 0 else 0.5
 
 
 def kaplan_meier(times, events):

@@ -70,6 +70,48 @@ def normalise(scores, reference, method):
     return (scores - ref.mean()) / (sd if sd > 0 else 1.0)
 
 
+def load_model_risks(models, pattern, splits, error):
+    """{(model, split): risk table} for every model and split; ``error`` reports a
+    missing file (argparse's parser.error)."""
+    risks = {}
+    for m in models:
+        for s in splits:
+            f = pattern.format(model=m, split=s)
+            if not os.path.isfile(f):
+                error(f"Missing {f} — run evaluate_survival.py --split {s} for {m}.")
+            risks[m, s] = load_risks(f)
+    return risks
+
+
+def split_votes(risks, models, split, reference_split, method):
+    """(votes, labels) for one split.
+
+    votes: biopsies x models, each model's risk normalised against its
+    ``reference_split`` scores, NaN where the model has no score (stain absent).
+    labels: time / event per biopsy, checked to agree across models.
+    """
+    votes, labels = {}, []
+    for m in models:
+        df = risks[m, split]
+        ref = risks[m, reference_split]["risk"].to_numpy(float)
+        votes[m] = pd.Series(
+            normalise(df["risk"].to_numpy(float), ref, method), index=df.index
+        )
+        labels.append(df[["time", "event"]])
+    votes = pd.DataFrame(votes)
+
+    # All models see the same labels CSV, so a biopsy's time/event must agree.
+    lab = pd.concat(labels)
+    clash = lab.groupby(level=0).nunique().gt(1).any(axis=1)
+    if clash.any():
+        raise ValueError(
+            f"{split}: {clash.sum()} biopsies have different time/event across "
+            f"models, e.g. {clash[clash].index[0]!r} — were the models evaluated "
+            "with the same labels CSV?"
+        )
+    return votes, lab.groupby(level=0).first().loc[votes.index]
+
+
 def cindex(df, col):
     """C-index of ``df[col]`` against time/event, or NaN without a usable pair."""
     if len(df) < 2 or df["event"].sum() == 0:
@@ -100,19 +142,10 @@ def main():
     p.add_argument("--output_dir", default="results/eval/voting")
     args = p.parse_args()
 
-    def path(model, split):
-        return args.pattern.format(model=model, split=split)
-
     needed = {args.reference_split, *args.splits}
     if args.weighting == "cindex":
         needed.add(args.weight_split)
-    risks = {}
-    for m in args.models:
-        for s in needed:
-            f = path(m, s)
-            if not os.path.isfile(f):
-                p.error(f"Missing {f} — run evaluate_survival.py --split {s} for {m}.")
-            risks[m, s] = load_risks(f)
+    risks = load_model_risks(args.models, args.pattern, needed, p.error)
 
     # One weight per model, fixed before any reported split is touched.
     weights = {m: 1.0 for m in args.models}
@@ -127,26 +160,9 @@ def main():
 
     summary = []
     for split in args.splits:
-        votes, labels = {}, []
-        for m in args.models:
-            df = risks[m, split]
-            ref = risks[m, args.reference_split]["risk"].to_numpy(float)
-            votes[m] = pd.Series(
-                normalise(df["risk"].to_numpy(float), ref, args.method), index=df.index
-            )
-            labels.append(df[["time", "event"]])
-        votes = pd.DataFrame(votes)  # biopsies x models, NaN where a stain is absent
-
-        # All models see the same labels CSV, so a biopsy's time/event must agree.
-        lab = pd.concat(labels)
-        clash = lab.groupby(level=0).nunique().gt(1).any(axis=1)
-        if clash.any():
-            raise ValueError(
-                f"{split}: {clash.sum()} biopsies have different time/event across "
-                f"models, e.g. {clash[clash].index[0]!r} — were the models evaluated "
-                "with the same labels CSV?"
-            )
-        lab = lab.groupby(level=0).first().loc[votes.index]
+        votes, lab = split_votes(
+            risks, args.models, split, args.reference_split, args.method
+        )
 
         w = pd.Series(weights)[votes.columns]
         present = votes.notna()

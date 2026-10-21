@@ -183,3 +183,16 @@ biopsy's fused risk is the mean over the stains it has (missing stains do not vo
 
 # Or fuse existing evaluate_survival.py outputs directly
 python python_scripts/evaluate_MIL/fuse_votes.py --models HE_HES PAS PASM Congo Trichrome Sirius_red Immune --pattern "results/eval/{split}/{model}/risk_scores.csv" --method rank --weighting cindex --output_dir results/eval/voting_rank_cindex
+
+9) Stain fusion: late fusion (stacked Cox) over single-stain models
+
+Learned counterpart of voting: a ridge-penalised Cox model whose features are each stain model's
+normalised risk (0 when the stain is absent) plus one stain-presence indicator per stain. It is
+fitted on the validation split — the single-stain models over-fit their training biopsies, so
+their training scores would make it over-trust every stain — with the ridge strength picked by
+5-fold cross-validation inside validation (one-standard-error rule). The test split is only scored.
+A presence-only model is reported alongside, to show how much of the C-index comes from which stains
+were ordered rather than from the images. Run as part of ./vote_across_stains.sh, or directly:
+
+python python_scripts/evaluate_MIL/fuse_late.py --models HE_HES PAS PASM Congo Trichrome Sirius_red Immune --pattern "results/eval/{split}/{model}/risk_scores.csv" --output_dir results/eval/late_fusion
+# Writes test/risk_scores.csv (for compare_cindex.py), coefficients.csv, cv.csv and summary.csv.
