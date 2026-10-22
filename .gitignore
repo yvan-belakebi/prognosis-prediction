@@ -52,3 +52,6 @@ WSI/
 *Haakon_tb_removed/
 # Compressed
 *.tar
+# Ignore results
+results/
+logs_train/
