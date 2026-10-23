@@ -63,9 +63,9 @@ def add_source_args(parser):
         'e.g. "is_IgA == True".',
     )
     parser.add_argument("--slide_col", default="ANON_name", help="Slide stem column.")
-    parser.add_argument("--biopsy_col", default="biop_number", help="Biopsy id column.")
+    parser.add_argument("--biopsy_col", default="biop_id", help="Biopsy id column.")
     parser.add_argument(
-        "--patient_col", default="AnonymizedID", help="Patient id column."
+        "--patient_col", default="patient_id", help="Patient id column."
     )
     parser.add_argument("--stain_col", default="Stain", help="Stain column.")
     parser.add_argument(
@@ -120,8 +120,13 @@ def assign_split(df, value_col, args, agg="first", event_col=None):
             )
         else:
             test_patients = select_val_patients(
-                df, "patient", value_col, frac=args.test_frac,
-                n_bins=args.n_bins, random_state=args.random_state, agg=agg,
+                df,
+                "patient",
+                value_col,
+                frac=args.test_frac,
+                n_bins=args.n_bins,
+                random_state=args.random_state,
+                agg=agg,
             )
     is_test = df["patient"].isin(test_patients)
     val_patients = select_val_patients(
