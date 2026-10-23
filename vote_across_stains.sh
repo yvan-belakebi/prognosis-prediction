@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 source stain_config.sh
 
 # Must match the architecture arguments used in train_per_stain.sh.
-MODEL_ARGS=(--model_type deepgraphsurv --hidden_dim 128)
+MODEL_ARGS=(--model_type deepgraphsurv --hidden_dim 64)
 
 models=()
 for stain in "${STAINS[@]}"; do

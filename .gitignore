@@ -54,4 +54,5 @@ WSI/
 *.tar
 # Ignore results
 results/
-logs_train/
+logs*
+copy_files.sh
