@@ -208,3 +208,19 @@ token stage as in UNICORN). --early_layers N adds N transformer layers over the 
 test split, and analyze_stain_weights.py (per-stain contributions and ablation).
 
 python python_scripts/MIL/multistain_MIL.py --task survival --fusion early --features_path WSI/whole_registry/20x_224px_0px_overlap/features_uni_v2 --labels_path WSI/whole_registry/labels --labels_csv label_csvs/labels_super_stain.csv --stains HE-HES Congo Trichrome PAS PASM Immune --patches_per_stain 512 --stain_dropout 0.2 --event_sampling --checkpoint_dir checkpoints_early --log_dir results/losses_early
+
+11) What the models capture: clinical baselines, within-diagnosis C-index, discordant pairs
+
+analyze_model_signal.py compares any set of models (single stains, voting, late fusion, UNICORN,
+early fusion — one --model NAME=path/{split}/risk_scores.csv each) on the test biopsies all of them
+scored, and asks what their shared signal is: C-index with bootstrap CIs; kidney failure vs death as
+endpoint; clinical Cox baselines (diagnosis, eGFR at biopsy, both, from the registry CSV) and each
+model's added value over diagnosis+eGFR (C-index gain with paired bootstrap CI, likelihood-ratio
+test); C-index within diagnosis; correlation of the models' risks (raw and after diagnosis+eGFR);
+and discordant pairs (by time gap, overlap between models, biopsies most often ranked wrongly).
+
+python python_scripts/evaluate_MIL/analyze_model_signal.py --model PAS="results/eval/{split}/PAS/risk_scores.csv" --model HE="results/eval/{split}/HE_HES/risk_scores.csv" --model voting="results/eval/voting_rank_none/{split}/risk_scores.csv" --model late="results/eval/late_fusion/{split}/risk_scores.csv" --output_dir results/model_signal
+
+# The added-value Cox models are fitted on val: for a model itself fitted on val (late fusion) the
+# likelihood-ratio p-value is in-sample — read the test-set C-index gain and its CI instead. The
+# hazard ratio per SD is shared with diagnosis/eGFR when the risk is collinear with them.
