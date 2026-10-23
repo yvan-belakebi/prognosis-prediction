@@ -12,8 +12,8 @@ for stain in "${STAINS[@]}"; do
     python python_scripts/MIL/MIL.py \
         --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
         --stains "$stain" \
-        --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 4 \
-        --lr 1e-4 --weight_decay 1e-3 --max_patches 4096 \
+        --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 50 \
+        --lr 3e-5 --weight_decay 1e-3 --max_patches 4096 \
         --batch_size 32 --biopsy_sampling --num_workers 14 --save_every 5 \
         --checkpoint_dir "checkpoints/$tag" --log_dir "results/losses/$tag" \
         > "logs_train_$tag.txt" 2>&1 \
@@ -29,8 +29,8 @@ echo "=== all stains (${STAINS[*]}) -> checkpoints/$tag ==="
 python python_scripts/MIL/MIL.py \
     --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
     --stains "${STAINS[@]}" \
-    --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 4 \
-    --lr 3e-5 --weight_decay 1e-3 --max_patches 4096 \
+    --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 50 \
+    --lr 1e-5 --weight_decay 1e-3 --max_patches 4096 \
     --batch_size 32 --num_workers 14 --save_every 5 \
     --checkpoint_dir "checkpoints/$tag" --log_dir "results/losses/$tag" \
     > "logs_train_$tag.txt" 2>&1 \
