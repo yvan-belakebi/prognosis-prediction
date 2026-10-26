@@ -33,6 +33,9 @@ Outputs (in --output_dir):
 
     stain_contributions.csv          one row per biopsy: prediction, label,
                                      per-stain contribution / attention / lift
+    risk_scores.csv                  survival only: biopsy, risk, time, event — the
+                                     evaluate_survival.py format, for compare_cindex.py,
+                                     fuse_*.py and analyze_model_signal.py
     stain_contribution_heatmap.png   biopsies (sorted by prediction) x stains
     stain_contribution_by_stain.png  cohort distribution per stain
     stain_waterfall.png              three example biopsies, low / median / high
@@ -776,6 +779,13 @@ def main():
     csv_path = os.path.join(args.output_dir, "stain_contributions.csv")
     df.to_csv(csv_path, index=False)
     print(f"  wrote {csv_path}")
+    if task == "survival":
+        # Same format as evaluate_survival.py, so multi-stain models enter
+        # compare_cindex.py, fuse_*.py and analyze_model_signal.py like any other.
+        risk_path = os.path.join(args.output_dir, "risk_scores.csv")
+        df.rename(columns={"prediction": "risk"})[["biopsy", "risk", "time", "event"]] \
+            .to_csv(risk_path, index=False)
+        print(f"  wrote {risk_path}")
 
     plot_df = df.fillna({f"contrib_{s}": 0.0 for s in stain_names})
     plot_heatmap(plot_df, stain_names, theme,

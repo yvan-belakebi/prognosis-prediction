@@ -195,7 +195,9 @@ def main():
     p.add_argument("--eval_split", default="test", help="Split everything is reported on.")
     p.add_argument("--registry_csv",
                    default="followup_data/derived/renamed/registry_anonymized.csv")
-    p.add_argument("--biopsy_col", default="biop_number")
+    p.add_argument("--biopsy_col", default="biop_id",
+                   help="Registry biopsy id — the biopsy_number of the labels CSV "
+                        "(define_labels.py --biopsy_col).")
     p.add_argument("--diagnosis_col", default="Diagnosis")
     p.add_argument("--egfr_col", default="eGFR")
     p.add_argument("--event_type_col", default="Event")
