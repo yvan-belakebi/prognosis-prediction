@@ -1,7 +1,7 @@
 # Shared settings for train_per_stain.sh and compare_accross_stains.sh.
 # Sourced, not run: `source stain_config.sh`.
 FEATURES=WSI/whole_registry/20x_224px_0px_overlap/features_uni_v2
-LABELS=WSI/whole_registry/labels_all_stains
+LABELS=WSI/whole_registry/labels
 LABELS_CSV=label_csvs/labels.csv
 
 # One entry per model; '|' merges stain names into one model stain.
