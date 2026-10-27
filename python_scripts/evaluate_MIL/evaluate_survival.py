@@ -649,6 +649,13 @@ def main():
 
     # --- Model ---------------------------------------------------------------
     feat_dim = int(val_dataset[0]["X"].shape[-1])
+    state = torch.load(args.checkpoint, map_location=device)
+    if args.model_type == "deepgraphsurv" and args.hidden_dim is None and not args.use_diagnosis:
+        # The classifier's input size is the hidden_dim the checkpoint was trained with.
+        w = [v for k, v in state.items() if k.startswith("classifier") and v.ndim == 2]
+        if w:
+            args.hidden_dim = int(w[-1].shape[1])
+            print(f"hidden_dim from checkpoint: {args.hidden_dim}")
     if args.model_type == "abmil":
         model = abmil_module.ABMIL(att_dim=args.att_dim)
     elif args.model_type == "deepgraphsurv":
@@ -692,7 +699,6 @@ def main():
             f"Late fusion enabled: {n_codes} diagnosis codes, diag_dim={args.diag_dim}"
         )
 
-    state = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state)
     model = model.to(device)
     if device.type == "cuda":

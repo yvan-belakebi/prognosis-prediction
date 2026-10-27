@@ -31,7 +31,7 @@ python python_scripts/MIL/MIL.py \
     --stains "${STAINS[@]}" \
     --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 50 \
     --lr 1e-5 --weight_decay 1e-3 --max_patches 4096 \
-    --batch_size 32 --num_workers 14 --save_every 5 \
+    --batch_size 32 --biopsy_sampling --num_workers 14 --save_every 5 \
     --checkpoint_dir "checkpoints/$tag" --log_dir "results/losses/$tag" \
     > "logs_train_$tag.txt" 2>&1 \
     || echo "!!! all-stains model failed, see logs_train_$tag.txt"
