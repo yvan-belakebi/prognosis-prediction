@@ -181,6 +181,11 @@ biopsy's fused risk is the mean over the stains it has (missing stains do not vo
 # each fusion with each single stain on the test split (results/compare/voting_*_vs_*_test.txt)
 ./vote_across_stains.sh
 
+# Same, but every stain scored by the single all-stains model (checkpoints/all_stains): outputs
+# shared_<stain>, voting_rank_*_shared and late_fusion_shared, also compared on test with that
+# model's plain mean over all slides (all_stains_mean) and with the per-stain fusions
+SCORER=all_stains ./vote_across_stains.sh
+
 # Or fuse existing evaluate_survival.py outputs directly
 python python_scripts/evaluate_MIL/fuse_votes.py --models HE_HES PAS PASM Congo Trichrome Sirius_red Immune --pattern "results/eval/{split}/{model}/risk_scores.csv" --method rank --weighting cindex --output_dir results/eval/voting_rank_cindex
 
