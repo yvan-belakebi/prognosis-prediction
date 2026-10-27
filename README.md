@@ -230,7 +230,7 @@ python python_scripts/evaluate_MIL/analyze_model_signal.py --model PAS="results/
 survival_probability.py turns each model's risk score into P(event by t years): a Cox model on the
 standardised risk plus a Breslow baseline hazard, both fitted on val, applied to test. It does the
 same for diagnosis + eGFR and for diagnosis + eGFR + each model, and compares them at --horizons
-(default 1 3 5 10 years) with time-dependent AUC, Brier score and IPA (1 - Brier / Brier of
+(default 1 3 5 10 years) with time-dependent AUC and ROC curves per horizon, Brier score and IPA (1 - Brier / Brier of
 Kaplan-Meier), calibration by decile and the test calibration slope, the integrated Brier score
 and a decision curve, with bootstrap CIs and paired differences against --reference (default the
 first model) and the clinical model. Same --model inputs as analyze_model_signal.py.

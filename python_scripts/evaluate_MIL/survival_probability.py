@@ -22,7 +22,8 @@ Metrics at each horizon t (censoring handled by inverse probability of censoring
 the censoring distribution estimated by Kaplan-Meier on the evaluated biopsies):
 
   AUC(t)    cumulative/dynamic: events by t (cases) against biopsies event-free at t (and, for
-            --endpoint kidney, those who died first) — how well the model ranks at t.
+            --endpoint kidney, those who died first) — how well the model ranks at t. The
+            matching IPCW ROC curves are drawn per horizon (roc_curves.png / .csv).
   Brier(t)  mean squared error of the probability; IPA(t) = 1 - Brier / Brier(null): 0 is no
             better than Kaplan-Meier, higher is better.
   Calibration  predicted vs observed risk by decile of predicted risk; cal_error is the
@@ -189,6 +190,18 @@ def horizon_metrics(P, null, time, status, horizons):
             res[j, k] = (weighted_auc(P[j, :, k], case, w), brier,
                          1 - brier / b_null if b_null > 0 else np.nan)
     return res
+
+
+def weighted_roc(score, case, w):
+    """IPCW ROC at one horizon: (FPR, TPR) with one point per distinct threshold, high to low."""
+    keep = w > 0
+    order = np.argsort(-score[keep], kind="stable")
+    s, c, ww = score[keep][order], case[keep][order], w[keep][order]
+    tp, fp = np.cumsum(ww * c), np.cumsum(ww * ~c)
+    if tp[-1] == 0 or fp[-1] == 0:
+        return None
+    last = np.r_[np.flatnonzero(np.diff(s) != 0), len(s) - 1]
+    return np.r_[0.0, fp[last] / fp[-1]], np.r_[0.0, tp[last] / tp[-1]]
 
 
 def calibration_table(pred, time, status, h, n_bins):
@@ -427,6 +440,37 @@ def main():
     fig.tight_layout()
     fig.savefig(out("auc_over_time.png"), dpi=150)
     plt.close(fig)
+
+    # ROC curves at each horizon (cases: events by t; controls: event-free at t, plus competing
+    # events for --endpoint kidney; IPCW-weighted, so the area equals AUC(t) above).
+    ncol = min(2, len(args.horizons))
+    nrow = int(np.ceil(len(args.horizons) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 4.4 * nrow), squeeze=False)
+    roc_rows = []
+    for ax, (h_i, h) in zip(axes.ravel(), enumerate(args.horizons)):
+        case, w = ipcw(te, se, h, g_times, g_surv, g_before)
+        ax.plot([0, 1], [0, 1], color="k", lw=0.8, ls=":")
+        if case is not None:
+            for k in shown:
+                roc = weighted_roc(P[preds.index(k), :, hz[h_i]], case, w)
+                if roc is None:
+                    continue
+                auc = point[preds.index(k), h_i, 0]
+                ax.plot(*roc, color=colors[k], lw=1.4, ls="--" if k == "clinical" else "-",
+                        label=f"{k} ({auc:.3f})")
+                roc_rows.append(pd.DataFrame({"predictor": k, "horizon_years": h,
+                                              "fpr": roc[0], "tpr": roc[1]}))
+        ax.set(title=f"{h:g} year{'s' if h != 1 else ''}: {int(case.sum()) if case is not None else 0} "
+                     f"events", xlabel="False positive rate", ylabel="True positive rate",
+               xlim=(0, 1), ylim=(0, 1), aspect="equal")
+        ax.legend(fontsize=7, loc="lower right", title="AUC", title_fontsize=7)
+    for ax in axes.ravel()[len(args.horizons):]:
+        ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(out("roc_curves.png"), dpi=150)
+    plt.close(fig)
+    if roc_rows:
+        pd.concat(roc_rows).to_csv(out("roc_curves.csv"), index=False)
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     width = 0.8 / len(shown)
