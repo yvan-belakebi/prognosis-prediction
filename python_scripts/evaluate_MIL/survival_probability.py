@@ -71,6 +71,18 @@ from analyze_model_signal import (  # noqa: E402
 from fuse_late import fit_cox  # noqa: E402
 
 METRICS = ("auc", "brier", "ipa")
+# Poster palette: one fixed colour per method; the clinical model is grey and dashed.
+METHOD = {
+    "PAS": "#5C3FA8",
+    "Voting": "#E0609A",
+    "Late fusion": "#1B8A5A",
+    "Early fusion": "#2A78D6",
+    "UNICORN": "#C57600",
+}
+# --model names that map to each method, compared lowercase without "_", "-" or spaces.
+METHOD_ALIASES = {"pas": "PAS", "voting": "Voting", "vote": "Voting", "late": "Late fusion",
+                  "latefusion": "Late fusion", "early": "Early fusion",
+                  "earlyfusion": "Early fusion", "unicorn": "UNICORN"}
 _trapz = getattr(np, "trapezoid", None) or np.trapz  # numpy < 2.0 has only trapz
 
 
@@ -425,8 +437,10 @@ def main():
 
     # --- Figures ---------------------------------------------------------------------------
     shown = ["clinical"] + names
-    colors = {k: plt.cm.tab10(i) for i, k in enumerate(shown)}
-    colors["clinical"] = "0.5"
+    colors = {"clinical": "0.5"}
+    for i, k in enumerate(names):
+        key = "".join(c for c in k.lower() if c not in "_- ")
+        colors[k] = METHOD.get(METHOD_ALIASES.get(key, k), plt.cm.tab10(i))
 
     cg = [col[g] for g in curve_grid]
     curve = horizon_metrics(P[:, :, cg], null[cg], te, se, curve_grid)
