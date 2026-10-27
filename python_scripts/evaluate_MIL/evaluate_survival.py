@@ -72,8 +72,15 @@ from late_fusion import LateFusionSurv
 
 
 def build_eval_dataset(
-    features_path, labels_path, coords_path, bag_keys, dist_thr, table,
-    split="val", stains=None, file_ext=".h5",
+    features_path,
+    labels_path,
+    coords_path,
+    bag_keys,
+    dist_thr,
+    table,
+    split="val",
+    stains=None,
+    file_ext=".h5",
 ):
     """Dataset of the bags in ``split`` (val / train / all of the labels CSV)."""
     names = select_bags(features_path, labels_path, table, stains, file_ext)
@@ -525,7 +532,7 @@ def main():
         "--coords_path",
         default=None,
         help="Required for deepgraphsurv / patchgcn. "
-             "When --file_ext .h5 and omitted, defaults to --features_path.",
+        "When --file_ext .h5 and omitted, defaults to --features_path.",
     )
     parser.add_argument(
         "--file_ext",
@@ -537,7 +544,7 @@ def main():
     parser.add_argument(
         "--n_groups",
         type=int,
-        default=3,
+        default=4,
         help="Number of risk strata for KM plot (default: 3).",
     )
     parser.add_argument(
@@ -590,7 +597,10 @@ def main():
         help="JSON vocabulary written by define_labels.py --with_diagnosis.",
     )
     parser.add_argument(
-        "--diag_dim", type=int, default=16, help="Diagnosis embedding dim (must match training)."
+        "--diag_dim",
+        type=int,
+        default=16,
+        help="Diagnosis embedding dim (must match training).",
     )
     args = parser.parse_args()
 
@@ -678,7 +688,9 @@ def main():
         model = LateFusionSurv(
             model, args.model_type, n_codes=n_codes, diag_dim=args.diag_dim
         )
-        print(f"Late fusion enabled: {n_codes} diagnosis codes, diag_dim={args.diag_dim}")
+        print(
+            f"Late fusion enabled: {n_codes} diagnosis codes, diag_dim={args.diag_dim}"
+        )
 
     state = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state)
@@ -701,9 +713,9 @@ def main():
 
     # Per-slide scores (always saved for debugging / downstream analysis)
     slide_csv = os.path.join(args.output_dir, "risk_scores_per_slide.csv")
-    pd.DataFrame({"bag_name": bag_names, "risk": risks, "time": times, "event": events}).to_csv(
-        slide_csv, index=False
-    )
+    pd.DataFrame(
+        {"bag_name": bag_names, "risk": risks, "time": times, "event": events}
+    ).to_csv(slide_csv, index=False)
     print(f"Per-slide risk scores → {slide_csv}")
 
     # Aggregate to one score per biopsy
@@ -715,9 +727,9 @@ def main():
         f"  |  events after aggregation: {int(events.sum())}"
     )
     csv_path = os.path.join(args.output_dir, "risk_scores.csv")
-    pd.DataFrame({"biopsy": biopsy_ids, "risk": risks, "time": times, "event": events}).to_csv(
-        csv_path, index=False
-    )
+    pd.DataFrame(
+        {"biopsy": biopsy_ids, "risk": risks, "time": times, "event": events}
+    ).to_csv(csv_path, index=False)
     print(f"Biopsy risk scores → {csv_path}")
 
     c_index = concordance_index(risks, times, events)
@@ -726,11 +738,11 @@ def main():
     # --- Plots ---------------------------------------------------------------
     # Restrict figures to samples with follow-up time > 730 days. The C-index
     # above is still computed on the full set; only the plots use this filter.
-    keep = times > 730
+    keep = times > 0
     n_dropped = int((~keep).sum())
     if n_dropped:
         print(
-            f"Filtering figures to time > 730: keeping {int(keep.sum())} / {len(times)} "
+            f"Filtering figures to time > 0: keeping {int(keep.sum())} / {len(times)} "
             f"({n_dropped} excluded)"
         )
     risks_plot = risks[keep]
