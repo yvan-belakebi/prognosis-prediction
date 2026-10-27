@@ -224,3 +224,19 @@ python python_scripts/evaluate_MIL/analyze_model_signal.py --model PAS="results/
 # The added-value Cox models are fitted on val: for a model itself fitted on val (late fusion) the
 # likelihood-ratio p-value is in-sample — read the test-set C-index gain and its CI instead. The
 # hazard ratio per SD is shared with diagnosis/eGFR when the risk is collinear with them.
+
+12) n-year event probabilities and comparison at fixed horizons
+
+survival_probability.py turns each model's risk score into P(event by t years): a Cox model on the
+standardised risk plus a Breslow baseline hazard, both fitted on val, applied to test. It does the
+same for diagnosis + eGFR and for diagnosis + eGFR + each model, and compares them at --horizons
+(default 1 3 5 10 years) with time-dependent AUC, Brier score and IPA (1 - Brier / Brier of
+Kaplan-Meier), calibration by decile and the test calibration slope, the integrated Brier score
+and a decision curve, with bootstrap CIs and paired differences against --reference (default the
+first model) and the clinical model. Same --model inputs as analyze_model_signal.py.
+
+python python_scripts/evaluate_MIL/survival_probability.py --model PAS="results/eval/{split}/PAS/risk_scores.csv" --model voting="results/eval/voting_rank_none/{split}/risk_scores.csv" --model late="results/eval/late_fusion/{split}/risk_scores.csv" --model unicorn="results/eval/{split}/unicorn/risk_scores.csv" --model early="results/eval/{split}/early/risk_scores.csv" --output_dir results/survival_probability
+
+# --endpoint kidney: kidney failure, with death as a competing risk (cause-specific Cox models,
+# cumulative incidence; observed risks by Aalen-Johansen). Late fusion is recalibrated on the split
+# it was fitted on, so its probabilities are slightly optimistic.
