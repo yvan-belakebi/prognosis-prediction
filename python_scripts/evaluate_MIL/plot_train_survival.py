@@ -183,7 +183,7 @@ def plot_km(times, events, horizons, lines, title, path):
         multialignment="left",
         fontsize=8,
         family="monospace",
-        bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#8E1B1B", alpha=0.9),
+        bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#FF1A1A", lw=2.5, alpha=0.9),
     )
     ax.set_ylabel("Event-free survival probability")
     ax.set_ylim(-0.02, 1.05)
