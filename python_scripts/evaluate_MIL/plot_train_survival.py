@@ -142,10 +142,18 @@ def plot_km(times, events, horizons, lines, title, path):
         label="95% CI (Greenwood)",
     )
     censor_times = times[events == 0]
-    censor_s = s_km[np.maximum(0, np.searchsorted(t_km, censor_times, side="right") - 1)]
+    censor_s = s_km[
+        np.maximum(0, np.searchsorted(t_km, censor_times, side="right") - 1)
+    ]
     ax.scatter(
-        censor_times, censor_s, marker="|", color=COLOR, s=40, linewidths=1.2,
-        zorder=3, label="Censored",
+        censor_times,
+        censor_s,
+        marker="|",
+        color=COLOR,
+        s=40,
+        linewidths=1.2,
+        zorder=3,
+        label="Censored",
     )
 
     # n-year survival markers
@@ -166,9 +174,17 @@ def plot_km(times, events, horizons, lines, title, path):
     # Survival curves of these cohorts stay high, so the empty lower right is the
     # spot that does not cover the curve.
     ax.text(
-        0.98, 0.03, "\n".join(lines), transform=ax.transAxes, ha="right", va="bottom",
-        multialignment="left", fontsize=8, family="monospace", color="white",
-        bbox=dict(boxstyle="round,pad=0.4", fc="#C62828", ec="#8E1B1B", alpha=0.9),
+        0.98,
+        0.03,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        multialignment="left",
+        fontsize=8,
+        family="monospace",
+        color="white",
+        bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#8E1B1B", alpha=0.9),
     )
     ax.set_ylabel("Event-free survival probability")
     ax.set_ylim(-0.02, 1.05)
@@ -185,10 +201,24 @@ def plot_km(times, events, horizons, lines, title, path):
     for side in ("top", "right", "left"):
         ax_t.spines[side].set_visible(False)
     for tt in ticks:
-        ax_t.text(tt, 0.5, str(int(np.sum(times >= tt))), ha="center", va="center",
-                  fontsize=8, color=COLOR)
-    ax_t.set_ylabel("At risk", rotation=0, ha="right", va="center", fontsize=8,
-                    color="gray", labelpad=16)
+        ax_t.text(
+            tt,
+            0.5,
+            str(int(np.sum(times >= tt))),
+            ha="center",
+            va="center",
+            fontsize=8,
+            color=COLOR,
+        )
+    ax_t.set_ylabel(
+        "At risk",
+        rotation=0,
+        ha="right",
+        va="center",
+        fontsize=8,
+        color="gray",
+        labelpad=16,
+    )
     ax_t.set_xticks(ticks)
     ax_t.set_xlabel("Time since biopsy (years)")
 
@@ -232,7 +262,9 @@ def main():
     if args.split != "all":
         table = table[table["split"] == args.split]
     if table.empty:
-        raise RuntimeError(f"No slides in the '{args.split}' split of {args.labels_csv}.")
+        raise RuntimeError(
+            f"No slides in the '{args.split}' split of {args.labels_csv}."
+        )
     names = list(table.index)
     times = table["time"].to_numpy(dtype=float) / DAYS_PER_YEAR
     events = table["event"].to_numpy(dtype=int)
@@ -282,11 +314,16 @@ def main():
     print(f"Per-{id_col} table → {data_path}\nSummary → {summary_path}")
 
     split_name = {
-        "all": "Full dataset", "train": "Training set", "val": "Validation set",
+        "all": "Full dataset",
+        "train": "Training set",
+        "val": "Validation set",
         "test": "Test set",
     }
     plot_km(
-        times, events, horizons, lines,
+        times,
+        events,
+        horizons,
+        lines,
         f"{split_name[args.split]} — Kaplan-Meier survival "
         f"(one point per {'slide' if args.no_aggregate else 'biopsy'})",
         os.path.join(args.output_dir, f"km_curve_{args.split}.png"),
