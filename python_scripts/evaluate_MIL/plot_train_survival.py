@@ -167,8 +167,8 @@ def plot_km(times, events, horizons, lines, title, path):
     # spot that does not cover the curve.
     ax.text(
         0.98, 0.03, "\n".join(lines), transform=ax.transAxes, ha="right", va="bottom",
-        multialignment="left", fontsize=8, family="monospace",
-        bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="gray", alpha=0.9),
+        multialignment="left", fontsize=8, family="monospace", color="white",
+        bbox=dict(boxstyle="round,pad=0.4", fc="#C62828", ec="#8E1B1B", alpha=0.9),
     )
     ax.set_ylabel("Event-free survival probability")
     ax.set_ylim(-0.02, 1.05)
