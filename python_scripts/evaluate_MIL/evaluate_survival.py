@@ -30,6 +30,7 @@ import sys
 from functools import partial
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import pandas as pd
 import torch
@@ -287,8 +288,25 @@ def log_rank_pvalue(times_a, events_a, times_b, events_b):
 # Plots
 # ---------------------------------------------------------------------------
 
-GROUP_COLORS = ["#2196F3", "#FF9800", "#F44336", "#4CAF50"]
-GROUP_LABELS = ["Low risk", "Intermediate-low", "Intermediate-high", "High risk"]
+# Risk ramp from the lowest group (green) to the highest (red); groups in between are
+# interpolated, so the colour follows the degree of risk whatever --n_groups is.
+RISK_RAMP = LinearSegmentedColormap.from_list(
+    "risk", ["#2E9E5B", "#E8B931", "#EE7D2F", "#C9271E"]
+)
+GROUP_LABELS = {
+    2: ["Low risk", "High risk"],
+    3: ["Low risk", "Intermediate risk", "High risk"],
+    4: ["Low risk", "Intermediate-low", "Intermediate-high", "High risk"],
+}
+
+
+def group_color(g, n_groups):
+    return RISK_RAMP(g / max(n_groups - 1, 1))
+
+
+def group_label(g, n_groups):
+    names = GROUP_LABELS.get(n_groups)
+    return names[g] if names else f"Risk group {g + 1} of {n_groups}"
 
 
 def _assign_risk_groups(risks, n_groups):
@@ -368,9 +386,9 @@ def plot_km_curves(
         t_g, e_g = times[mask], events[mask]
         t_km, s_km, ci_lo, ci_hi = kaplan_meier(t_g, e_g)
 
-        label = GROUP_LABELS[g] if g < len(GROUP_LABELS) else f"Group {g}"
+        label = group_label(g, n_groups)
         label += f"  (n={mask.sum()}, events={int(e_g.sum())})"
-        color = GROUP_COLORS[g % len(GROUP_COLORS)]
+        color = group_color(g, n_groups)
 
         # KM step curve
         ax.step(t_km, s_km, where="post", color=color, linewidth=2, label=label)
@@ -431,8 +449,8 @@ def plot_km_curves(
             mask = group == g
             t_g = times[mask]
             row_y = n_groups - 1 - g
-            color = GROUP_COLORS[g % len(GROUP_COLORS)]
-            label_short = GROUP_LABELS[g] if g < len(GROUP_LABELS) else f"Group {g}"
+            color = group_color(g, n_groups)
+            label_short = group_label(g, n_groups)
             ax_t.text(
                 -0.01,
                 row_y,
