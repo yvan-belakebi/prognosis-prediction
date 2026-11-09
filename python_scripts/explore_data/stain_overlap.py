@@ -7,7 +7,9 @@ Reports two overlaps, per biopsy (one row per slide in the CSV):
     trichrome + AFOG), and biopsies with two or more trichrome slides of any kind.
 
 Each proportion is given over all biopsies and over the biopsies that have at
-least one of the stains involved. Stain names are compared case- and
+least one of the stains involved. For each group (HE/HES, trichromes), the
+biopsies with two or more slides of the group are also split into those whose
+slides are all one stain, repeated, and those with slides of distinct stains. Stain names are compared case- and
 punctuation-insensitively ("Masson Trichrom" = "masson-trichrom").
 
 Usage:
@@ -33,6 +35,19 @@ def canon_stain(name):
 
 def share(k, n):
     return f"{k:6d} / {n:6d} = {100 * k / n:5.1f}%" if n else f"{k:6d} / {n:6d}"
+
+
+def multi_slide_breakdown(stains, group, display):
+    """Print, for biopsies with >= 2 slides of `group`, one stain repeated vs distinct stains."""
+    in_group = stains.agg(lambda k: k[k.isin(group)].tolist())
+    multi = in_group[in_group.map(len) >= 2]
+    kinds = multi.map(lambda k: len(set(k)))
+    print(f"    biopsies with >= 2 slides of these stains:  {len(multi)}")
+    print(f"      all one stain, repeated:                  {share((kinds == 1).sum(), len(multi))}")
+    print(f"      slides from distinct stains:              {share((kinds >= 2).sum(), len(multi))}")
+    repeated = multi[kinds == 1].map(lambda k: display.get(k[0], k[0]))
+    for stain, k in repeated.value_counts().items():
+        print(f"        {stain} only: {k}")
 
 
 def main():
@@ -72,6 +87,7 @@ def main():
         print(f"    over biopsies with HE or HES: "
               f"{share((has_he & has_hes).sum(), (has_he | has_hes).sum())}")
         print(f"    (HE only {(has_he & ~has_hes).sum()}, HES only {(~has_he & has_hes).sum()})")
+        multi_slide_breakdown(stains, {"he", "hes"}, {"he": "HE", "hes": "HES"})
 
         any_trich = n_trich_slides > 0
         print(f"  Trichromes ({', '.join(args.trichromes)})")
@@ -81,6 +97,7 @@ def main():
               f"{share((n_trich_kinds >= 2).sum(), any_trich.sum())}")
         print(f"    >= 2 trichrome slides (any kind), over biopsies with one: "
               f"{share((n_trich_slides >= 2).sum(), any_trich.sum())}")
+        multi_slide_breakdown(stains, trich, display)
         combos = keys[n_trich_kinds >= 2].map(lambda s: " + ".join(sorted(display[k] for k in s & trich)))
         if not combos.empty:
             print("    most common combinations:")
