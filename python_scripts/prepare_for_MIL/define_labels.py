@@ -28,6 +28,19 @@ Run from the project root:
         --labels_dir WSI/IgA/trident/labels \\
         --labels_csv label_csvs/labels.csv
 
+Kidney-failure endpoint, with death as a competing risk (cause-specific):
+
+    python python_scripts/prepare_for_MIL/define_labels.py \
+        --censor_events Death \
+        --labels_dir WSI/whole_registry/labels_kidney \
+        --labels_csv label_csvs/labels_kidney.csv
+
+--censor_events turns the listed --event_col values into censoring at the
+time of that event (event = 0, time kept), in every split. The split itself is
+drawn on the all-cause event before that, so the train/val/test patients are
+the same as without the flag and models of both endpoints compare on the same
+test biopsies.
+
 --query is any pandas DataFrame.query expression over the input columns, e.g.
 "is_IgA == True" or "Biopsy_date >= '2006-01-01'". The --*_col arguments name
 the input columns; their defaults match registry_anonymized.csv.
@@ -256,6 +269,14 @@ def main():
         default="Event",
         help="Event column; event = 1 where it is non-empty, 0 where it is empty.",
     )
+    parser.add_argument(
+        "--censor_events",
+        nargs="+",
+        default=[],
+        help="--event_col values censored instead of counted as events, at the "
+        "time of that event (e.g. Death, for a kidney-failure endpoint). "
+        "Applied after the split, which stays the all-cause one.",
+    )
     add_split_args(parser)
     parser.add_argument(
         "--labels_dir",
@@ -281,7 +302,8 @@ def main():
         df[args.time_col].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0],
         errors="coerce",
     )
-    df["event"] = df[args.event_col].notna().astype(int)
+    df["event_type"] = df[args.event_col].fillna("").astype(str).str.strip()
+    df["event"] = (df["event_type"] != "").astype(int)
     df["diagnosis"] = (
         df[args.diagnosis_col].apply(normalize_diagnosis)
         if args.diagnosis_col in df.columns
@@ -293,6 +315,16 @@ def main():
         print(f"Dropped {n_rows - len(df)} slides with no follow-up time.")
 
     df = assign_split(df, "time", args, event_col="event")
+
+    # After the split, so it is the same as the all-cause one.
+    if args.censor_events:
+        censored = df["event_type"].str.lower().isin(
+            [e.strip().lower() for e in args.censor_events]
+        )
+        df.loc[censored, "event"] = 0
+        n_b = df.loc[censored, "biopsy_number"].nunique()
+        print(f"Censored {censored.sum()} slides ({n_b} biopsies) at their "
+              f"{'/'.join(args.censor_events)} event.")
 
     code_map = None
     if args.with_diagnosis:
@@ -316,6 +348,7 @@ def main():
             "stain",
             "time",
             "event",
+            "event_type",
             "diagnosis",
             "split",
         ],

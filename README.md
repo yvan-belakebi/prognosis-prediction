@@ -63,6 +63,11 @@ not the separate IgA cohort, whose data would first have to be put into this for
 
 python python_scripts/prepare_for_MIL/define_labels.py --input_csv followup_data/derived/renamed/registry_anonymized.csv --query "is_IgA == True" --labels_dir WSI/IgA/trident/labels --labels_csv label_csvs/labels.csv
 
+# Kidney-failure endpoint: --censor_events Death censors patients at death (death as a competing
+# risk) instead of counting it as an event. The split is drawn before, on the all-cause event, so
+# the train/val/test patients are the same as above. Point stain_config.sh at these outputs.
+python python_scripts/prepare_for_MIL/define_labels.py --input_csv followup_data/derived/renamed/registry_anonymized.csv --censor_events Death --labels_dir WSI/whole_registry/labels_kidney --labels_csv label_csvs/labels_kidney.csv
+
 python python_scripts/prepare_for_MIL/define_regression_labels.py --input_csv followup_data/derived/renamed/registry_anonymized.csv --query "is_IgA == True" --labels_dir WSI/IgA/trident/labels_regression --labels_csv label_csvs/labels_regression.csv
 
 4) Feature extraction  (TRIDENT patch encoder, per-stain stain-normalized)
