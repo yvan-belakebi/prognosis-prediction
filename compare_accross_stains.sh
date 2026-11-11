@@ -6,8 +6,8 @@ cd "$(dirname "$0")"
 # FEATURES, LABELS, LABELS_CSV, STAINS and stain_tag — same as training.
 source stain_config.sh
 
-# Must match the architecture arguments used in train_per_stain.sh.
-MODEL_ARGS=(--model_type deepgraphsurv --hidden_dim 64)
+# hidden_dim is read from each checkpoint by evaluate_survival.py.
+MODEL_ARGS=(--model_type deepgraphsurv)
 
 evaluated=()
 for stain in "${STAINS[@]}"; do
