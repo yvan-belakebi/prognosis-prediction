@@ -5,7 +5,7 @@
 #   - both models score only that stain's slides, averaged per biopsy;
 #   - paired C-index comparison on those biopsies (bootstrap + jackknife).
 # Default split is test: val picked the best epoch of both models.
-# Usage: ./compare_all_stains_vs_per_stain.sh   or   SPLIT=val ./compare_all_stains_vs_per_stain.sh
+# Usage: ./compare_5_stains_vs_per_stain.sh   or   SPLIT=val ./compare_5_stains_vs_per_stain.sh
 set -u
 cd "$(dirname "$0")"
 # FEATURES, LABELS, LABELS_CSV, STAINS and stain_tag — same as training.
@@ -14,7 +14,7 @@ source stain_config.sh
 SPLIT=${SPLIT:-test}
 # hidden_dim is read from each checkpoint by evaluate_survival.py.
 MODEL_ARGS=(--model_type deepgraphsurv)
-SHARED_CKPT=checkpoints/all_stains/deepgraphsurv_model_best.pth
+SHARED_CKPT=checkpoints/5_stains/deepgraphsurv_model_best.pth
 if [[ ! -f "$SHARED_CKPT" ]]; then
     echo "No $SHARED_CKPT; train it with train_per_stain.sh first."
     exit 1
@@ -37,8 +37,8 @@ score() {  # checkpoint output_dir stain
 }
 
 mkdir -p results/compare
-summary=results/compare/all_stains_vs_per_stain_$SPLIT.tsv
-printf "stain\tn_biopsies\tevents\tc_all_stains\tc_per_stain\tdiff\tp_bootstrap\tp_jackknife\n" > "$summary"
+summary=results/compare/5_stains_vs_per_stain_$SPLIT.tsv
+printf "stain\tn_biopsies\tevents\tc_5_stains\tc_per_stain\tdiff\tp_bootstrap\tp_jackknife\n" > "$summary"
 
 for stain in "${STAINS[@]}"; do
     tag=$(stain_tag "$stain")
@@ -53,7 +53,7 @@ for stain in "${STAINS[@]}"; do
     score "$ckpt" "$own" "$stain" && score "$SHARED_CKPT" "$shared" "$stain" || continue
 
     # A = all-stains model, B = per-stain model; same stain, split and biopsies.
-    out="results/compare/all_stains_vs_${tag}_$SPLIT.txt"
+    out="results/compare/5_stains_vs_${tag}_$SPLIT.txt"
     python python_scripts/evaluate_MIL/compare_cindex.py \
         --inputs_a "$shared/risk_scores.csv" --inputs_b "$own/risk_scores.csv" \
         > "$out" 2>&1 || { echo "!!! comparison failed, see $out"; continue; }
@@ -71,5 +71,5 @@ for stain in "${STAINS[@]}"; do
 done
 
 echo
-echo "=== summary (A = all_stains, B = per-stain) -> $summary"
+echo "=== summary (A = 5_stains, B = per-stain) -> $summary"
 column -t -s $'\t' "$summary" 2>/dev/null || cat "$summary"
