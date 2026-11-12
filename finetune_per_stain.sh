@@ -25,7 +25,6 @@ for stain in "${FT_STAINS[@]}"; do
     python python_scripts/MIL/MIL.py \
         --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
         --stains "$stain" \
-        --authorized_slides_csv label_csvs/slides_with_selected_stains.csv \
         --init_checkpoint "$PRETRAINED" \
         --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 25 \
         --lr "$LR" --weight_decay "$WD" --max_patches 2048 \
