@@ -459,6 +459,13 @@ def main():
              "architecture arguments as the original run.",
     )
     parser.add_argument(
+        "--init_checkpoint",
+        default=None,
+        help="Fine-tuning: start from these weights (a weights-only .pth such as "
+             "_best.pth, or a _last.pth) with a fresh optimizer, epoch 1 and a new "
+             "loss log. Pass the same architecture arguments as that run.",
+    )
+    parser.add_argument(
         "--biopsy_sampling",
         action="store_true",
         help=(
@@ -631,6 +638,13 @@ def main():
         risk_fn = lambda m, batch: _forward(m, batch, args.model_type)  # noqa: E731
 
     model = model.to(device)
+    if args.init_checkpoint:
+        if args.resume:
+            parser.error("--init_checkpoint and --resume are exclusive.")
+        state = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
+        # A _last.pth holds the weights under "model"; the others are the weights.
+        model.load_state_dict(state["model"] if "optimizer" in state else state)
+        print(f"Initialised from {args.init_checkpoint}")
     # AdamW: weight decay applied directly to the weights, not added to the
     # gradient as Adam's L2 term is (which Adam's per-weight scaling then
     # mostly cancels). With --weight_decay 0 it is identical to Adam.
