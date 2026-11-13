@@ -82,6 +82,12 @@ def add_source_args(parser):
     )
     parser.add_argument("--stain_col", default="Stain", help="Stain column.")
     parser.add_argument(
+        "--other_sirius_csv",
+        default="followup_data/derived/registry/sirius_red_other_hospitals.csv",
+        help="CSV with an ANON_name column: those 'Sirius red' slides (stained "
+        "outside Haukeland) get the stain 'Other Sirius Red'. '' to disable.",
+    )
+    parser.add_argument(
         "--diagnosis_col",
         default="Diagnosis",
         help="Free-text diagnosis column (used by --with_diagnosis).",
@@ -107,6 +113,13 @@ def load_source(args):
     df["biopsy_number"] = df[args.biopsy_col].str.strip()
     df["patient"] = df[args.patient_col].str.strip()
     df["stain"] = df[args.stain_col]
+    if args.other_sirius_csv:
+        other = set(
+            pd.read_csv(args.other_sirius_csv, dtype=str)["ANON_name"].dropna().str.strip()
+        )
+        renamed = df["file_name"].isin(other) & (df["stain"] == "Sirius red")
+        df.loc[renamed, "stain"] = "Other Sirius Red"
+        print(f"{renamed.sum()} Sirius red slides renamed to 'Other Sirius Red'")
     dup = df["file_name"].duplicated(keep=False)
     if dup.any():
         raise ValueError(
