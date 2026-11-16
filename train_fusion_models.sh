@@ -33,8 +33,16 @@ declare -A VARIANT_ARGS=(
 )
 # Shared by every variant, so they differ only in the fusion architecture.
 COMMON_ARGS=(--task survival --patches_per_stain 512 --stain_dropout 0.2
-             --event_sampling --batch_size 8 --epochs 50 --save_every 5 --num_workers 14)
+             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers 14)
 DATA_ARGS=(--features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV")
+# The .npy copy of the features (python_scripts/MIL/h5_features_to_npy.py) is much
+# faster to sample from; used once a conversion run has completed.
+FEATURES_NPY=${FEATURES_NPY:-${FEATURES}_npy}
+if [[ -f "$FEATURES_NPY/_complete" ]]; then
+    echo "=== features: $FEATURES_NPY (.npy)"
+    DATA_ARGS=(--features_path "$FEATURES_NPY" --file_ext .npy
+               --labels_path "$LABELS" --labels_csv "$LABELS_CSV")
+fi
 
 scored=()
 for name in "${FUSIONS[@]}"; do
