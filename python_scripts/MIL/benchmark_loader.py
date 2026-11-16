@@ -46,6 +46,9 @@ def main():
     table = M.load_labels_table(args.labels_csv)
     records = M.index_biopsies(args.features_path, args.labels_path, table, vocab,
                                file_ext=args.file_ext, verbose=False)
+    if not records:
+        p.error(f"no {args.file_ext} bags found in {args.features_path} "
+                "(for a .npy folder, pass --file_ext .npy)")
     train_records, _, _ = M.split_records(records, table)
     ds = M.MultiStainBiopsyDataset(train_records, n_stains=len(vocab),
                                    patches_per_stain=args.patches_per_stain,
