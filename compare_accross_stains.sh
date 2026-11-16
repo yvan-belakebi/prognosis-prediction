@@ -20,7 +20,7 @@ for stain in "${STAINS[@]}"; do
     echo "=== evaluating $stain"
     if python python_scripts/evaluate_MIL/evaluate_survival.py "${MODEL_ARGS[@]}" \
         --checkpoint "$ckpt" \
-        --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
+        --features_path "$FEATURES" --file_ext "$FILE_EXT" --coords_path "$COORDS" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
         --stains "$stain" --output_dir "results/eval/$tag" \
         > "results/eval_$tag.log" 2>&1; then
         grep "C-index:" "results/eval_$tag.log"

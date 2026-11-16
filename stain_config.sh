@@ -1,6 +1,11 @@
 # Shared settings for train_per_stain.sh and compare_accross_stains.sh.
 # Sourced, not run: `source stain_config.sh`.
-FEATURES=WSI/whole_registry/20x_224px_0px_overlap/features_uni_v2
+# Features: float16 .npy copies of TRIDENT's UNI-v2 .h5 features
+# (python_scripts/MIL/h5_features_to_npy.py). The patch coordinates, needed by the
+# graph models, stay in TRIDENT's patches/{slide}_patches.h5.
+FEATURES=WSI/whole_registry/20x_224px_0px_overlap/features_uni_v2_npy
+FILE_EXT=.npy
+COORDS=WSI/whole_registry/20x_224px_0px_overlap/patches
 LABELS=WSI/whole_registry/labels
 LABELS_CSV=label_csvs/labels.csv
 

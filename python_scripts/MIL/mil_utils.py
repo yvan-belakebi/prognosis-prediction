@@ -58,6 +58,10 @@ class BagDataset(ProcessedMILDataset):
             self.loaded_bags.pop(self.bag_names[index], None)
         return bag
 
+    def _load_features(self, name):
+        """Features as float32 (the .npy copies are stored as float16)."""
+        return super()._load_features(name).astype(np.float32, copy=False)
+
     def _load_coords(self, name):
         """Patch coordinates in patch units, so ``dist_thr`` counts patches.
 
@@ -70,8 +74,12 @@ class BagDataset(ProcessedMILDataset):
         whatever the scan magnification: dist_thr 1.5 then links each patch to
         its 8 neighbours. Coordinates without the attribute (legacy .npy) are
         returned unchanged.
+
+        ``coords_path`` may hold the feature files themselves ({name}.h5) or
+        TRIDENT's patch files ({name}_patches.h5, in the job's patches/ folder),
+        which is where the coordinates live when the features are .npy.
         """
-        path = os.path.join(self.coords_path, name + self.file_ext)
+        path = coords_file(self.coords_path, name, self.file_ext)
         if not path.endswith(".h5"):
             return super()._load_coords(name)
         with h5py.File(path, "r") as f:
@@ -99,6 +107,16 @@ class BagDataset(ProcessedMILDataset):
         if n == 1:
             edge_index, norm_edge_weight = add_self_loops(edge_index, norm_edge_weight, n)
         return edge_index, edge_weight, norm_edge_weight
+
+
+def coords_file(coords_path, name, file_ext=".h5"):
+    """Path of a slide's coordinates: {name}{file_ext}, {name}.h5 or TRIDENT's
+    {name}_patches.h5, whichever exists first (the first when none does)."""
+    candidates = [
+        os.path.join(coords_path, name + ext)
+        for ext in dict.fromkeys((file_ext, ".h5", "_patches.h5"))
+    ]
+    return next((p for p in candidates if os.path.exists(p)), candidates[0])
 
 
 def discover_bags(base_dir, extensions=(".npy", ".h5")):

@@ -12,8 +12,9 @@ inf; their count is reported, and such rows are dropped by the dataset like NaN 
 
 Only 'features' is copied ('coords' is not used by multistain_MIL.py). Existing
 .npy files are skipped, so an interrupted run can be restarted. Unreadable .h5 files
-are listed and skipped. A full run ends by writing ``_complete`` in --dst;
-train_fusion_models.sh uses the .npy folder only when that marker exists.
+are listed and skipped. A full run ends by writing ``_complete`` in --dst.
+Before deleting the .h5 files, run check_npy_features.py: the graph models then
+read the coordinates from TRIDENT's patches/ folder (see stain_config.sh).
 
 Usage:
     python python_scripts/MIL/h5_features_to_npy.py \\

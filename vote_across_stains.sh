@@ -42,7 +42,7 @@ score() {  # checkpoint split output_dir stain...
     mkdir -p "$out"
     python python_scripts/evaluate_MIL/evaluate_survival.py "${MODEL_ARGS[@]}" \
         --checkpoint "$ckpt" \
-        --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
+        --features_path "$FEATURES" --file_ext "$FILE_EXT" --coords_path "$COORDS" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
         --stains "$@" --split "$split" --output_dir "$out" \
         > "$out/eval.log" 2>&1 \
         || { echo "!!! $out failed, see $out/eval.log"; return 1; }

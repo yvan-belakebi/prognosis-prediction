@@ -10,7 +10,7 @@ for stain in "${STAINS[@]}"; do
     tag=$(stain_tag "$stain")
     echo "=== $stain -> checkpoints/$tag ==="
     python python_scripts/MIL/MIL.py \
-        --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
+        --features_path "$FEATURES" --file_ext "$FILE_EXT" --coords_path "$COORDS" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
         --stains "$stain" \
         --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 50 \
         --lr 3e-5 --weight_decay 1e-3 --max_patches 4096 \
@@ -27,7 +27,7 @@ done
 tag=all_stains
 echo "=== all stains (${STAINS[*]}) -> checkpoints/$tag ==="
 python python_scripts/MIL/MIL.py \
-    --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
+    --features_path "$FEATURES" --file_ext "$FILE_EXT" --coords_path "$COORDS" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
     --stains "${STAINS[@]}" \
     --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 50 \
     --lr 1e-5 --weight_decay 1e-3 --max_patches 4096 \

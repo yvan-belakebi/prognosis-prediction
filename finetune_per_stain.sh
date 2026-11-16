@@ -23,7 +23,7 @@ for stain in "${FT_STAINS[@]}"; do
     echo "=== $stain -> checkpoints/$tag"
     # Architecture (model_type, hidden_dim) and max_patches as in pretraining.
     python python_scripts/MIL/MIL.py \
-        --features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
+        --features_path "$FEATURES" --file_ext "$FILE_EXT" --coords_path "$COORDS" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \
         --stains "$stain" \
         --init_checkpoint "$PRETRAINED" \
         --model_type deepgraphsurv --hidden_dim 128 --dropout 0.25 --epochs 25 \

@@ -483,7 +483,10 @@ def main():
         min_stains=args.min_stains,
     )
     if not records:
-        parser.error("No biopsies found — check the feature/label paths and --stains.")
+        parser.error(
+            f"No biopsies found — check the feature/label paths and --stains "
+            f"(looked for {args.file_ext} files; use --file_ext .npy for a .npy folder)."
+        )
 
     expected_label_len = 2 if args.task == "survival" else 1
     if len(records[0]["label"]) < expected_label_len:
