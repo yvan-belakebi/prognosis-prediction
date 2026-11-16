@@ -268,6 +268,9 @@ class MultiStainBiopsyDataset(Dataset):
         max_slides: Slide slots per stain in per-slide mode. A stain with more
             slides uses a fresh random subset of them on each training access and
             the first ``max_slides`` (by name) otherwise.
+        dtype: dtype of the returned ``X``. ``torch.float16`` halves the batch the
+            DataLoader workers hand over and the copy to the GPU; the consumer must
+            then cast ``X`` back to float32 on the device.
     """
 
     def __init__(
@@ -280,6 +283,7 @@ class MultiStainBiopsyDataset(Dataset):
         stain_dropout: float = 0.0,
         per_slide: bool = False,
         max_slides: int = 4,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
         self.records = list(records)
         self.n_stains = n_stains
@@ -287,6 +291,7 @@ class MultiStainBiopsyDataset(Dataset):
         self.random_subsample = random_subsample
         self.per_slide = per_slide
         self.max_slides = max_slides
+        self.dtype = dtype
         self.stain_dropout = float(stain_dropout)
         if not 0.0 <= self.stain_dropout < 1.0:
             raise ValueError(f"stain_dropout must be in [0, 1), got {stain_dropout}.")
@@ -334,7 +339,7 @@ class MultiStainBiopsyDataset(Dataset):
     def _getitem_per_slide(self, rec):
         X = torch.zeros(
             self.n_stains, self.max_slides, self.patches_per_stain, self.feat_dim,
-            dtype=torch.float32,
+            dtype=self.dtype,
         )
         slide_mask = torch.zeros(self.n_stains, self.max_slides, dtype=torch.bool)
         for stain_idx in self._keep_stains(rec):
@@ -363,7 +368,7 @@ class MultiStainBiopsyDataset(Dataset):
         if self.per_slide:
             return self._getitem_per_slide(rec)
         X = torch.zeros(
-            self.n_stains, self.patches_per_stain, self.feat_dim, dtype=torch.float32
+            self.n_stains, self.patches_per_stain, self.feat_dim, dtype=self.dtype
         )
         stain_mask = torch.zeros(self.n_stains, dtype=torch.bool)
 

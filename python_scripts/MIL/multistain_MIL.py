@@ -155,11 +155,12 @@ _ARCH_ARGS = (
 # Train / validation loops
 # ---------------------------------------------------------------------------
 def _predict(model, batch, device):
+    # The datasets hand X over as float16 (half the transfer); compute in float32.
     slide_mask = batch.get("slide_mask")
     return model(
-        batch["X"].to(device),
-        batch["stain_mask"].to(device),
-        slide_mask=None if slide_mask is None else slide_mask.to(device),
+        batch["X"].to(device, non_blocking=True).float(),
+        batch["stain_mask"].to(device, non_blocking=True),
+        slide_mask=None if slide_mask is None else slide_mask.to(device, non_blocking=True),
     )
 
 
@@ -173,6 +174,8 @@ def _seed_worker(worker_id):
     off it varies the stream across both workers and epochs.
     """
     np.random.seed(torch.initial_seed() % 2**32)
+    # With persistent workers this runs once per worker, not per epoch; each worker
+    # then keeps drawing from its own stream, so epochs still differ.
 
 
 def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_steps=1):
@@ -180,7 +183,7 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
     total_loss = 0.0
     optimizer.zero_grad()
     for i, batch in enumerate(loader):
-        Y = batch["Y"].to(device)
+        Y = batch["Y"].to(device, non_blocking=True)
         pred = _predict(model, batch, device)
         if task == "survival":
             loss = cox_ph_loss(pred, Y[:, 0], Y[:, 1])
@@ -530,6 +533,7 @@ def main():
         stain_dropout=args.stain_dropout,
         per_slide=args.per_slide,
         max_slides=args.max_slides,
+        dtype=torch.float16,
     )
     # Validation keeps every stain (and the deterministic patch selection) so the
     # metric measures the model, not the draw.
@@ -542,6 +546,7 @@ def main():
             feat_dim=train_ds.feat_dim,
             per_slide=args.per_slide,
             max_slides=args.max_slides,
+            dtype=torch.float16,
         )
         if val_records
         else None
@@ -568,10 +573,18 @@ def main():
             # are all near batch_size, so they need no dropping.
             drop_last=(args.task == "survival" and len(train_ds) > args.batch_size),
         )
+    # Workers stay alive across epochs (starting them costs seconds per worker,
+    # twice per epoch) and batches land in pinned memory for an asynchronous copy
+    # to the GPU.
+    worker_kwargs = dict(
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+    )
     train_loader = DataLoader(
         train_ds,
-        num_workers=args.num_workers,
         worker_init_fn=_seed_worker,
+        **worker_kwargs,
         **loader_kwargs,
     )
     val_loader = (
@@ -579,7 +592,7 @@ def main():
             val_ds,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=args.num_workers,
+            **worker_kwargs,
         )
         if val_ds is not None
         else None

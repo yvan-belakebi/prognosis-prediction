@@ -49,7 +49,8 @@ def main():
     train_records, _, _ = M.split_records(records, table)
     ds = M.MultiStainBiopsyDataset(train_records, n_stains=len(vocab),
                                    patches_per_stain=args.patches_per_stain,
-                                   random_subsample=True, stain_dropout=0.2)
+                                   random_subsample=True, stain_dropout=0.2,
+                                   dtype=torch.float16)
     sampler = M.EventStratifiedBatchSampler.from_labels(
         [r["label"][1] for r in train_records], [r["label"][0] for r in train_records],
         args.batch_size)
@@ -61,13 +62,13 @@ def main():
     sample = ds[0]
     print(f"one __getitem__ in the main process: {time.perf_counter() - t:.3f}s")
     present = sum(len(r["slides"]) for r in train_records) / len(train_records)
-    mb = sample["X"].numel() * 4 * args.batch_size / 1e6
+    mb = sample["X"].numel() * sample["X"].element_size() * args.batch_size / 1e6
     print(f"batch X: {mb:.0f} MB, mean {present:.1f} of {len(vocab)} stains present "
           f"({100 * present / len(vocab):.0f}% of X is real data)")
 
     def loader():
         return M.DataLoader(ds, batch_sampler=sampler, num_workers=args.num_workers,
-                            worker_init_fn=M._seed_worker)
+                            worker_init_fn=M._seed_worker, pin_memory=True)
 
     # A. loader alone (worker start-up is timed separately).
     t0 = time.perf_counter()
