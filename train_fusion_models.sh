@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Train the multi-stain fusion models (multistain_MIL.py), one after the other,
-# each in its own folders, then score them on val and test:
+# Train the multi-stain fusion models (multistain_MIL.py), PARALLEL at a time
+# (default 2: one run leaves the GPU idle about half the time), each in its own
+# folders, then score them on val and test:
 #   1. train every variant in FUSIONS on the stains of stain_config.sh;
 #   2. score val and test with analyze_stain_weights.py (risk_scores.csv, plus
 #      the stain contributions and, on test, the leave-one-stain-out ablation);
@@ -16,6 +17,9 @@
 #
 # Usage: ./train_fusion_models.sh                       (unicorn and early)
 #        FUSIONS="unicorn early early_tf" ./train_fusion_models.sh
+#        PARALLEL=1 NUM_WORKERS=14 ./train_fusion_models.sh  (one at a time)
+# Each run starts 2 x NUM_WORKERS DataLoader workers (train and val), so lower
+# NUM_WORKERS if PARALLEL runs exhaust the CPU cores or the RAM.
 # A variant with a checkpoints_<name>/multistain_survival_last.pth is resumed
 # from it; one whose scores already exist is not rescored (delete them to redo).
 set -u
@@ -24,6 +28,8 @@ cd "$(dirname "$0")"
 source stain_config.sh
 
 FUSIONS=(${FUSIONS:-unicorn early})
+PARALLEL=${PARALLEL:-2}
+NUM_WORKERS=${NUM_WORKERS:-14}
 
 declare -A VARIANT_ARGS=(
     [unicorn]="--fusion unicorn"
@@ -33,7 +39,7 @@ declare -A VARIANT_ARGS=(
 )
 # Shared by every variant, so they differ only in the fusion architecture.
 COMMON_ARGS=(--task survival --patches_per_stain 512 --stain_dropout 0.2
-             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers 14)
+             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers "$NUM_WORKERS")
 DATA_ARGS=(--features_path "$FEATURES" --labels_path "$LABELS" --labels_csv "$LABELS_CSV")
 # The .npy copy of the features (python_scripts/MIL/h5_features_to_npy.py) is much
 # faster to sample from; used once a conversion run has completed.
@@ -44,31 +50,26 @@ if [[ -f "$FEATURES_NPY/_complete" ]]; then
                --labels_path "$LABELS" --labels_csv "$LABELS_CSV")
 fi
 
-scored=()
-for name in "${FUSIONS[@]}"; do
-    if [[ -z ${VARIANT_ARGS[$name]+x} ]]; then
-        echo "!!! unknown variant '$name' (one of: ${!VARIANT_ARGS[*]})"
-        continue
-    fi
-    ckpt_dir="checkpoints_$name"
-    best="$ckpt_dir/multistain_survival_best.pth"
-    last="$ckpt_dir/multistain_survival_last.pth"
-    resume=()
+# Train and score one variant. Runs in the background, so success is reported by
+# a marker file in $done_dir rather than by a variable.
+run_variant() {
+    local name=$1
+    local ckpt_dir="checkpoints_$name"
+    local best="$ckpt_dir/multistain_survival_best.pth"
+    local last="$ckpt_dir/multistain_survival_last.pth"
+    local resume=()
     [[ -f "$last" ]] && resume=(--resume "$last")
 
     echo "=== training $name -> $ckpt_dir${resume:+ (resuming)}"
     # shellcheck disable=SC2086  # VARIANT_ARGS holds several words on purpose
-    python python_scripts/MIL/multistain_MIL.py "${COMMON_ARGS[@]}" "${DATA_ARGS[@]}" \
-        ${VARIANT_ARGS[$name]} --stains "${STAINS[@]}" "${resume[@]}" \
-        --checkpoint_dir "$ckpt_dir" --log_dir "results/losses_$name" \
-        > "logs_train_$name.txt" 2>&1 \
-        || { echo "!!! $name training failed, see logs_train_$name.txt"; continue; }
+    python python_scripts/MIL/multistain_MIL.py "${COMMON_ARGS[@]}" "${DATA_ARGS[@]}"         ${VARIANT_ARGS[$name]} --stains "${STAINS[@]}" "${resume[@]}"         --checkpoint_dir "$ckpt_dir" --log_dir "results/losses_$name"         > "logs_train_$name.txt" 2>&1         || { echo "!!! $name training failed, see logs_train_$name.txt"; return; }
+    echo "=== $name trained"
     if [[ ! -f "$best" ]]; then
         echo "!!! $name: no $best, not scored"
-        continue
+        return
     fi
 
-    ok=1
+    local ok=1 split out skip
     for split in val test; do
         out="results/eval/$split/$name"
         if [[ -f "$out/risk_scores.csv" ]]; then
@@ -80,12 +81,26 @@ for name in "${FUSIONS[@]}"; do
         # The ablation (one pass per stain) is only needed on test.
         skip=()
         [[ $split == val ]] && skip=(--skip_ablation)
-        python python_scripts/evaluate_MIL/analyze_stain_weights.py \
-            --checkpoint "$best" "${DATA_ARGS[@]}" --split "$split" "${skip[@]}" \
-            --output_dir "$out" > "$out/eval.log" 2>&1 \
-            || { echo "!!! $out failed, see $out/eval.log"; ok=0; }
+        python python_scripts/evaluate_MIL/analyze_stain_weights.py             --checkpoint "$best" "${DATA_ARGS[@]}" --split "$split" "${skip[@]}"             --output_dir "$out" > "$out/eval.log" 2>&1             || { echo "!!! $out failed, see $out/eval.log"; ok=0; }
     done
-    [[ $ok == 1 ]] && scored+=("$name")
+    [[ $ok == 1 ]] && touch "$done_dir/$name"
+}
+
+done_dir=$(mktemp -d)
+trap 'rm -rf "$done_dir"' EXIT
+for name in "${FUSIONS[@]}"; do
+    if [[ -z ${VARIANT_ARGS[$name]+x} ]]; then
+        echo "!!! unknown variant '$name' (one of: ${!VARIANT_ARGS[*]})"
+        continue
+    fi
+    while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n; done
+    run_variant "$name" &
+done
+wait
+
+scored=()
+for name in "${FUSIONS[@]}"; do
+    [[ -f "$done_dir/$name" ]] && scored+=("$name")
 done
 
 # Paired test-set comparisons, on the biopsies both scored.
