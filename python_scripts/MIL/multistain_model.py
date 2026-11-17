@@ -42,6 +42,13 @@ import torch.nn as nn
 
 from torchmil.nn import AttentionPool
 
+# In eval mode nn.TransformerEncoderLayer takes a "fast path" kernel that, with a
+# key padding mask, materialises the full (batch, heads, L, L) attention matrix:
+# ~49 GB for the early_tf joint bag (L = 14 stains x 512 patches, batch 32), so
+# validation ran out of GPU memory although training fit. Disabling it makes eval
+# use the same memory-efficient attention as training (and the same numerics).
+torch.backends.mha.set_fastpath_enabled(False)
+
 
 def _transformer(d_model: int, n_layers: int, n_heads: int, dropout: float) -> nn.Module:
     """Pre-norm transformer encoder stack (batch-first)."""
