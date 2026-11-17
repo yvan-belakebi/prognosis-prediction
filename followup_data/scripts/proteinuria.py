@@ -1,8 +1,10 @@
 """
 proteinuria.py — Proteinuria (g/24 h) at the first biopsy, as computed in proteinuria.R.
 
-Reads the registry work file (xlsx) and writes a CSV with two columns:
-    <patient id column>, Proteinuria_g_d
+Reads the registry work file (xlsx) and writes a CSV with three columns:
+    <patient id column>, Proteinuria_g_d, Sampling_method
+Sampling_method names the measure the value comes from:
+    24h_urine_g_d, urine_conc_g_l, PCR, ACR or dipstick (empty when none)
 
 Steps (same as proteinuria.R):
   1. keep only the patient's first biopsy (Biopsy_no1 != 0)
@@ -66,8 +68,15 @@ def proteinuria_g_d(df, id_col=ID_COL):
     dip_g_d = dip.map({0: 0.0, 1: 0.65 * 1.7, 2: 2.0 * 1.7, 3: 3.5 * 1.7, 4: 3.5 * 1.7})
     pcr_g_d = pd.Series(upcr_to_uacr_weaver(pcr), index=df.index) * 0.01
 
-    prot = g_d.fillna(g_l * 1.7).fillna(pcr_g_d).fillna(acr * 0.01).fillna(dip_g_d)
-    return pd.DataFrame({id_col: df[id_col], "Proteinuria_g_d": prot})
+    # first available measure, in order of preference
+    sources = {"24h_urine_g_d": g_d, "urine_conc_g_l": g_l * 1.7, "PCR": pcr_g_d,
+               "ACR": acr * 0.01, "dipstick": dip_g_d}
+    prot = pd.Series(np.nan, index=df.index)
+    method = pd.Series(pd.NA, index=df.index, dtype="string")
+    for name, val in sources.items():
+        take = prot.isna() & val.notna()
+        prot[take], method[take] = val[take], name
+    return pd.DataFrame({id_col: df[id_col], "Proteinuria_g_d": prot, "Sampling_method": method})
 
 
 def main():
