@@ -46,6 +46,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 
 import numpy as np
@@ -176,6 +177,30 @@ def _seed_worker(worker_id):
     np.random.seed(torch.initial_seed() % 2**32)
     # With persistent workers this runs once per worker, not per epoch; each worker
     # then keeps drawing from its own stream, so epochs still differ.
+
+
+def _cap_workers_to_shm(num_workers, batch_bytes, prefetch=2):
+    """Lower num_workers so the batches they queue fit in /dev/shm.
+
+    Each worker hands its finished batches over through shared memory and keeps
+    ``prefetch`` of them queued. With --per_slide a batch of 32 biopsies is ~2.8 GB,
+    so 14 workers would need ~80 GB of /dev/shm and fail with "No space left on
+    device". Only 80% of the free space is used, to leave room for the batch in
+    transit. No-op where /dev/shm does not exist (Windows).
+    """
+    try:
+        free = shutil.disk_usage("/dev/shm").free
+    except OSError:
+        return num_workers
+    fit = int(0.8 * free // (batch_bytes * prefetch))
+    if fit >= num_workers:
+        return num_workers
+    print(
+        f"[WARN] /dev/shm has {free / 1e9:.0f} GB free and one batch is "
+        f"{batch_bytes / 1e9:.1f} GB: --num_workers lowered from {num_workers} "
+        f"to {fit}. Lower --batch_size or enlarge /dev/shm to load faster."
+    )
+    return fit
 
 
 def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_steps=1):
@@ -579,10 +604,15 @@ def main():
     # Workers stay alive across epochs (starting them costs seconds per worker,
     # twice per epoch) and batches land in pinned memory for an asynchronous copy
     # to the GPU.
+    num_workers = _cap_workers_to_shm(
+        args.num_workers,
+        batch_bytes=args.batch_size * len(vocab) * (args.max_slides if args.per_slide else 1)
+        * args.patches_per_stain * train_ds.feat_dim * 2,  # float16
+    )
     worker_kwargs = dict(
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=num_workers > 0,
     )
     train_loader = DataLoader(
         train_ds,
