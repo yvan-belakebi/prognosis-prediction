@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Train the multi-stain fusion models (multistain_MIL.py), one after the other,
-# each in its own folders, then score them on val and test:
+# Train the multi-stain fusion models (multistain_MIL.py), each in its own
+# folders, then score them on val and test. The GPUs of GPUS (default "0 1") run
+# side by side, one variant each: the 1st variant on GPU 0, the 2nd on GPU 1,
+# and each further one on the first GPU to become free:
 #   1. train every variant in FUSIONS on the stains of stain_config.sh;
 #   2. score val and test with analyze_stain_weights.py (risk_scores.csv, plus
 #      the stain contributions and, on test, the leave-one-stain-out ablation);
@@ -16,6 +18,9 @@
 #
 # Usage: ./train_fusion_models.sh                       (unicorn and early)
 #        FUSIONS="unicorn early early_tf" ./train_fusion_models.sh
+#        GPUS=0 ./train_fusion_models.sh                (all on GPU 0, one at a time)
+# The runs on different GPUs share the CPU cores and /dev/shm: multistain_MIL.py
+# lowers --num_workers to its share of /dev/shm (--shm_share).
 # A variant with a checkpoints_<name>/multistain_survival_last.pth is resumed
 # from it; one whose scores already exist is not rescored (delete them to redo).
 set -u
@@ -24,6 +29,7 @@ cd "$(dirname "$0")"
 source stain_config.sh
 
 FUSIONS=(${FUSIONS:-unicorn early})
+GPUS=(${GPUS:-0 1})
 
 declare -A VARIANT_ARGS=(
     [unicorn]="--fusion unicorn"
@@ -33,43 +39,42 @@ declare -A VARIANT_ARGS=(
 )
 # Shared by every variant, so they differ only in the fusion architecture.
 COMMON_ARGS=(--task survival --patches_per_stain 512 --stain_dropout 0.2
-             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers 14)
+             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers 14
+             --shm_share ${#GPUS[@]})
 # The fusion models need no patch coordinates, so COORDS is not passed.
 DATA_ARGS=(--features_path "$FEATURES" --file_ext "$FILE_EXT"
            --labels_path "$LABELS" --labels_csv "$LABELS_CSV")
 
-scored=()
-for name in "${FUSIONS[@]}"; do
-    if [[ -z ${VARIANT_ARGS[$name]+x} ]]; then
-        echo "!!! unknown variant '$name' (one of: ${!VARIANT_ARGS[*]})"
-        continue
-    fi
-    ckpt_dir="checkpoints_$name"
-    best="$ckpt_dir/multistain_survival_best.pth"
-    last="$ckpt_dir/multistain_survival_last.pth"
-    resume=()
+# Train and score one variant on the GPU(s) in CUDA_VISIBLE_DEVICES. Runs in a
+# background queue, so success is reported by a marker file in $done_dir.
+run_variant() {
+    local name=$1 gpu=$CUDA_VISIBLE_DEVICES
+    local ckpt_dir="checkpoints_$name"
+    local best="$ckpt_dir/multistain_survival_best.pth"
+    local last="$ckpt_dir/multistain_survival_last.pth"
+    local resume=()
     [[ -f "$last" ]] && resume=(--resume "$last")
 
-    echo "=== training $name -> $ckpt_dir${resume:+ (resuming)}"
+    echo "=== [GPU $gpu] training $name -> $ckpt_dir${resume:+ (resuming)}"
     # shellcheck disable=SC2086  # VARIANT_ARGS holds several words on purpose
     python python_scripts/MIL/multistain_MIL.py "${COMMON_ARGS[@]}" "${DATA_ARGS[@]}" \
         ${VARIANT_ARGS[$name]} --stains "${STAINS[@]}" "${resume[@]}" \
         --checkpoint_dir "$ckpt_dir" --log_dir "results/losses_$name" \
         > "logs_train_$name.txt" 2>&1 \
-        || { echo "!!! $name training failed, see logs_train_$name.txt"; continue; }
+        || { echo "!!! $name training failed, see logs_train_$name.txt"; return; }
     if [[ ! -f "$best" ]]; then
         echo "!!! $name: no $best, not scored"
-        continue
+        return
     fi
 
-    ok=1
+    local ok=1 split out skip
     for split in val test; do
         out="results/eval/$split/$name"
         if [[ -f "$out/risk_scores.csv" ]]; then
             echo "=== $out: already scored, reused"
             continue
         fi
-        echo "=== scoring $out"
+        echo "=== [GPU $gpu] scoring $out"
         mkdir -p "$out"
         # The ablation (one pass per stain) is only needed on test.
         skip=()
@@ -79,7 +84,41 @@ for name in "${FUSIONS[@]}"; do
             --output_dir "$out" > "$out/eval.log" 2>&1 \
             || { echo "!!! $out failed, see $out/eval.log"; ok=0; }
     done
-    [[ $ok == 1 ]] && scored+=("$name")
+    [[ $ok == 1 ]] && touch "$done_dir/$name"
+}
+
+names=()
+for name in "${FUSIONS[@]}"; do
+    if [[ -z ${VARIANT_ARGS[$name]+x} ]]; then
+        echo "!!! unknown variant '$name' (one of: ${!VARIANT_ARGS[*]})"
+        continue
+    fi
+    names+=("$name")
+done
+
+done_dir=$(mktemp -d)
+trap 'rm -rf "$done_dir"' EXIT
+# Each variant goes to the first GPU without a running job (gpu_pid holds the
+# job of each GPU), waiting for any job to end when all GPUs are busy.
+declare -A gpu_pid=()
+for name in "${names[@]}"; do
+    while :; do
+        free=""
+        for g in "${GPUS[@]}"; do
+            pid=${gpu_pid[$g]:-}
+            if [[ -z $pid ]] || ! kill -0 "$pid" 2>/dev/null; then free=$g; break; fi
+        done
+        [[ -n $free ]] && break
+        wait -n  # a job ended (and is reaped, so kill -0 now fails for it)
+    done
+    CUDA_VISIBLE_DEVICES=$free run_variant "$name" &
+    gpu_pid[$free]=$!
+done
+wait
+
+scored=()
+for name in "${names[@]}"; do
+    [[ -f "$done_dir/$name" ]] && scored+=("$name")
 done
 
 # Paired test-set comparisons, on the biopsies both scored.

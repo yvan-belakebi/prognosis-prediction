@@ -179,24 +179,27 @@ def _seed_worker(worker_id):
     # then keeps drawing from its own stream, so epochs still differ.
 
 
-def _cap_workers_to_shm(num_workers, batch_bytes, prefetch=2):
+def _cap_workers_to_shm(num_workers, batch_bytes, share=1, prefetch=2):
     """Lower num_workers so the batches they queue fit in /dev/shm.
 
     Each worker hands its finished batches over through shared memory and keeps
     ``prefetch`` of them queued. With --per_slide a batch of 32 biopsies is ~2.8 GB,
     so 14 workers would need ~80 GB of /dev/shm and fail with "No space left on
     device". Only 80% of the free space is used, to leave room for the batch in
-    transit. No-op where /dev/shm does not exist (Windows).
+    transit, divided by ``share`` when that many runs train side by side (they
+    all see the same free space at startup). No-op where /dev/shm does not
+    exist (Windows).
     """
     try:
         free = shutil.disk_usage("/dev/shm").free
     except OSError:
         return num_workers
-    fit = int(0.8 * free // (batch_bytes * prefetch))
+    fit = int(0.8 * free / share // (batch_bytes * prefetch))
     if fit >= num_workers:
         return num_workers
     print(
-        f"[WARN] /dev/shm has {free / 1e9:.0f} GB free and one batch is "
+        f"[WARN] /dev/shm has {free / 1e9:.0f} GB free (shared by {share} run(s)) "
+        f"and one batch is "
         f"{batch_bytes / 1e9:.1f} GB: --num_workers lowered from {num_workers} "
         f"to {fit}. Lower --batch_size or enlarge /dev/shm to load faster."
     )
@@ -454,6 +457,13 @@ def main():
         help="Display name of the regression target, used on the residual plot axes.",
     )
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--shm_share",
+        type=int,
+        default=1,
+        help="Number of runs training side by side on this machine; --num_workers "
+             "is capped to 1/shm_share of the free /dev/shm.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint_dir", default="checkpoints_multistain")
     parser.add_argument("--checkpoint_name", default=None)
@@ -608,6 +618,7 @@ def main():
         args.num_workers,
         batch_bytes=args.batch_size * len(vocab) * (args.max_slides if args.per_slide else 1)
         * args.patches_per_stain * train_ds.feat_dim * 2,  # float16
+        share=args.shm_share,
     )
     worker_kwargs = dict(
         num_workers=num_workers,
