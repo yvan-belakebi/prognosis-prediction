@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Train one DeepGraphSurv model per stain, sequentially, each in its own folders.
+#
+# Usage: ./train_per_stain.sh            (on GPU 0)
+#        GPU=1 ./train_per_stain.sh      (on GPU 1)
 set -u
 cd "$(dirname "$0")"
 # FEATURES, LABELS, LABELS_CSV, STAINS and stain_tag, shared with
 # compare_accross_stains.sh so evaluation always matches training.
 source stain_config.sh
+
+# Every run below sees only this GPU (as cuda:0 inside the process).
+export CUDA_VISIBLE_DEVICES=${GPU:-0}
+echo "=== GPU $CUDA_VISIBLE_DEVICES"
 
 for stain in "${STAINS[@]}"; do
     tag=$(stain_tag "$stain")
