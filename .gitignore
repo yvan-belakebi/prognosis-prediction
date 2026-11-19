@@ -30,6 +30,7 @@
 # Ignore stain references
 stain_refs*/
 # Miscellaneous 
+*.R
 *.zip
 *.svg
 *.docx
