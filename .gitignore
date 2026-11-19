@@ -57,3 +57,5 @@ WSI/
 results/
 logs*
 copy_files.sh
+graphify-out/
+poster/
