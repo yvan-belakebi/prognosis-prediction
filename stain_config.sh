@@ -3,7 +3,11 @@
 # Features: float16 .npy copies of TRIDENT's UNI-v2 .h5 features
 # (python_scripts/MIL/h5_features_to_npy.py). The patch coordinates, needed by the
 # graph models, stay in TRIDENT's patches/{slide}_patches.h5.
-FEATURES=WSI/whole_registry/20x_224px_0px_overlap/features_uni_v2_npy
+# FM names the foundation model (TRIDENT's encoder name, e.g. uni_v2, virchow2,
+# conch_v15): it picks the feature folder, and train_fusion_models.sh files its
+# checkpoints and scores under it. Set FEATURES too if the folder is named otherwise.
+FM=${FM:-uni_v2}
+FEATURES=${FEATURES:-WSI/whole_registry/20x_224px_0px_overlap/features_${FM}_npy}
 FILE_EXT=.npy
 COORDS=WSI/whole_registry/20x_224px_0px_overlap/patches
 LABELS=WSI/whole_registry/labels

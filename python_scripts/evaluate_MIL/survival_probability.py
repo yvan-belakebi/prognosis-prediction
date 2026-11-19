@@ -46,8 +46,8 @@ Usage:
         --model PAS=results/eval/{split}/PAS/risk_scores.csv \\
         --model voting=results/eval/voting_rank_none/{split}/risk_scores.csv \\
         --model late=results/eval/late_fusion/{split}/risk_scores.csv \\
-        --model unicorn=results/eval/{split}/unicorn/risk_scores.csv \\
-        --model early=results/eval/{split}/early/risk_scores.csv \\
+        --model unicorn=results/eval/{split}/uni_v2/unicorn_s0/risk_scores.csv \\
+        --model early=results/eval/{split}/uni_v2/early_s0/risk_scores.csv \\
         --output_dir results/survival_probability
 """
 
