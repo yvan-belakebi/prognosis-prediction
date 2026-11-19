@@ -73,7 +73,13 @@ def load_biopsies():
             "Biopsinr": "registry_biopsy_number",
             "Diagnoser P1.2013_konklusiv_diagnose": "Diagnosis",
             "Beregnet_eGFR_felles": "eGFR",
+            "Kjonn": "Sex",
+            "HOYDE": "Height_diagnosis",
+            "VEKT": "Weight_diagnosis",
+            "Alder": "Age",
+            ############# Put proteinuria here ###############
             "TBiopsi": "transplant_biopsy",
+            "Age_diagnosis": "Age",
         }
     )
     df = df[
@@ -83,6 +89,11 @@ def load_biopsies():
             "registry_biopsy_number",
             "Diagnosis",
             "eGFR",
+            "proteinuria",
+            "Sex",
+            "Age",
+            "Height_diagnosis",
+            "Weight_diagnosis",
             "transplant_biopsy",
         ]
     ]
@@ -90,6 +101,8 @@ def load_biopsies():
     df["Biopsy_date"] = pd.to_datetime(df["Biopsy_date"], errors="coerce")
     df["is_IgA"] = df["Diagnosis"].str.contains("IgA nefropati", case=False, na=False)
     df["key"] = df["registry_biopsy_number"].map(biopsy_key)
+    df["BMI"] = df["Weight_diagnosis"] / (df["Height_diagnosis"] / 100) ** 2
+    df.drop(columns=["Height_diagnosis", "Weight_diagnosis"], inplace=True)
     return df.reset_index(drop=True)
 
 
@@ -263,6 +276,10 @@ def main():
         "registry_biopsy_number",
         "Diagnosis",
         "eGFR",
+        "proteinuria",
+        "Sex",
+        "Age",
+        "BMI",
         "is_IgA",
         "transplant_biopsy",
         "prior_krt",
@@ -302,6 +319,10 @@ def main():
         "Biopsy_date",
         "Diagnosis",
         "eGFR",
+        "proteinuria",
+        "Sex",
+        "Age",
+        "BMI",
         "is_IgA",
         "transplant_biopsy",
         "Treatment_date",
