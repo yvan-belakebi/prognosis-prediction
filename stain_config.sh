@@ -7,7 +7,9 @@
 # conch_v15): it picks the feature folder, and train_fusion_models.sh files its
 # checkpoints and scores under it. Set FEATURES too if the folder is named otherwise.
 FM=${FM:-uni_v2}
-FEATURES=${FEATURES:-WSI/whole_registry/20x_224px_0px_overlap/features_${FM}_npy}
+# Feature folder of a foundation model, by TRIDENT's naming.
+fm_features() { echo "WSI/whole_registry/20x_224px_0px_overlap/features_${1}_npy"; }
+FEATURES=${FEATURES:-$(fm_features "$FM")}
 FILE_EXT=.npy
 COORDS=WSI/whole_registry/20x_224px_0px_overlap/patches
 LABELS=WSI/whole_registry/labels
