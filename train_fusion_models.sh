@@ -88,22 +88,28 @@ run_variant() {
         return
     fi
 
-    local ok=1 split out skip
+    local ok=1 split out skip elog
     for split in val test; do
         out="results/eval/$split/$FM/$run"
+        # Scored before embeddings were saved: add them only (no rescoring).
         if [[ -f "$out/risk_scores.csv" ]]; then
-            echo "=== $out: already scored, reused"
-            continue
+            if [[ -f "$out/embeddings.npz" ]]; then
+                echo "=== $out: already scored, reused"
+                continue
+            fi
+            skip=(--embeddings_only) elog="$out/embeddings.log"
+            echo "=== [GPU $gpu] embeddings for $out"
+        else
+            # The ablation (one pass per stain) is only needed on test.
+            skip=() elog="$out/eval.log"
+            [[ $split == val ]] && skip=(--skip_ablation)
+            echo "=== [GPU $gpu] scoring $out"
         fi
-        echo "=== [GPU $gpu] scoring $out"
         mkdir -p "$out"
-        # The ablation (one pass per stain) is only needed on test.
-        skip=()
-        [[ $split == val ]] && skip=(--skip_ablation)
         python python_scripts/evaluate_MIL/analyze_stain_weights.py \
-            --checkpoint "$best" "${DATA_ARGS[@]}" --split "$split" "${skip[@]}" \
-            --output_dir "$out" > "$out/eval.log" 2>&1 \
-            || { echo "!!! $out failed, see $out/eval.log"; ok=0; }
+            --checkpoint "$best" "${DATA_ARGS[@]}" --split "$split" "${skip[@]}" --save_embeddings \
+            --output_dir "$out" > "$elog" 2>&1 \
+            || { echo "!!! $out failed, see $elog"; ok=0; }
     done
     [[ $ok == 1 ]] && touch "$done_dir/$run"
 }

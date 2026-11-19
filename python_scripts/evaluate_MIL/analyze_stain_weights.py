@@ -41,6 +41,8 @@ Outputs (in --output_dir):
     stain_waterfall.png              three example biopsies, low / median / high
     stain_ablation.csv/.png          leave-one-stain-out metric change
     panel_baseline.csv               availability-only prognostic baseline
+    embeddings.npz                   --save_embeddings: pooled vector z and per-stain
+                                     tokens per biopsy, for representation_similarity.py
 
 Usage:
     python python_scripts/evaluate_MIL/analyze_stain_weights.py \\
@@ -253,13 +255,17 @@ def _slide_mask(batch, device):
 
 
 @torch.no_grad()
-def collect(model, loader, device, check_tol=1e-4):
-    """Run the model and return predictions, contributions, attention and masks."""
+def collect(model, loader, device, check_tol=1e-4, keep_embeddings=False):
+    """Run the model and return predictions, contributions, attention and masks,
+    plus, with ``keep_embeddings``, ``{"z": (B, d), "tokens": (B, S, d)}``: the
+    pooled bag vector entering the head and the per-stain tokens it pools (after
+    the aggregator for UNICORN, so already mixed across stains; the stain's
+    attention-weighted patch mean for early fusion). Else None."""
     captured = {}
     handle = model.stain_pool.register_forward_pre_hook(
         lambda _mod, args: captured.__setitem__("t", args[0])
     )
-    preds, contribs, atts, masks = [], [], [], []
+    preds, contribs, atts, masks, zs, tokens = [], [], [], [], [], []
     worst = 0.0
     try:
         for batch in loader:
@@ -280,6 +286,10 @@ def collect(model, loader, device, check_tol=1e-4):
             contribs.append(contrib.cpu())
             atts.append(a.cpu())
             masks.append(mask.cpu())
+            if keep_embeddings:
+                t = captured["t"]
+                zs.append((a.unsqueeze(-1) * t).sum(1).float().cpu())
+                tokens.append((t * mask.unsqueeze(-1)).half().cpu())
     finally:
         handle.remove()
 
@@ -291,11 +301,14 @@ def collect(model, loader, device, check_tol=1e-4):
             f"formula in decompose() needs updating."
         )
     print(f"  decomposition self-check: max |prediction - sum(contrib)| = {worst:.2e}")
+    emb = ({"z": torch.cat(zs).numpy(), "tokens": torch.cat(tokens).numpy()}
+           if keep_embeddings else None)
     return (
         torch.cat(preds).numpy(),
         torch.cat(contribs).numpy(),
         torch.cat(atts).numpy(),
         torch.cat(masks).numpy(),
+        emb,
     )
 
 
@@ -688,7 +701,20 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--theme", default="light", choices=["light", "dark"])
     parser.add_argument("--skip_ablation", action="store_true")
+    parser.add_argument(
+        "--save_embeddings",
+        action="store_true",
+        help="Also write embeddings.npz: per biopsy the pooled vector z entering the "
+             "head and the per-stain tokens (for representation_similarity.py).",
+    )
+    parser.add_argument(
+        "--embeddings_only",
+        action="store_true",
+        help="Write embeddings.npz and stop (no CSVs, plots or ablation): for runs "
+             "already scored without --save_embeddings.",
+    )
     args = parser.parse_args()
+    args.save_embeddings |= args.embeddings_only
 
     cfg_path = args.config or os.path.join(
         os.path.dirname(os.path.abspath(args.checkpoint)), "multistain_config.json"
@@ -750,7 +776,24 @@ def main():
     model.eval()
 
     # --- Contributions --------------------------------------------------------
-    preds, contribs, atts, masks = collect(model, loader, device)
+    preds, contribs, atts, masks, emb = collect(
+        model, loader, device, keep_embeddings=args.save_embeddings
+    )
+    if args.save_embeddings:
+        emb_path = os.path.join(args.output_dir, "embeddings.npz")
+        np.savez_compressed(
+            emb_path,
+            biopsy=np.array([str(r["biopsy"]) for r in records]),
+            z=emb["z"],
+            tokens=emb["tokens"],  # float16, zero where the stain is absent
+            stain_mask=masks.astype(bool),
+            stain_att=atts.astype(np.float32),
+            stain_names=np.array(stain_names),
+            fusion=np.array(cfg.get("fusion", "unicorn")),
+        )
+        print(f"  wrote {emb_path}")
+        if args.embeddings_only:
+            return
     # Model outputs are in normalised units for regression; put everything back
     # into raw label units so the numbers match the target the reader knows.
     preds_raw = preds * label_std + label_mean

@@ -188,6 +188,27 @@ def find_runs(args, parser):
     return keep
 
 
+def run_meta(names):
+    """FM, variant and seed of each FM/variant_sSEED run name."""
+    meta = pd.DataFrame([RUN_RE.match(n).groupdict() for n in names], index=names)
+    meta["seed"] = meta["seed"].astype(int)
+    return meta
+
+
+def pair_runs(meta):
+    """Every pair of runs (i, j, kind, variant group); see KINDS."""
+    pairs = []
+    for i, j in itertools.combinations(range(len(meta)), 2):
+        a, b = meta.iloc[i], meta.iloc[j]
+        same_fm, same_var = a.fm == b.fm, a.variant == b.variant
+        if same_var:
+            kind = "seed" if same_fm else "fm"
+        else:
+            kind = "architecture" if same_fm else "fm+architecture"
+        pairs.append((i, j, kind, a.variant if same_var else "across variants"))
+    return pairs
+
+
 def pair_scores(r, pi, pj):
     """Per comparable pair (pi had the earlier event): 1 right, 0.5 tie, 0 wrong."""
     d = r[pi] - r[pj]
@@ -285,8 +306,7 @@ def main():
     names = sorted(models, key=lambda n: (RUN_RE.match(n)["variant"],
                                           RUN_RE.match(n)["fm"], int(RUN_RE.match(n)["seed"])))
     models = {n: models[n] for n in names}
-    meta = pd.DataFrame([RUN_RE.match(n).groupdict() for n in names], index=names)
-    meta["seed"] = meta["seed"].astype(int)
+    meta = run_meta(names)
     fms = [f for f in (args.fms or sorted(meta.fm.unique())) if f in set(meta.fm)]
     variants = [v for v in (args.variants or sorted(meta.variant.unique()))
                 if v in set(meta.variant)]
@@ -318,15 +338,7 @@ def main():
     avg_pct = {k: pct[idx].mean(axis=1).to_numpy() for k, idx in fm_var.items()}
 
     # --- Pairs of runs and two-run ensembles -------------------------------------------
-    run_pairs = []  # (i, j, kind, variant group)
-    for i, j in itertools.combinations(range(K), 2):
-        a, b = meta.iloc[i], meta.iloc[j]
-        same_fm, same_var = a.fm == b.fm, a.variant == b.variant
-        if same_var:
-            kind = "seed" if same_fm else "fm"
-        else:
-            kind = "architecture" if same_fm else "fm+architecture"
-        run_pairs.append((i, j, kind, a.variant if same_var else "across variants"))
+    run_pairs = pair_runs(meta)
     ens = [(i, j, kind, var) for i, j, kind, var in run_pairs if kind in ("seed", "fm")]
     ens_names = [f"{names[i]} + {names[j]}" for i, j, _, _ in ens]
 
