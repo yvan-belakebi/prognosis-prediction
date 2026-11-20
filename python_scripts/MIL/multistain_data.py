@@ -37,6 +37,7 @@ Returned sample (all tensors, so torch's default collate stacks them):
     Y          (n_label,)                        float32, [time, event] or [target]
 """
 
+import mmap
 import os
 
 import h5py
@@ -201,11 +202,20 @@ def _bag_shape(path) -> tuple:
 
 
 def _read_rows(path, rows: np.ndarray) -> np.ndarray:
-    """Read the given (sorted, unique) feature rows from an .h5 or .npy bag."""
+    """Read the given (sorted, unique) feature rows from an .h5 or .npy bag.
+
+    The .npy memmap is marked MADV_RANDOM: the rows are scattered (512 of tens of
+    thousands), and the kernel's default readahead would read ~128 KB around each
+    5 KB row, so most of the disk traffic would be rows never used.
+    """
     if path.endswith(".h5"):
         with h5py.File(path, "r") as f:
             return np.asarray(f["features"][rows])
-    return np.asarray(np.load(path, mmap_mode="r")[rows])
+    arr = np.load(path, mmap_mode="r")
+    mm = getattr(arr, "_mmap", None)
+    if mm is not None and hasattr(mmap, "MADV_RANDOM"):  # Linux, Python 3.8+
+        mm.madvise(mmap.MADV_RANDOM)
+    return np.asarray(arr[rows])
 
 
 def _read_stain_bag(paths, n_patches: int, random: bool):
