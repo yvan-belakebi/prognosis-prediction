@@ -48,6 +48,7 @@ import os
 import random
 import shutil
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -238,10 +239,19 @@ def _cap_workers(num_workers, batch_bytes, share=1, prefetch=2):
 
 
 def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_steps=1):
+    """Return (mean loss, seconds waiting for batches, seconds in total).
+
+    The wait is the time spent in the loader before each batch; loss.item() syncs
+    the GPU every step, so the rest of the epoch is the GPU's work. A high wait
+    share means the GPU is starved by data loading.
+    """
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
+    start = tick = time.perf_counter()
+    wait = 0.0
     for i, batch in enumerate(loader):
+        wait += time.perf_counter() - tick
         Y = batch["Y"].to(device, non_blocking=True)
         pred = _predict(model, batch, device)
         if task == "survival":
@@ -253,7 +263,8 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
             optimizer.step()
             optimizer.zero_grad()
-    return total_loss / max(len(loader), 1)
+        tick = time.perf_counter()
+    return total_loss / max(len(loader), 1), wait, time.perf_counter() - start
 
 
 @torch.no_grad()
@@ -771,7 +782,7 @@ def main():
 
     # --- Training -------------------------------------------------------------
     for epoch in range(start_epoch, args.epochs + 1):
-        train_loss = train_epoch(
+        train_loss, wait_s, train_s = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -780,11 +791,20 @@ def main():
             criterion,
             accumulation_steps=args.accumulation_steps,
         )
+        timing = (
+            f"[time] epoch {epoch}: train {train_s:.0f} s "
+            f"({len(train_loader) / max(train_s, 1e-9):.2f} batches/s, "
+            f"{100 * wait_s / max(train_s, 1e-9):.0f}% waiting for data)"
+        )
 
         if val_loader is not None:
+            val_start = time.perf_counter()
             val_loss, metric, _, _ = val_epoch(
                 model, val_loader, device, args.task, criterion
             )
+            timing += f", val {time.perf_counter() - val_start:.0f} s"
+        print(timing)
+        if val_loader is not None:
             # The MAE comes back in z-score units; report it in raw label units so the
             # log reads in mL/min/1.73m². Monotone, so best-model selection is unaffected.
             if args.task == "regression":
