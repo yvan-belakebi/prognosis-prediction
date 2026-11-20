@@ -243,14 +243,20 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
 
     The wait is the time spent in the loader before each batch; loss.item() syncs
     the GPU every step, so the rest of the epoch is the GPU's work. A high wait
-    share means the GPU is starved by data loading.
+    share means the GPU is starved by data loading. The running speed is printed
+    10 times per epoch, so a long epoch shows its speed within minutes.
     """
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
     start = tick = time.perf_counter()
     wait = 0.0
+    report = max(1, len(loader) // 10)
     for i, batch in enumerate(loader):
+        if i and i % report == 0:
+            elapsed = tick - start
+            print(f"[time]   batch {i}/{len(loader)}: {i / elapsed:.2f} batches/s, "
+                  f"{100 * wait / elapsed:.0f}% waiting for data")
         wait += time.perf_counter() - tick
         Y = batch["Y"].to(device, non_blocking=True)
         pred = _predict(model, batch, device)
@@ -362,6 +368,9 @@ def save_residual_plot(y_true, y_pred, path, label_name="label"):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # Logs are redirected to files; without line buffering a line can sit in the
+    # buffer for a long time (until it fills or the run ends).
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(
         description="Train the multi-stain fusion model (UNICORN-style) on biopsies.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
