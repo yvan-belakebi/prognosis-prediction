@@ -41,7 +41,7 @@
 #        FMS="uni_v2 conch_v15" FEATURES_conch_v15=path/to/feats ./train_fusion_models.sh
 #        GPUS=0 ./train_fusion_models.sh                (all on GPU 0, one at a time)
 # The runs on different GPUs share the CPU cores and /dev/shm: multistain_MIL.py
-# lowers --num_workers to its share of /dev/shm (--shm_share).
+# lowers --num_workers to its share of /dev/shm, RAM and cores (--shm_share).
 # A run with a multistain_survival_last.pth in its checkpoint folder is resumed
 # from it; one whose scores already exist is not rescored (delete them to redo).
 set -u

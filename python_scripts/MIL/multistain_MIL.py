@@ -179,29 +179,60 @@ def _seed_worker(worker_id):
     # then keeps drawing from its own stream, so epochs still differ.
 
 
-def _cap_workers_to_shm(num_workers, batch_bytes, share=1, prefetch=2):
-    """Lower num_workers so the batches they queue fit in /dev/shm.
+def _available_ram():
+    """MemAvailable of /proc/meminfo in bytes (free RAM + reclaimable cache), or None."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
 
-    Each worker hands its finished batches over through shared memory and keeps
-    ``prefetch`` of them queued. With --per_slide a batch of 32 biopsies is ~2.8 GB,
-    so 14 workers would need ~80 GB of /dev/shm and fail with "No space left on
-    device". Only 80% of the free space is used, to leave room for the batch in
-    transit, divided by ``share`` when that many runs train side by side (they
-    all see the same free space at startup). No-op where /dev/shm does not
-    exist (Windows).
+
+def _cap_workers(num_workers, batch_bytes, share=1, prefetch=2):
+    """Lower num_workers to what /dev/shm, the RAM and the CPU cores can hold.
+
+    Each worker keeps ``prefetch`` finished batches queued in /dev/shm, and while
+    it builds the next one holds its 32 samples plus their collated copy: about
+    ``prefetch + 2`` batches of RAM. A batch is 32 x 14 stains x 512 patches x D
+    float16 (1.2 GB for Virchow2's D=2560, 0.7 GB for UNI-v2), so 14 workers want
+    ~65 GB per run. /dev/shm is a size limit, not reserved RAM, so its check alone
+    lets two side-by-side runs fill RAM and swap, and the GPUs then wait on
+    swapped-out batches. Limits, each divided by ``share`` (the runs side by
+    side, which all see the same free memory at startup):
+      - /dev/shm: 80% of its free space, for the queued batches;
+      - RAM: 60% of MemAvailable, the rest left to the page cache that serves the
+        feature reads;
+      - CPU: one core per worker, one left for the training process.
+    No-op where /proc and /dev/shm do not exist (Windows).
     """
+    limits = {}
     try:
         free = shutil.disk_usage("/dev/shm").free
+        limits[f"/dev/shm ({free / 1e9:.0f} GB free)"] = int(
+            0.8 * free / share // (batch_bytes * prefetch)
+        )
     except OSError:
+        pass
+    ram = _available_ram()
+    if ram is not None:
+        limits[f"RAM ({ram / 1e9:.0f} GB available)"] = int(
+            0.6 * ram / share // (batch_bytes * (prefetch + 2))
+        )
+    if os.name == "posix":
+        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+        limits[f"CPU ({cores} cores)"] = max(1, (cores or 1) // share - 1)
+    if not limits:
         return num_workers
-    fit = int(0.8 * free / share // (batch_bytes * prefetch))
+    why, fit = min(limits.items(), key=lambda kv: kv[1])
     if fit >= num_workers:
         return num_workers
     print(
-        f"[WARN] /dev/shm has {free / 1e9:.0f} GB free (shared by {share} run(s)) "
-        f"and one batch is "
-        f"{batch_bytes / 1e9:.1f} GB: --num_workers lowered from {num_workers} "
-        f"to {fit}. Lower --batch_size or enlarge /dev/shm to load faster."
+        f"[WARN] --num_workers lowered from {num_workers} to {fit}, set by the {why} "
+        f"shared by {share} run(s); one batch is {batch_bytes / 1e9:.1f} GB. "
+        f"Lower --batch_size or --patches_per_stain to load with more workers."
     )
     return fit
 
@@ -462,7 +493,7 @@ def main():
         type=int,
         default=1,
         help="Number of runs training side by side on this machine; --num_workers "
-             "is capped to 1/shm_share of the free /dev/shm.",
+             "is capped to 1/shm_share of the free /dev/shm, RAM and CPU cores.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint_dir", default="checkpoints_multistain")
@@ -614,7 +645,7 @@ def main():
     # Workers stay alive across epochs (starting them costs seconds per worker,
     # twice per epoch) and batches land in pinned memory for an asynchronous copy
     # to the GPU.
-    num_workers = _cap_workers_to_shm(
+    num_workers = _cap_workers(
         args.num_workers,
         batch_bytes=args.batch_size * len(vocab) * (args.max_slides if args.per_slide else 1)
         * args.patches_per_stain * train_ds.feat_dim * 2,  # float16
