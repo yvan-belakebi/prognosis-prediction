@@ -26,9 +26,15 @@ Run pairs come in four kinds:
                       only one wrong, Jaccard and overlap coefficient of the wrong
                       pairs, and Cohen's kappa of right/wrong (chance-corrected:
                       two runs with 30% errors share 9% by chance alone). Mean per
-                      kind, and kappa(seed) - kappa(fm) with a CI. Also kappa by
-                      time between the two outcomes (close outcomes are hard for
-                      every model, which inflates overlap).
+                      kind, and kappa(seed) - kappa(fm) with a CI. Jaccard is shown
+                      with its chance value pa*pb / (pa + pb - pa*pb) (~0.1 at C~0.82).
+                      Kappa corrects for chance, not for the pairs hard for every
+                      model (shared difficulty), so it has two references: two seeds
+                      of one FM (ceiling) and a clinical Cox model on diagnosis + eGFR
+                      (floor: a good predictor built on other information). The
+                      cross-FM kappa is placed between them, 0 = clinical, 1 = seed.
+                      Also kappa by time between the two outcomes (close outcomes
+                      are hard for every model, which inflates overlap).
   3. Complementarity  Spearman correlation of risks. Ensemble gain of two runs
                       (mean percentile rank) over the better of the two: a cross-FM
                       ensemble against a two-seed ensemble of one FM, which gains
@@ -49,7 +55,8 @@ rank) when there are several.
 Outputs (in --output_dir):
     runs.csv                   C-index per run
     summary.csv                every quantity above with bootstrap 95% CI
-    pairwise_overlap.csv       per pair of runs: kind, kappa, Jaccard, ..., Spearman
+    pairwise_overlap.csv       per pair of runs, and per run with the clinical
+                               reference: kind, kappa, Jaccard (+ chance), ..., Spearman
     kappa_by_gap.csv           mean kappa per kind and time-gap bin
     ensembles.csv              per two-run ensemble: C-index and gain
     incremental_cox.csv        LR tests of one FM's risk given the other's
@@ -101,7 +108,11 @@ RUN_RE = re.compile(r"^(?P<fm>[^/]+)/(?P<variant>.+)_s(?P<seed>\d+)$")
 KINDS = ["seed", "fm", "architecture", "fm+architecture"]
 KIND_LABEL = {"seed": "same FM, other seed", "fm": "other FM",
               "architecture": "same FM, other variant",
-              "fm+architecture": "other FM, other variant"}
+              "fm+architecture": "other FM, other variant",
+              "clinical": "clinical Cox (reference)"}
+REF = "clinical"  # name of the reference model in the tables
+OVERLAP_STATS = ("kappa", "jaccard", "jaccard_chance", "overlap_coef", "both_wrong",
+                 "one_wrong", "both_right")
 GAP_BINS = [0, 0.5, 1, 2, 5, np.inf]
 GAP_LABELS = ["<0.5y", "0.5-1y", "1-2y", "2-5y", ">5y"]
 
@@ -225,6 +236,8 @@ def agreement(p, both):
         return dict(
             kappa=(po - pe) / (1 - pe),
             jaccard=both / (pa + pb - both),
+            # Jaccard if the two runs erred on independent pairs (kappa = 0).
+            jaccard_chance=pa * pb / (pa + pb - pa * pb),
             overlap_coef=both / np.minimum(pa, pb),
             both_wrong=both,
             one_wrong=pa + pb - 2 * both,
@@ -333,6 +346,16 @@ def main():
 
     pct = risk.apply(rankdata) / n  # percentile rank on the eval split, per run
 
+    # Reference: a clinical Cox model (diagnosis + eGFR) fitted on the fit split. Two
+    # good predictors built on different information still share the pairs that are
+    # hard for any model, so a run's kappa with it is the floor of "shared difficulty",
+    # as the seed pairs are the ceiling.
+    design = ClinicalDesign(clin_f, args.min_group)
+    Xc_f, Xc_e = design(clin_f).to_numpy(), design(clin).to_numpy()
+    tf, ef = lab_f["time"].to_numpy(float), lab_f["event"].to_numpy(int)
+    ref_risk = Xc_e @ fit_cox(Xc_f, tf, ef, args.ridge)
+    ref_pct = rankdata(ref_risk) / n
+
     # Seed-averaged percentile rank per FM x variant.
     fm_var = {(f, v): list(g.index) for (f, v), g in meta.groupby(["fm", "variant"])}
     avg_pct = {k: pct[idx].mean(axis=1).to_numpy() for k, idx in fm_var.items()}
@@ -342,20 +365,25 @@ def main():
     ens = [(i, j, kind, var) for i, j, kind, var in run_pairs if kind in ("seed", "fm")]
     ens_names = [f"{names[i]} + {names[j]}" for i, j, _, _ in ens]
 
+    # Columns: the K runs, the reference (column K), then the ensembles.
     S = np.column_stack(
         [pair_scores(risk[m].to_numpy(), pi, pj) for m in names]
+        + [pair_scores(ref_risk, pi, pj)]
         + [pair_scores((pct.iloc[:, i] + pct.iloc[:, j]).to_numpy(), pi, pj)
            for i, j, _, _ in ens]
     )
-    Wr = (S[:, :K] == 0).astype(np.float32)  # wrong = strictly misranked
+    Wr = (S[:, :K + 1] == 0).astype(np.float32)  # wrong = strictly misranked
 
     groups_kind = {}
     for i, j, kind, var in run_pairs:
         groups_kind.setdefault((kind, var), []).append((i, j))
     groups_ens = {}
-    for col, (i, j, kind, var) in enumerate(ens, start=K):
+    for col, (i, j, kind, var) in enumerate(ens, start=K + 1):
         groups_ens.setdefault((kind, var), []).append((col, i, j))
     run_idx = {k: [names.index(m) for m in idx] for k, idx in fm_var.items()}
+    # Each run with the reference, per variant.
+    for v in variants:
+        groups_kind[(REF, v)] = [(i, K) for i in range(K) if meta.variant.iloc[i] == v]
 
     def quantities(c, ag):
         q = {}
@@ -366,10 +394,10 @@ def main():
                 if (fa, v) in run_idx and (fb, v) in run_idx:
                     q[("c_index_diff", f"{fa} - {fb}", v)] = (
                         c[run_idx[(fa, v)]].mean() - c[run_idx[(fb, v)]].mean())
+        q[("c_index", REF, "-")] = c[K]
         for (kind, v), prs in groups_kind.items():
             ii, jj = np.array(prs).T
-            for stat in ("kappa", "jaccard", "overlap_coef", "both_wrong", "one_wrong",
-                         "both_right"):
+            for stat in OVERLAP_STATS:
                 q[(stat, kind, v)] = np.nanmean(ag[stat][ii, jj])
         for (kind, v), cols in groups_ens.items():
             cc, ii, jj = np.array(cols).T
@@ -377,6 +405,13 @@ def main():
         for v in variants + ["across variants"]:
             if ("kappa", "seed", v) in q and ("kappa", "fm", v) in q:
                 q[("kappa_diff", "seed - fm", v)] = q[("kappa", "seed", v)] - q[("kappa", "fm", v)]
+                if (("kappa", REF, v)) in q:
+                    # 0: the FMs agree no more than a run and the clinical model
+                    # (shared difficulty only); 1: as much as two seeds of one FM.
+                    floor, ceil = q[("kappa", REF, v)], q[("kappa", "seed", v)]
+                    q[("kappa_position", "fm", v)] = (
+                        (q[("kappa", "fm", v)] - floor) / (ceil - floor)
+                        if ceil != floor else np.nan)
             if ("ensemble_gain", "seed", v) in q and ("ensemble_gain", "fm", v) in q:
                 q[("ensemble_gain_diff", "fm - seed", v)] = (
                     q[("ensemble_gain", "fm", v)] - q[("ensemble_gain", "seed", v)])
@@ -402,7 +437,7 @@ def main():
     sumd = summary.set_index(["quantity", "group", "variant"])
 
     # --- 1. Performance ------------------------------------------------------------------
-    runs_df = meta.assign(c_index=c_all[:K], error_rate=Wr.mean(0))
+    runs_df = meta.assign(c_index=c_all[:K], error_rate=Wr[:, :K].mean(0))
     runs_df.rename_axis("run").to_csv(out("runs.csv"))
     print("\n1. C-index (mean over seeds, bootstrap 95% CI)")
     for v in variants:
@@ -416,36 +451,44 @@ def main():
     if "c_index_diff" in sumd.index.get_level_values(0):
         for (g, v), r in sumd.loc["c_index_diff"].iterrows():
             print(f"  {v}: {g} = {r.estimate:+.4f} [{r.ci_low:+.4f}, {r.ci_high:+.4f}]")
+    r = sumd.loc[("c_index", REF, "-")]
+    print(f"  reference: clinical Cox (diagnosis + eGFR, fitted on {args.fit_split}) "
+          f"C={r.estimate:.4f} [{r.ci_low:.4f}, {r.ci_high:.4f}]")
 
     # --- 2. Error overlap ----------------------------------------------------------------
-    spearman = pct.corr(method="pearson")  # of ranks = Spearman of risks
+    spearman = pct.assign(**{REF: ref_pct}).corr(method="pearson")  # of ranks = Spearman
     spearman.to_csv(out("spearman.csv"))
     rows = []
-    for i, j, kind, var in run_pairs:
-        rows.append(dict(run_a=names[i], run_b=names[j], kind=kind, variant=var,
-                         **{s: ag_all[s][i, j] for s in ("kappa", "jaccard", "overlap_coef",
-                                                          "both_wrong", "one_wrong",
-                                                          "both_right")},
+    for i, j, kind, var in run_pairs + [(i, K, REF, meta.variant.iloc[i]) for i in range(K)]:
+        rows.append(dict(run_a=names[i], run_b=names[j] if j < K else REF, kind=kind,
+                         variant=var, **{s: ag_all[s][i, j] for s in OVERLAP_STATS},
                          at_least_one_right=1 - ag_all["both_wrong"][i, j],
                          spearman=spearman.iloc[i, j]))
     pair_df = pd.DataFrame(rows)
     pair_df.to_csv(out("pairwise_overlap.csv"), index=False)
 
-    print("\n2. Overlap of misranked pairs, mean per kind of run pair (95% CI)")
+    print("\n2. Overlap of misranked pairs, mean per kind of run pair (95% CI). Jaccard "
+          "by chance: if the two runs erred on independent pairs")
     for v in variants + ["across variants"]:
-        for kind in KINDS:
+        for kind in KINDS + [REF]:
             if ("kappa", kind, v) not in point:
                 continue
             k = sumd.loc[("kappa", kind, v)]
-            jac = point[("jaccard", kind, v)]
+            jac, jac0 = point[("jaccard", kind, v)], point[("jaccard_chance", kind, v)]
             bw = point[("both_wrong", kind, v)]
             print(f"  {v:16s} {KIND_LABEL[kind]:26s} kappa={k.estimate:.3f} "
-                  f"[{k.ci_low:.3f}, {k.ci_high:.3f}]  Jaccard={jac:.3f}  both wrong={bw:.1%}")
+                  f"[{k.ci_low:.3f}, {k.ci_high:.3f}]  Jaccard={jac:.3f} "
+                  f"(chance {jac0:.3f})  both wrong={bw:.1%}")
         if ("kappa_diff", "seed - fm", v) in point:
             d = sumd.loc[("kappa_diff", "seed - fm", v)]
             print(f"  {v:16s} kappa(seed) - kappa(fm) = {d.estimate:+.3f} "
                   f"[{d.ci_low:+.3f}, {d.ci_high:+.3f}]  (> 0: the FMs disagree more "
                   f"than seeds do)")
+        if ("kappa_position", "fm", v) in point:
+            d = sumd.loc[("kappa_position", "fm", v)]
+            print(f"  {v:16s} kappa(fm) between clinical (0) and seed (1) = "
+                  f"{d.estimate:.2f} [{d.ci_low:.2f}, {d.ci_high:.2f}]  (0: shared "
+                  f"difficulty only, 1: as redundant as two seeds)")
 
     rows = []
     for lo, hi, lbl in zip(GAP_BINS[:-1], GAP_BINS[1:], GAP_LABELS):
@@ -467,7 +510,7 @@ def main():
                                 gain_over_mean=c_all[col] - (c_all[i] + c_all[j]) / 2,
                                 gain_over_best=c_all[col] - max(c_all[i], c_all[j]))
                            for col, (en, (i, j, kind, var)) in enumerate(zip(ens_names, ens),
-                                                                          start=K)])
+                                                                          start=K + 1)])
     ens_df.to_csv(out("ensembles.csv"), index=False)
     print("\n3. Two-run ensembles (mean percentile rank): gain over the better member")
     for v in variants:
@@ -482,10 +525,6 @@ def main():
                   f"[{g.ci_low:+.4f}, {g.ci_high:+.4f}]  (> 0: the FMs complement each other)")
 
     # Incremental Cox: seed-averaged z-scored risk per FM, z fixed on the fit split.
-    design = ClinicalDesign(clin_f, args.min_group)
-    Xc_f, Xc_e = design(clin_f).to_numpy(), design(clin).to_numpy()
-    tf, ef = lab_f["time"].to_numpy(float), lab_f["event"].to_numpy(int)
-
     def z_avg(f, v):
         cols = fm_var[(f, v)]
         mu, sd = risk_f[cols].mean(), risk_f[cols].std().replace(0, 1.0)
@@ -563,8 +602,10 @@ def main():
 
     # --- Figures -------------------------------------------------------------------------
     plot_forest(sumd, runs_df, run_idx, fms, variants, fm_color, th, out("fig1_cindex_forest.png"))
-    plot_kappa_heatmap(ag_all["kappa"], names, meta, fms, fm_color, th,
-                       out("fig2_kappa_heatmap.png"))
+    plot_kappa_heatmap(ag_all["kappa"], names + [REF],
+                       [fm_color[f] for f in meta.fm] + [th["muted"]],
+                       [(f, fm_color[f]) for f in fms] + [("clinical Cox", th["muted"])],
+                       th, out("fig2_kappa_heatmap.png"))
     plot_pair_outcomes(point, variants, th, out("fig3_pair_outcomes.png"))
     plot_kappa_by_gap(by_gap, variants, th, out("fig4_kappa_by_gap.png"))
     for v, fa, fb in fm_pairs:
@@ -611,7 +652,9 @@ def plot_forest(sumd, runs_df, run_idx, fms, variants, fm_color, th, path):
     save(fig, th, path)
 
 
-def plot_kappa_heatmap(kappa, names, meta, fms, fm_color, th, path):
+def plot_kappa_heatmap(kappa, names, colors, legend, th, path):
+    """Kappa between every two rows; colors: strip colour per row, legend: (label,
+    colour) entries."""
     K = len(names)
     if K < 2:
         return
@@ -645,7 +688,7 @@ def plot_kappa_heatmap(kappa, names, meta, fms, fm_color, th, path):
         ax.spines[side].set_visible(False)
     # FM strip: the colour carries the FM, the label names the run.
     ax_s.imshow(np.arange(K)[:, None], aspect="auto",
-                cmap=ListedColormap([fm_color[meta.fm.iloc[i]] for i in order]))
+                cmap=ListedColormap([colors[i] for i in order]))
     ax_s.set_xticks([])
     ax_s.set_yticks(range(K))
     ax_s.set_yticklabels([names[i] for i in order], fontsize=8, color=th["ink_secondary"])
@@ -656,10 +699,10 @@ def plot_kappa_heatmap(kappa, names, meta, fms, fm_color, th, path):
     cb.outline.set_visible(False)
     cb.ax.tick_params(colors=th["muted"], labelsize=8, length=0)
     cb.set_label("Cohen's kappa of right / wrong pairs", color=th["ink_secondary"], fontsize=9)
-    ax_s.legend(handles=[Line2D([], [], marker="s", linestyle="", color=fm_color[f], label=f)
-                         for f in fms],
+    ax_s.legend(handles=[Line2D([], [], marker="s", linestyle="", color=col, label=lbl)
+                         for lbl, col in legend],
                 frameon=False, fontsize=8, labelcolor=th["ink_secondary"],
-                loc="lower left", bbox_to_anchor=(0, 1.0), ncol=len(fms))
+                loc="lower left", bbox_to_anchor=(0, 1.0), ncol=len(legend))
     ax.set_title("Error agreement between runs (clustered)", color=th["ink"], fontsize=12,
                  loc="left", pad=24)
     fig.savefig(path, dpi=150, facecolor=th["surface"], bbox_inches="tight")
@@ -667,7 +710,7 @@ def plot_kappa_heatmap(kappa, names, meta, fms, fm_color, th, path):
 
 
 def plot_pair_outcomes(point, variants, th, path):
-    rows = [(v, kind) for v in variants + ["across variants"] for kind in KINDS
+    rows = [(v, kind) for v in variants + ["across variants"] for kind in KINDS + [REF]
             if ("both_wrong", kind, v) in point]
     if not rows:
         return
@@ -703,7 +746,10 @@ def plot_kappa_by_gap(by_gap, variants, th, path):
     fig, axes = plt.subplots(1, len(vs), figsize=(4.6 * len(vs), 3.8), sharey=True,
                              squeeze=False)
     fig.patch.set_facecolor(th["surface"])
+    # The two references in neutral inks (seed: ceiling, clinical: floor), told
+    # apart by line style and label; "other FM" is the only colour.
     style = {"seed": dict(color=th["muted"], linestyle="--"),
+             REF: dict(color=th["ink_secondary"], linestyle=":"),
              "fm": dict(color=th["series"][0], linestyle="-")}
     for ax, v in zip(axes[0], vs):
         for kind, st in style.items():
