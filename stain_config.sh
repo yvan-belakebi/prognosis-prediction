@@ -13,7 +13,7 @@ FEATURES=${FEATURES:-$(fm_features "$FM")}
 FILE_EXT=.npy
 COORDS=WSI/whole_registry/20x_224px_0px_overlap/patches
 LABELS=WSI/whole_registry/labels
-LABELS_CSV=label_csvs/labels.csv
+LABELS_CSV=${LABELS_CSV:-label_csvs/labels.csv}
 
 # One entry per model; '|' merges stain names into one model stain, named after
 # the first entry (which need not exist in the CSV): "HE_HES|HE|HES" trains one
@@ -25,4 +25,5 @@ STAINS=("HE_HES|HE|HES" "PAS" "PASM" "Congo" "Trichrome|AFOG|Masson Trichrom" "S
 
 # Folder-safe name of a stain, from its first name:
 # "HE_HES|HE|HES" -> "HE_HES", "Sirius red" -> "Sirius_red"
-stain_tag() { echo "${1%%|*}" | tr -c 'A-Za-z0-9\n' '_'; }
+# TAG_SUFFIX (e.g. _c1q) keeps runs on another LABELS_CSV in their own folders.
+stain_tag() { echo "$(echo "${1%%|*}" | tr -c 'A-Za-z0-9\n' '_')${TAG_SUFFIX:-}"; }
