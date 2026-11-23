@@ -64,7 +64,7 @@ def biopsy_key(number):
     return None
 
 
-def load_biopsies():
+def load_biopsies(proteinuria_csv):
     df = pd.read_excel(RAW + "registry_full_data.xlsx")
     df = df.rename(
         columns={
@@ -77,7 +77,6 @@ def load_biopsies():
             "HOYDE": "Height_diagnosis",
             "VEKT": "Weight_diagnosis",
             "Alder": "Age",
-            ############# Put proteinuria here ###############
             "TBiopsi": "transplant_biopsy",
             "Age_diagnosis": "Age",
         }
@@ -89,7 +88,6 @@ def load_biopsies():
             "registry_biopsy_number",
             "Diagnosis",
             "eGFR",
-            "proteinuria",
             "Sex",
             "Age",
             "Height_diagnosis",
@@ -103,7 +101,25 @@ def load_biopsies():
     df["key"] = df["registry_biopsy_number"].map(biopsy_key)
     df["BMI"] = df["Weight_diagnosis"] / (df["Height_diagnosis"] / 100) ** 2
     df.drop(columns=["Height_diagnosis", "Weight_diagnosis"], inplace=True)
+    df = df.merge(load_proteinuria(proteinuria_csv), on="key", how="left")
+    print(
+        f"Registry biopsies with a proteinuria value: "
+        f"{df.Proteinuria_g_d.notna().sum()} / {len(df)}"
+    )
     return df.reset_index(drop=True)
+
+
+def load_proteinuria(path):
+    """Proteinuria (g/day) and its sampling method per biopsy key (see proteinuria.py).
+    The CSV has no patient column, so it is joined on the biopsy key alone; keys that
+    appear more than once in it are ambiguous and left out."""
+    pr = pd.read_csv(path, usecols=["Biopsinr", "Proteinuria_g_d", "Sampling_method"])
+    pr["key"] = pr.pop("Biopsinr").map(biopsy_key)
+    pr = pr.dropna(subset=["key"])
+    dup = pr.key.duplicated(keep=False)
+    if dup.any():
+        print(f"Proteinuria: {dup.sum()} rows with a repeated biopsy number left out")
+    return pr[~dup]
 
 
 def load_treatments():
@@ -221,6 +237,12 @@ def main():
         help="Keep biopsies taken after a kidney-replacement event.",
     )
     p.add_argument(
+        "--proteinuria_csv",
+        default=RAW + "proteinuria.csv",
+        help="Output of proteinuria.py with columns Biopsinr, Proteinuria_g_d, "
+        "Sampling_method.",
+    )
+    p.add_argument(
         "--curated_csv", default="followup_data/derived/registry/registry_currated.csv"
     )
     p.add_argument(
@@ -232,7 +254,8 @@ def main():
     )
     args = p.parse_args()
 
-    bx, ev, de = load_biopsies(), load_treatments(), load_deaths()
+    bx = load_biopsies(args.proteinuria_csv)
+    ev, de = load_treatments(), load_deaths()
     if args.censor_date:
         censor_date = pd.Timestamp(args.censor_date)
     else:
@@ -276,7 +299,8 @@ def main():
         "registry_biopsy_number",
         "Diagnosis",
         "eGFR",
-        "proteinuria",
+        "Proteinuria_g_d",
+        "Sampling_method",
         "Sex",
         "Age",
         "BMI",
@@ -319,7 +343,8 @@ def main():
         "Biopsy_date",
         "Diagnosis",
         "eGFR",
-        "proteinuria",
+        "Proteinuria_g_d",
+        "Sampling_method",
         "Sex",
         "Age",
         "BMI",
