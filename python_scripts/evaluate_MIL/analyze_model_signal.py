@@ -11,17 +11,18 @@ what that signal is and what is left once it is accounted for:
   2. Event type      C-index for kidney failure only (dialysis, CKD5, transplant;
                      deaths censored) and for death only — deaths unrelated to
                      the kidney cap any biopsy-based model.
-  3. Clinical value  Cox models on diagnosis, eGFR at biopsy and both, and the
-                     same clinical model + each model's risk: adjusted hazard
-                     ratio per SD of risk, likelihood-ratio test, and the C-index
-                     gain over the clinical model (paired bootstrap CI). Fitted on
-                     --fit_split (val: the models never trained on it), scored on
-                     --eval_split (test).
+  3. Clinical value  Cox baselines on diagnosis, eGFR, both, the clinical model
+                     (age, sex, BMI, log proteinuria, eGFR at biopsy) and clinical +
+                     diagnosis; then each of the last two + each model's risk:
+                     adjusted hazard ratio per SD of risk, likelihood-ratio test,
+                     and the C-index gain over the baseline (paired bootstrap CI).
+                     Fitted on --fit_split (val: the models never trained on it),
+                     scored on --eval_split (test).
   4. Within diagnosis C-index counting only pairs of patients with the same
                      diagnosis (stratified), and per diagnosis for the larger
                      groups — prognosis within a disease, not disease recognition.
   5. Agreement       Spearman correlation of the models' risks, raw and after
-                     removing what diagnosis + eGFR explain: highly correlated
+                     removing what clinical + diagnosis explain: highly correlated
                      models make the same errors, so fusing them cannot help.
   6. Discordant pairs  For each comparable pair (earlier event vs later), whether a
                      model ranks it wrongly: discordance by time gap, overlap of the
@@ -34,7 +35,7 @@ controlling for it also removes image signal the pathologist already read, and
 it is missing for many registry biopsies (kept as its own "missing" category).
 
 Inputs: evaluate_survival.py-style per-biopsy risk_scores.csv (biopsy, risk,
-time, event) per model and split, and the registry CSV for diagnosis, eGFR and
+time, event) per model and split, and the registry CSV for diagnosis, age, sex, BMI, proteinuria, eGFR and
 event type.
 
 Usage:
@@ -78,16 +79,29 @@ def parse_models(specs, parser):
 
 
 def load_clinical(args):
-    """Per-biopsy diagnosis, eGFR and event type from the registry CSV."""
-    cols = [args.biopsy_col, args.diagnosis_col, args.egfr_col, args.event_type_col]
+    """Per-biopsy diagnosis, clinical covariates and event type from the registry CSV."""
+    cols = [args.biopsy_col, args.diagnosis_col, args.egfr_col, args.event_type_col,
+            args.age_col, args.sex_col, args.bmi_col, args.proteinuria_col]
     reg = pd.read_csv(args.registry_csv, usecols=cols, dtype=str, low_memory=False)
     reg[args.biopsy_col] = reg[args.biopsy_col].str.strip()
     reg = reg.dropna(subset=[args.biopsy_col]).drop_duplicates(args.biopsy_col)
-    egfr = pd.to_numeric(reg[args.egfr_col], errors="coerce")
+    num = lambda c: pd.to_numeric(reg[c], errors="coerce")  # noqa: E731
+    egfr = num(args.egfr_col)
     # Same plausibility cut as define_regression_labels.py: > 200 is a bad value.
     egfr = egfr.where(egfr <= args.max_egfr)
+    bmi = num(args.bmi_col)
+    bmi = bmi.where(bmi.between(*args.bmi_range))
+    # Proteinuria (g/day) is strongly right-skewed: log1p keeps nephrotic values
+    # from dominating the linear Cox term.
+    prot = np.log1p(num(args.proteinuria_col).clip(lower=0))
+    # Registry sex code: 1 = male, 2 = female -> female indicator.
+    female = (num(args.sex_col) == 2).astype(float).where(num(args.sex_col).isin([1, 2]))
     return pd.DataFrame({
         "diagnosis": reg[args.diagnosis_col].str.strip().fillna("missing").to_numpy(),
+        "age": num(args.age_col).to_numpy(),
+        "female": female.to_numpy(),
+        "bmi": bmi.to_numpy(),
+        "log_proteinuria": prot.to_numpy(),
         "egfr": egfr.to_numpy(),
         "event_type": reg[args.event_type_col].fillna("").str.strip().to_numpy(),
     }, index=reg[args.biopsy_col].to_numpy())
@@ -150,26 +164,37 @@ def cidx(risk, time, event):
 # ---------------------------------------------------------------------------
 # Clinical covariates
 # ---------------------------------------------------------------------------
+NUMERIC = ("age", "female", "bmi", "log_proteinuria", "egfr")
+CLINICAL = NUMERIC  # the clinical baseline: age, sex, BMI, proteinuria, eGFR
+
+
 class ClinicalDesign:
-    """Diagnosis dummies + standardised eGFR (+ missing flag), fixed on the fit split."""
+    """Diagnosis dummies + standardised numeric covariates, fixed on the fit split.
+
+    A missing numeric value is set to the fit-split mean (z = 0) and flagged by a
+    `{var}_missing` column, added only when the fit split has missing values.
+    """
 
     def __init__(self, clin_fit, min_group):
         counts = clin_fit["diagnosis"].value_counts()
         # Largest group is the reference category (no dummy).
         self.levels = [d for d in counts.index if counts[d] >= min_group][1:]
         self.reference = counts.index[0]
-        e = clin_fit["egfr"]
-        self.mean, self.sd = e.mean(), e.std() or 1.0
+        self.stats = {v: (clin_fit[v].mean(), clin_fit[v].std() or 1.0,
+                          bool(clin_fit[v].isna().any())) for v in NUMERIC}
 
-    def __call__(self, clin, parts=("diagnosis", "egfr")):
+    def __call__(self, clin, parts=("diagnosis",) + CLINICAL):
         cols = {}
         if "diagnosis" in parts:
             for lvl in self.levels:
                 cols[f"dx={lvl}"] = (clin["diagnosis"] == lvl).astype(float)
-        if "egfr" in parts:
-            e = clin["egfr"]
-            cols["egfr_z"] = ((e - self.mean) / self.sd).fillna(0.0)
-            cols["egfr_missing"] = e.isna().astype(float)
+        for v in NUMERIC:
+            if v not in parts:
+                continue
+            mean, sd, has_missing = self.stats[v]
+            cols[f"{v}_z"] = ((clin[v] - mean) / sd).fillna(0.0)
+            if has_missing:
+                cols[f"{v}_missing"] = clin[v].isna().astype(float)
         return pd.DataFrame(cols, index=clin.index)
 
 
@@ -201,6 +226,12 @@ def main():
     p.add_argument("--diagnosis_col", default="Diagnosis")
     p.add_argument("--egfr_col", default="eGFR")
     p.add_argument("--event_type_col", default="Event")
+    p.add_argument("--age_col", default="Age")
+    p.add_argument("--sex_col", default="Sex", help="Coded 1 = male, 2 = female.")
+    p.add_argument("--bmi_col", default="BMI")
+    p.add_argument("--proteinuria_col", default="Proteinuria_g_d")
+    p.add_argument("--bmi_range", type=float, nargs=2, default=(10.0, 80.0),
+                   help="Plausible BMI range; values outside are treated as missing.")
     p.add_argument("--max_egfr", type=float, default=200.0,
                    help="eGFR above this is treated as missing (implausible).")
     p.add_argument("--kidney_events", nargs="+", default=["Dialyse", "CKD5", "NyreTx"],
@@ -269,42 +300,54 @@ def main():
           f"{design.reference!r}; groups < {args.min_group} on {args.fit_split} share "
           f"the reference); missing diagnosis: "
           f"{(clin['diagnosis'] == 'missing').mean():.0%} of {args.eval_split}")
-    rows, clin_scores = [], {}
-    for label, parts in (("diagnosis", ("diagnosis",)), ("eGFR", ("egfr",)),
-                         ("diagnosis+eGFR", ("diagnosis", "egfr"))):
+    for v in NUMERIC:
+        print(f"  {v}: missing {clin_f[v].isna().mean():.0%} of {args.fit_split}, "
+              f"{clin[v].isna().mean():.0%} of {args.eval_split}")
+    # "clinical" = age, sex, BMI, proteinuria, eGFR; "+diagnosis" adds the dummies.
+    baselines = (("diagnosis", ("diagnosis",)), ("eGFR", ("egfr",)),
+                 ("diagnosis+eGFR", ("diagnosis", "egfr")),
+                 ("clinical", CLINICAL), ("clinical+diagnosis", CLINICAL + ("diagnosis",)))
+    rows = []
+    for label, parts in baselines:
         Xf, Xe = design(clin_f, parts).to_numpy(), design(clin, parts).to_numpy()
         beta = fit_cox(Xf, tf, ef, args.ridge)
-        clin_scores[label] = Xe @ beta
-        c = cidx(clin_scores[label], t, e)
-        rows.append(dict(model=f"[clinical] {label}", c_index=c))
-        print(f"  {'[clinical] ' + label:28s} C={c:.4f}")
+        c = cidx(Xe @ beta, t, e)
+        lo, hi = bootstrap(lambda i: cidx((Xe @ beta)[i], t[i], e[i]), n, args.n_boot,
+                           args.seed)
+        rows.append(dict(model=f"[clinical] {label}", c_index=c, ci_low=lo, ci_high=hi))
+        print(f"  {'[clinical] ' + label:36s} C={c:.4f}  [{lo:.4f}, {hi:.4f}]")
 
-    Xf_c, Xe_c = design(clin_f).to_numpy(), design(clin).to_numpy()
-    beta_c = fit_cox(Xf_c, tf, ef, args.ridge)
-    ll_c = cox_loglik(Xf_c, tf, ef, beta_c)
-    s_clin = Xe_c @ beta_c
-    for m in names:
-        mu, sd = risk_f[m].mean(), risk_f[m].std() or 1.0
-        zf = ((risk_f[m] - mu) / sd).to_numpy()[:, None]
-        ze = ((risk[m] - mu) / sd).to_numpy()[:, None]
-        Xf, Xe = np.hstack([Xf_c, zf]), np.hstack([Xe_c, ze])
-        beta = fit_cox(Xf, tf, ef, args.ridge)
-        lr = 2 * (cox_loglik(Xf, tf, ef, beta) - ll_c)
-        s_full = Xe @ beta
-        c_full = cidx(s_full, t, e)
-        gain = c_full - cidx(s_clin, t, e)
-        lo, hi = bootstrap(
-            lambda i: cidx(s_full[i], t[i], e[i]) - cidx(s_clin[i], t[i], e[i]),
-            n, args.n_boot, args.seed,
-        )
-        rows.append(dict(model=f"diagnosis+eGFR+{m}", c_index=c_full, c_gain=gain,
-                         gain_ci_low=lo, gain_ci_high=hi,
-                         hr_per_sd=float(np.exp(beta[-1])),
-                         lr_stat=lr, lr_p=float(chi2.sf(max(lr, 0), 1))))
-        print(f"  {'diagnosis+eGFR+' + m:28s} C={c_full:.4f}  gain={gain:+.4f} "
-              f"[{lo:+.4f}, {hi:+.4f}]  HR/SD={np.exp(beta[-1]):.2f}  "
-              f"LR p={rows[-1]['lr_p']:.2g}")
+    # Added value of each model's risk over the two strong baselines.
+    for base in ("clinical", "clinical+diagnosis"):
+        parts = dict(baselines)[base]
+        Xf_c, Xe_c = design(clin_f, parts).to_numpy(), design(clin, parts).to_numpy()
+        beta_c = fit_cox(Xf_c, tf, ef, args.ridge)
+        ll_c = cox_loglik(Xf_c, tf, ef, beta_c)
+        s_clin = Xe_c @ beta_c
+        for m in names:
+            mu, sd = risk_f[m].mean(), risk_f[m].std() or 1.0
+            zf = ((risk_f[m] - mu) / sd).to_numpy()[:, None]
+            ze = ((risk[m] - mu) / sd).to_numpy()[:, None]
+            Xf, Xe = np.hstack([Xf_c, zf]), np.hstack([Xe_c, ze])
+            beta = fit_cox(Xf, tf, ef, args.ridge)
+            lr = 2 * (cox_loglik(Xf, tf, ef, beta) - ll_c)
+            s_full = Xe @ beta
+            c_full = cidx(s_full, t, e)
+            gain = c_full - cidx(s_clin, t, e)
+            lo, hi = bootstrap(
+                lambda i: cidx(s_full[i], t[i], e[i]) - cidx(s_clin[i], t[i], e[i]),
+                n, args.n_boot, args.seed,
+            )
+            rows.append(dict(model=f"{base}+{m}", baseline=base, c_index=c_full,
+                             c_gain=gain, gain_ci_low=lo, gain_ci_high=hi,
+                             hr_per_sd=float(np.exp(beta[-1])),
+                             lr_stat=lr, lr_p=float(chi2.sf(max(lr, 0), 1))))
+            print(f"  {base + '+' + m:36s} C={c_full:.4f}  gain={gain:+.4f} "
+                  f"[{lo:+.4f}, {hi:+.4f}]  HR/SD={np.exp(beta[-1]):.2f}  "
+                  f"LR p={rows[-1]['lr_p']:.2g}")
     pd.DataFrame(rows).to_csv(out("clinical_added_value.csv"), index=False)
+    # Section 5 removes the full clinical + diagnosis model from the risks.
+    Xe_c = design(clin).to_numpy()
 
     # --- 4. Within diagnosis -------------------------------------------------------------
     print("\n4. Within diagnosis (only pairs of patients with the same diagnosis)")
@@ -341,7 +384,7 @@ def main():
 
     # --- 5. Agreement between models ------------------------------------------------------
     print("\n5. Spearman correlation of risks (lower triangle: after removing "
-          "diagnosis + eGFR)")
+          "age, sex, BMI, proteinuria, eGFR and diagnosis)")
     ranks = risk.apply(rankdata)
     Xc = np.hstack([np.ones((n, 1)), Xe_c])
     resid = ranks - Xc @ np.linalg.lstsq(Xc, ranks.to_numpy(), rcond=None)[0]
