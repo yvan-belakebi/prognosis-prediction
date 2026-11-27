@@ -79,8 +79,8 @@ declare -A VARIANT_ARGS=(
     [early_tf]="--fusion early --early_layers 1"
 )
 # Shared by every variant, so they differ only in the fusion architecture.
-COMMON_ARGS=(--task survival --patches_per_stain 512 --stain_dropout 0.2
-             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers 14
+COMMON_ARGS=(--task survival --patches_per_stain 256 --stain_dropout 0.2
+             --event_sampling --batch_size 32 --epochs 50 --save_every 5 --num_workers 6
              --shm_share ${#GPUS[@]})
 # Train and score one variant with one seed on one foundation model's features,
 # on the GPU(s) in CUDA_VISIBLE_DEVICES. Runs in a background queue, so success
