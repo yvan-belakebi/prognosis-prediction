@@ -37,6 +37,7 @@ Returned sample (all tensors, so torch's default collate stacks them):
     Y          (n_label,)                        float32, [time, event] or [target]
 """
 
+import mmap
 import os
 
 import h5py
@@ -201,11 +202,48 @@ def _bag_shape(path) -> tuple:
 
 
 def _read_rows(path, rows: np.ndarray) -> np.ndarray:
-    """Read the given (sorted, unique) feature rows from an .h5 or .npy bag."""
+    """Read the given (sorted, unique) feature rows from an .h5 or .npy bag.
+
+    The .npy memmap is marked MADV_RANDOM: the rows are scattered (512 of tens of
+    thousands), and the kernel's default readahead would read ~128 KB around each
+    5 KB row, so most of the disk traffic would be rows never used.
+    """
     if path.endswith(".h5"):
         with h5py.File(path, "r") as f:
             return np.asarray(f["features"][rows])
-    return np.asarray(np.load(path, mmap_mode="r")[rows])
+    arr = np.load(path, mmap_mode="r")
+    mm = getattr(arr, "_mmap", None)
+    if mm is not None and hasattr(mmap, "MADV_RANDOM"):  # Linux, Python 3.8+
+        mm.madvise(mmap.MADV_RANDOM)
+    return np.asarray(arr[rows])
+
+
+def _prefetch_rows(path, rows: np.ndarray) -> None:
+    """Ask the kernel to start reading the given (sorted, unique) rows of an .npy bag.
+
+    Copying rows out of a memmap faults their pages in one at a time, so a worker
+    has a single read in flight and waits out the storage latency for each 5 KB
+    row. POSIX_FADV_WILLNEED queues all the rows' reads at once without waiting,
+    and the copy then finds them in (or on their way to) the page cache. One
+    request per run of consecutive rows. No-op for .h5 and where fadvise does not
+    exist (Windows).
+    """
+    if not hasattr(os, "posix_fadvise") or path.endswith(".h5") or rows.size == 0:
+        return
+    arr = np.load(path, mmap_mode="r")
+    if arr.ndim != 2 or not arr.flags.c_contiguous:
+        return
+    row_bytes = arr.strides[0]
+    breaks = np.flatnonzero(np.diff(rows) != 1) + 1
+    starts = rows[np.r_[0, breaks]]
+    ends = rows[np.r_[breaks - 1, rows.size - 1]] + 1
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        for a, b in zip(starts.tolist(), ends.tolist()):
+            os.posix_fadvise(fd, arr.offset + a * row_bytes, (b - a) * row_bytes,
+                             os.POSIX_FADV_WILLNEED)
+    finally:
+        os.close(fd)
 
 
 def _read_stain_bag(paths, n_patches: int, random: bool):
@@ -219,20 +257,41 @@ def _read_stain_bag(paths, n_patches: int, random: bool):
 
     Returns a ``(n_patches, D)`` float32 tensor, or None when nothing usable is left.
     """
+    return _load_stain_bag(_plan_stain_bag(paths, n_patches, random), n_patches, random)
+
+
+def _plan_stain_bag(paths, n_patches: int, random: bool):
+    """The rows ``_read_stain_bag`` reads: a list of (path, unique sorted rows,
+    inverse), or None for an empty bag. Planning every stain of a biopsy first lets
+    the dataset queue all their reads (_prefetch_rows) before waiting on any."""
     counts = [_bag_shape(p)[0] for p in paths]
     total = int(sum(counts))
     if total == 0:
         return None
 
     idx = _choose_indices(total, n_patches, random)
-    chunks = []
+    plan = []
     offset = 0
     for p, c in zip(paths, counts):
         sel = idx[(idx >= offset) & (idx < offset + c)] - offset
         if sel.size:
             uniq, inv = np.unique(sel, return_inverse=True)
-            chunks.append(_read_rows(p, uniq)[inv])
+            plan.append((p, uniq, inv))
         offset += c
+    return plan
+
+
+def _prefetch_plans(plans) -> None:
+    for plan in plans:
+        for p, uniq, _ in plan or ():
+            _prefetch_rows(p, uniq)
+
+
+def _load_stain_bag(plan, n_patches: int, random: bool):
+    """Read the rows of a ``_plan_stain_bag`` plan; see ``_read_stain_bag``."""
+    if not plan:
+        return None
+    chunks = [_read_rows(p, uniq)[inv] for p, uniq, inv in plan]
 
     x = np.concatenate(chunks).astype(np.float32, copy=False)
     keep = np.isfinite(x).all(axis=1)
@@ -342,13 +401,20 @@ class MultiStainBiopsyDataset(Dataset):
             dtype=self.dtype,
         )
         slide_mask = torch.zeros(self.n_stains, self.max_slides, dtype=torch.bool)
-        for stain_idx in self._keep_stains(rec):
-            for slot, path in enumerate(self._slide_paths(rec["slides"][stain_idx])):
-                bag = _read_stain_bag([path], self.patches_per_stain, self.random_subsample)
-                if bag is None:
-                    continue
-                X[stain_idx, slot] = bag
-                slide_mask[stain_idx, slot] = True
+        # Plan every slide's rows, queue all their reads, then read.
+        jobs = [
+            (stain_idx, slot,
+             _plan_stain_bag([path], self.patches_per_stain, self.random_subsample))
+            for stain_idx in self._keep_stains(rec)
+            for slot, path in enumerate(self._slide_paths(rec["slides"][stain_idx]))
+        ]
+        _prefetch_plans(plan for _, _, plan in jobs)
+        for stain_idx, slot, plan in jobs:
+            bag = _load_stain_bag(plan, self.patches_per_stain, self.random_subsample)
+            if bag is None:
+                continue
+            X[stain_idx, slot] = bag
+            slide_mask[stain_idx, slot] = True
 
         if not bool(slide_mask.any()):
             # Same guard as the pooled path: one zero-filled slide keeps the sample
@@ -372,9 +438,15 @@ class MultiStainBiopsyDataset(Dataset):
         )
         stain_mask = torch.zeros(self.n_stains, dtype=torch.bool)
 
-        for stain_idx in self._keep_stains(rec):
-            paths = rec["slides"][stain_idx]
-            bag = _read_stain_bag(paths, self.patches_per_stain, self.random_subsample)
+        # Plan every stain's rows, queue all their reads, then read.
+        jobs = [
+            (stain_idx, _plan_stain_bag(rec["slides"][stain_idx], self.patches_per_stain,
+                                        self.random_subsample))
+            for stain_idx in self._keep_stains(rec)
+        ]
+        _prefetch_plans(plan for _, plan in jobs)
+        for stain_idx, plan in jobs:
+            bag = _load_stain_bag(plan, self.patches_per_stain, self.random_subsample)
             if bag is None:
                 continue
             X[stain_idx] = bag

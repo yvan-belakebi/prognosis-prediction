@@ -16,15 +16,18 @@
 #                        model averaged over all of a biopsy's slides (all_stains_mean)
 #                        and with the per-stain fusions when those exist.
 # Usage: ./vote_across_stains.sh   or   SCORER=all_stains ./vote_across_stains.sh
+# TAG_SUFFIX (e.g. _c1q, with its LABELS_CSV, as in training) is appended to every
+# checkpoint and output folder, so runs on another labels CSV stay separate.
 set -u
 cd "$(dirname "$0")"
 # FEATURES, LABELS, LABELS_CSV, STAINS and stain_tag — same as training.
 source stain_config.sh
 
 SCORER=${SCORER:-per_stain}
+T=${TAG_SUFFIX:-}
 case "$SCORER" in
-    per_stain)  prefix="";        suffix="" ;;
-    all_stains) prefix="shared_"; suffix="_shared" ;;
+    per_stain)  prefix="";        suffix="$T" ;;
+    all_stains) prefix="shared_"; suffix="_shared$T" ;;
     *) echo "SCORER must be per_stain or all_stains, not '$SCORER'"; exit 1 ;;
 esac
 
@@ -52,7 +55,7 @@ models=()
 for stain in "${STAINS[@]}"; do
     tag=$(stain_tag "$stain")
     if [[ $SCORER == all_stains ]]; then
-        ckpt="checkpoints/all_stains/deepgraphsurv_model_best.pth"
+        ckpt="checkpoints/all_stains$T/deepgraphsurv_model_best.pth"
     else
         ckpt="checkpoints/$tag/deepgraphsurv_model_best.pth"
     fi
@@ -120,17 +123,17 @@ done
 if [[ $SCORER == all_stains ]]; then
     # The all-stains model without fusion: the mean of its scores over every slide of
     # a biopsy, whatever the stain. Fusion has to beat this to be worth it.
-    mean=results/eval/test/all_stains_mean
-    score "checkpoints/all_stains/deepgraphsurv_model_best.pth" test "$mean" "${STAINS[@]}"
+    mean=results/eval/test/all_stains_mean$T
+    score "checkpoints/all_stains$T/deepgraphsurv_model_best.pth" test "$mean" "${STAINS[@]}"
     for weighting in none cindex; do
         compare "voting_$weighting$suffix" "$(vote $weighting "$suffix")" \
-            all_stains_mean "$mean/risk_scores.csv"
+            "all_stains_mean$T" "$mean/risk_scores.csv"
     done
-    compare "late_fusion$suffix" "$late" all_stains_mean "$mean/risk_scores.csv"
+    compare "late_fusion$suffix" "$late" "all_stains_mean$T" "$mean/risk_scores.csv"
     # Shared model vs per-stain models, fusion for fusion (run SCORER=per_stain first).
     for weighting in none cindex; do
         compare "voting_$weighting$suffix" "$(vote $weighting "$suffix")" \
-            "voting_$weighting" "$(vote $weighting "")"
+            "voting_$weighting$T" "$(vote $weighting "$T")"
     done
-    compare "late_fusion$suffix" "$late" late_fusion results/eval/late_fusion/test/risk_scores.csv
+    compare "late_fusion$suffix" "$late" "late_fusion$T" "results/eval/late_fusion$T/test/risk_scores.csv"
 fi

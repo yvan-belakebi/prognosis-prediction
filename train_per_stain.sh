@@ -31,7 +31,7 @@ done
 # so it compares directly with the per-stain models). Several times more data
 # per epoch, hence a lower learning rate. With --biopsy_sampling each epoch uses
 # one slide per biopsy, of whichever listed stain is drawn.
-tag=all_stains
+tag=all_stains${TAG_SUFFIX:-}
 echo "=== all stains (${STAINS[*]}) -> checkpoints/$tag ==="
 python python_scripts/MIL/MIL.py \
     --features_path "$FEATURES" --file_ext "$FILE_EXT" --coords_path "$COORDS" --labels_path "$LABELS" --labels_csv "$LABELS_CSV" \

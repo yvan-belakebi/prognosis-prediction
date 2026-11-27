@@ -9,18 +9,14 @@ Sampling_method names the measure the value comes from:
 Steps (same as proteinuria.R):
   1. keep only the patient's first biopsy (Biopsy_no1 != 0)
   2. drop the dipstick value (Protein) for biopsies before 2000 (only yes/no then)
-  3. remove extreme values:
-        ProtKvan-g/d              > 12    g/day
-        ProtKvan-g/l              > 4.7   g/L
-        Alb\\kreat ratio mg/mmol   > 800
-        Prot\\kreat ratio mg/mmol  > 1000
-        Protein (dipstick)        > 4
-  4. convert each measure to g/day:
+  3. convert each measure to g/day:
         g/day        as is
         g/L          * 1.7 (expected daily urine volume)
         PCR          -> ACR (Weaver et al. 2020) -> * 0.01
         ACR          * 0.01
         dipstick     0 -> 0, 1 -> 0.65*1.7, 2 -> 2.0*1.7, 3/4 -> 3.5*1.7
+  4. remove extreme values: g/day, PCR and ACR above 12 g/day once converted
+     (unlike proteinuria.R, which used per-unit limits), g/L > 4.7, dipstick > 4
   5. take the first available value in that order (g/day, g/L, PCR, ACR, dipstick)
 
 Example:
@@ -59,18 +55,18 @@ def proteinuria_g_d(df, id_col=ID_COL):
     # Biopsy_no1 == 0 marks a rebiopsy; missing values are kept, as in R
     df = df[num(FIRST) != 0]  # num() now reads the filtered df
 
-    g_d = num(G_D).where(lambda s: s <= 12)
-    g_l = num(G_L).where(lambda s: s <= 4.7)
-    acr = num(ACR).where(lambda s: s <= 800)
-    pcr = num(PCR).where(lambda s: s <= 1000)
     dip = num(DIPSTICK).where((num(YEAR) >= 2000) & (num(DIPSTICK) <= 4))
-
     dip_g_d = dip.map({0: 0.0, 1: 0.65 * 1.7, 2: 2.0 * 1.7, 3: 3.5 * 1.7, 4: 3.5 * 1.7})
-    pcr_g_d = pd.Series(upcr_to_uacr_weaver(pcr), index=df.index) * 0.01
+    pcr_g_d = pd.Series(upcr_to_uacr_weaver(num(PCR)), index=df.index) * 0.01
 
-    # first available measure, in order of preference
-    sources = {"24h_urine_g_d": g_d, "urine_conc_g_l": g_l * 1.7, "PCR": pcr_g_d,
-               "ACR": acr * 0.01, "dipstick": dip_g_d}
+    g_l_g_d = num(G_L).where(lambda s: s <= 4.7) * 1.7
+
+    # first available measure, in order of preference; 24-h urine, PCR and ACR are
+    # capped at 12 g/day once converted, urine conc. keeps its 4.7 g/L limit
+    capped = {"24h_urine_g_d": num(G_D), "PCR": pcr_g_d, "ACR": num(ACR) * 0.01}
+    capped = {k: v.where(v <= 12) for k, v in capped.items()}
+    sources = {"24h_urine_g_d": capped["24h_urine_g_d"], "urine_conc_g_l": g_l_g_d,
+               "PCR": capped["PCR"], "ACR": capped["ACR"], "dipstick": dip_g_d}
     prot = pd.Series(np.nan, index=df.index)
     method = pd.Series(pd.NA, index=df.index, dtype="string")
     for name, val in sources.items():
