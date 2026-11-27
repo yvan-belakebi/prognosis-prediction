@@ -149,6 +149,132 @@ class MultiStainLogger(LossLogger):
         print(f"Loss plot saved to {self.plot_path}")
 
 
+class StainMonitor:
+    """Per-stain importance on the validation set, every epoch.
+
+    For models with an exact per-stain split of the prediction
+    (``model.decompose``, i.e. FlexMoEFusion), accumulated during the validation
+    pass that already runs, over the biopsies that have each stain:
+
+        n                 biopsies with the stain
+        mean_abs_contrib  mean |contribution| to the prediction (model output units;
+                          grows with the risk-score scale as training goes on)
+        contrib_share     mean share of the biopsy's total |contribution| (over its
+                          stains) carried by this stain: scale-free, so comparable
+                          across epochs
+        att_lift          mean attention received (model ``stain_att``, renormalised
+                          over the biopsy's stains) x number of stains: 1 = the
+                          stain gets its fair share
+
+    Writes ``stain_monitor.csv`` (one row per epoch and stain) and redraws
+    ``stain_monitor.png`` after every epoch, so a running job can be followed.
+    """
+
+    COLUMNS = ["epoch", "stain", "n", "mean_abs_contrib", "contrib_share", "att_lift"]
+
+    def __init__(self, log_dir, stain_names, resume_epoch=None):
+        self.stain_names = list(stain_names)
+        self.csv_path = os.path.join(log_dir, "stain_monitor.csv")
+        self.plot_path = os.path.join(log_dir, "stain_monitor.png")
+        os.makedirs(log_dir, exist_ok=True)
+        old = None
+        if resume_epoch is not None and os.path.isfile(self.csv_path):
+            old = pd.read_csv(self.csv_path)
+            old = old[old["epoch"] <= resume_epoch] if list(old.columns) == self.COLUMNS else None
+        (old if old is not None else pd.DataFrame(columns=self.COLUMNS)).to_csv(
+            self.csv_path, index=False
+        )
+        self._reset()
+
+    def _reset(self):
+        S = len(self.stain_names)
+        self.n = np.zeros(S)
+        self.abs_sum = np.zeros(S)
+        self.share_sum = np.zeros(S)
+        self.lift_sum = np.zeros(S)
+
+    def update(self, model, t, stain_att, mask):
+        """One validation batch: ``t`` the per-stain tokens entering the head,
+        ``stain_att`` and ``mask`` (B, S) from the same forward pass."""
+        mask = mask.bool()
+        contrib, _ = model.decompose(t)
+        a = contrib.abs() * mask
+        share = a / a.sum(1, keepdim=True).clamp_min(1e-12)
+        lift = torch.softmax(stain_att.masked_fill(~mask, -torch.inf), dim=1)
+        lift = lift * mask.sum(1, keepdim=True)
+        self.n += mask.sum(0).cpu().numpy()
+        self.abs_sum += a.sum(0).float().cpu().numpy()
+        self.share_sum += (share * mask).sum(0).float().cpu().numpy()
+        self.lift_sum += (lift * mask).sum(0).float().cpu().numpy()
+
+    def end_epoch(self, epoch):
+        """Write and print the epoch's statistics, redraw the plot, reset."""
+        n = np.maximum(self.n, 1)
+        rows = pd.DataFrame({
+            "epoch": epoch,
+            "stain": self.stain_names,
+            "n": self.n.astype(int),
+            "mean_abs_contrib": np.where(self.n > 0, self.abs_sum / n, np.nan),
+            "contrib_share": np.where(self.n > 0, self.share_sum / n, np.nan),
+            "att_lift": np.where(self.n > 0, self.lift_sum / n, np.nan),
+        })
+        rows.to_csv(self.csv_path, mode="a", header=False, index=False)
+        seen = rows[rows["n"] > 0].sort_values("contrib_share", ascending=False)
+        print("[stains] contribution share (attention lift): " + " | ".join(
+            f"{r.stain} {r.contrib_share:.2f} ({r.att_lift:.2f})" for r in seen.itertuples()
+        ))
+        self._reset()
+        try:
+            self.save_plot()
+        except Exception as e:  # a plotting failure must not stop training
+            print(f"[WARN] stain monitor plot failed: {e}")
+
+    def save_plot(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import Normalize
+
+        df = pd.read_csv(self.csv_path)
+        if df.empty:
+            return
+        epochs = sorted(df["epoch"].unique())
+        grids = {
+            col: df.pivot(index="stain", columns="epoch", values=col)
+            .reindex(index=self.stain_names, columns=epochs)
+            for col in ("contrib_share", "att_lift")
+        }
+        # Attention lift is a polarity around 1 (fair share): a diverging scale
+        # centred there, symmetric so equal distances read as equal colour.
+        dev = np.nanmax(np.abs(grids["att_lift"].to_numpy() - 1.0)) if grids["att_lift"].notna().any().any() else 0.0
+        half = max(float(dev), 0.05)
+        panels = [
+            ("contrib_share", "Share of |contribution| (over the biopsy's stains)",
+             "Blues", Normalize(0, max(float(np.nanmax(grids["contrib_share"].to_numpy())), 1e-6))),
+            ("att_lift", "Attention lift (1 = fair share)",
+             "RdBu_r", Normalize(1 - half, 1 + half)),
+        ]
+        S = len(self.stain_names)
+        fig, axes = plt.subplots(
+            2, 1, figsize=(max(6.0, 0.18 * len(epochs) + 3), 2 * (0.28 * S + 1.2)),
+            sharex=True,
+        )
+        for ax, (col, title, cmap, norm) in zip(axes, panels):
+            im = ax.imshow(grids[col].to_numpy(dtype=float), aspect="auto", cmap=cmap,
+                           norm=norm, interpolation="nearest")
+            ax.set_yticks(range(S), self.stain_names, fontsize=8)
+            ax.set_title(title, fontsize=10, loc="left")
+            for side in ax.spines.values():
+                side.set_visible(False)
+            fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+        step = max(1, len(epochs) // 10)
+        axes[-1].set_xticks(range(0, len(epochs), step), epochs[::step], fontsize=8)
+        axes[-1].set_xlabel("Epoch")
+        fig.tight_layout()
+        fig.savefig(self.plot_path, dpi=150)
+        plt.close(fig)
+
+
 # Arguments that define the weight shapes (--stains sets the number of stain
 # encoders): resuming with any of them changed is refused.
 _ARCH_ARGS = (
@@ -192,13 +318,14 @@ class WarmupSortedBatchSampler:
 # ---------------------------------------------------------------------------
 # Train / validation loops
 # ---------------------------------------------------------------------------
-def _predict(model, batch, device):
+def _predict(model, batch, device, return_att=False):
     # The datasets hand X over as float16 (half the transfer); compute in float32.
     slide_mask = batch.get("slide_mask")
     return model(
         batch["X"].to(device, non_blocking=True).float(),
         batch["stain_mask"].to(device, non_blocking=True),
         slide_mask=None if slide_mask is None else slide_mask.to(device, non_blocking=True),
+        **({"return_att": True} if return_att else {}),
     )
 
 
@@ -319,8 +446,9 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
 
 
 @torch.no_grad()
-def val_epoch(model, loader, device, task, criterion):
-    """Return (loss, metric, preds, targets).
+def val_epoch(model, loader, device, task, criterion, monitor=None):
+    """Return (loss, metric, preds, targets). With a ``StainMonitor``, also feed it
+    every batch (the caller then calls ``monitor.end_epoch``).
 
     ``metric`` is the C-index (survival) or the MAE (regression, in whatever units
     the labels were fed in — see the normalisation block in main()).  ``preds`` and
@@ -335,13 +463,28 @@ def val_epoch(model, loader, device, task, criterion):
     model.eval()
     total_loss = 0.0
     preds, targets = [], []
-    for batch in loader:
-        Y = batch["Y"].to(device)
-        pred = _predict(model, batch, device)
-        if task != "survival":
-            total_loss += criterion(pred, Y[:, 0]).item()
-        preds.append(pred.float().cpu())
-        targets.append(Y.float().cpu())
+    captured, hook = {}, None
+    if monitor is not None:
+        # The per-stain tokens entering the head, for the contribution split.
+        hook = model.stain_pool.register_forward_pre_hook(
+            lambda _mod, args: captured.__setitem__("t", args[0])
+        )
+    try:
+        for batch in loader:
+            Y = batch["Y"].to(device)
+            if monitor is not None:
+                pred, stain_att, _ = _predict(model, batch, device, return_att=True)
+                monitor.update(model, captured["t"], stain_att,
+                               batch["stain_mask"].to(device))
+            else:
+                pred = _predict(model, batch, device)
+            if task != "survival":
+                total_loss += criterion(pred, Y[:, 0]).item()
+            preds.append(pred.float().cpu())
+            targets.append(Y.float().cpu())
+    finally:
+        if hook is not None:
+            hook.remove()
 
     preds_t, targets_t = torch.cat(preds), torch.cat(targets)
     if task == "survival":
@@ -880,6 +1023,12 @@ def main():
         log_dir, metric_name, resume_epoch=start_epoch - 1 if args.resume else None
     )
     print(f"Loss log: {logger.csv_path}  |  val metric: {metric_name}")
+    monitor = None
+    if hasattr(model, "decompose") and val_loader is not None:
+        monitor = StainMonitor(
+            log_dir, vocab.names, resume_epoch=start_epoch - 1 if args.resume else None
+        )
+        print(f"Stain monitor: {monitor.csv_path}")
 
     with open(os.path.join(args.checkpoint_dir, "multistain_config.json"), "w") as f:
         json.dump(
@@ -942,8 +1091,10 @@ def main():
         if val_loader is not None:
             val_start = time.perf_counter()
             val_loss, metric, _, _ = val_epoch(
-                model, val_loader, device, args.task, criterion
+                model, val_loader, device, args.task, criterion, monitor=monitor
             )
+            if monitor is not None:
+                monitor.end_epoch(epoch)
             timing += f", val {time.perf_counter() - val_start:.0f} s"
         print(timing)
         if val_loader is not None:
