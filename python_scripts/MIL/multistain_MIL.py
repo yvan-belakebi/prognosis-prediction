@@ -86,7 +86,12 @@ from multistain_data import (  # noqa: E402
     index_biopsies,
     split_records,
 )
-from multistain_model import EarlyFusionMIL, MultiStainFusion  # noqa: E402
+from multistain_model import (  # noqa: E402
+    EarlyFusionMIL,
+    FlexMoEFusion,
+    MultiStainFusion,
+    build_combos,
+)
 from MIL import cox_ph_loss  # noqa: E402
 from evaluate_survival import concordance_index  # noqa: E402
 
@@ -149,8 +154,39 @@ class MultiStainLogger(LossLogger):
 _ARCH_ARGS = (
     "task", "stains", "d_model", "stain_layers", "agg_layers", "n_heads",
     "pool_att_dim", "no_gated_pool", "share_stain_encoder", "per_slide",
-    "fusion", "early_layers",
+    "fusion", "early_layers", "n_tokens", "n_experts", "top_k", "min_combo_count",
 )
+
+
+class WarmupSortedBatchSampler:
+    """Flex-MoE's curriculum: for the first ``warm_up_epochs`` epochs, batches in a
+    fixed order with the biopsies that have the most stains first (so the
+    full-panel biopsies train every expert first); afterwards, the batches of
+    ``base`` (shuffled or event-stratified). Call ``set_epoch`` (1-based) before
+    each epoch."""
+
+    def __init__(self, base, n_stains_per_sample, batch_size, warm_up_epochs, drop_last):
+        self.base = base
+        order = sorted(range(len(n_stains_per_sample)), key=lambda i: -n_stains_per_sample[i])
+        self.sorted_batches = [
+            order[i:i + batch_size] for i in range(0, len(order), batch_size)
+        ]
+        if drop_last and len(self.sorted_batches) > 1 and len(self.sorted_batches[-1]) < batch_size:
+            self.sorted_batches.pop()
+        self.warm_up_epochs = warm_up_epochs
+        self.epoch = 1
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def _warm(self):
+        return self.epoch <= self.warm_up_epochs
+
+    def __iter__(self):
+        return iter(self.sorted_batches) if self._warm() else iter(self.base)
+
+    def __len__(self):
+        return len(self.sorted_batches) if self._warm() else len(self.base)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +287,7 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
     optimizer.zero_grad()
     start = tick = time.perf_counter()
     wait = 0.0
+    total_aux = 0.0
     report = max(1, len(loader) // 10)
     for i, batch in enumerate(loader):
         if i and i % report == 0:
@@ -264,12 +301,20 @@ def train_epoch(model, loader, optimizer, device, task, criterion, accumulation_
             loss = cox_ph_loss(pred, Y[:, 0], Y[:, 1])
         else:
             loss = criterion(pred, Y[:, 0])
-        (loss / accumulation_steps).backward()
+        # Flex-MoE: the weighted router loss of the forward pass just run. The
+        # logged train loss stays the task loss, comparable across fusion models.
+        aux = getattr(model, "aux_loss", None)
+        total = loss if aux is None else loss + aux
+        (total / accumulation_steps).backward()
         total_loss += loss.item()
+        if aux is not None:
+            total_aux += aux.item()
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
             optimizer.step()
             optimizer.zero_grad()
         tick = time.perf_counter()
+    if total_aux:
+        print(f"[moe]  mean weighted router loss {total_aux / max(len(loader), 1):.4f}")
     return total_loss / max(len(loader), 1), wait, time.perf_counter() - start
 
 
@@ -454,11 +499,42 @@ def main():
     parser.add_argument(
         "--fusion",
         default="unicorn",
-        choices=["unicorn", "early"],
+        choices=["unicorn", "early", "flexmoe"],
         help="unicorn: per-stain encoders -> one token per stain -> transformer "
              "aggregator. early: one shared projection + stain embedding for every "
              "patch, then a single attention pool over the patches of all stains "
-             "(--stain_layers, --agg_layers and --share_stain_encoder do not apply).",
+             "(--stain_layers, --agg_layers and --share_stain_encoder do not apply). "
+             "flexmoe: Flex-MoE intermediate fusion (multistain_model.FlexMoEFusion): "
+             "--n_tokens tokens per stain, missing stains filled from a learned bank, "
+             "--agg_layers fusion layers with a sparse mixture of experts in every "
+             "other one.",
+    )
+    flex = parser.add_argument_group("Flex-MoE (--fusion flexmoe)")
+    flex.add_argument("--n_tokens", type=int, default=16, help="Tokens per stain.")
+    flex.add_argument(
+        "--min_combo_count",
+        type=int,
+        default=10,
+        help="Stain combinations with at least this many training biopsies get their "
+             "own missing-stain embeddings and specialist expert; rarer ones share one.",
+    )
+    flex.add_argument(
+        "--n_experts",
+        type=int,
+        default=None,
+        help="Experts per MoE layer (default: one per combination, the full panel and "
+             "the shared rare one included).",
+    )
+    flex.add_argument("--top_k", type=int, default=4, help="Experts per token.")
+    flex.add_argument(
+        "--gate_loss_weight", type=float, default=0.01, help="Weight of the router loss."
+    )
+    flex.add_argument(
+        "--warm_up_epochs",
+        type=int,
+        default=5,
+        help="Epochs in a fixed order, biopsies with the most stains first, before "
+             "shuffled (or event-stratified) batches.",
     )
     parser.add_argument(
         "--early_layers",
@@ -546,6 +622,8 @@ def main():
         args.max_slides = 4
     if args.event_sampling and args.task != "survival":
         parser.error("--event_sampling only applies to --task survival.")
+    if args.fusion == "flexmoe" and args.per_slide:
+        parser.error("--fusion flexmoe does not support --per_slide.")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -662,6 +740,19 @@ def main():
             # are all near batch_size, so they need no dropping.
             drop_last=(args.task == "survival" and len(train_ds) > args.batch_size),
         )
+    warmup_sampler = None
+    if args.fusion == "flexmoe" and args.warm_up_epochs > 0:
+        drop_last = args.task == "survival" and len(train_ds) > args.batch_size
+        base = loader_kwargs.get("batch_sampler") or torch.utils.data.BatchSampler(
+            torch.utils.data.RandomSampler(train_ds), args.batch_size, drop_last
+        )
+        warmup_sampler = WarmupSortedBatchSampler(
+            base, [len(r["slides"]) for r in train_records], args.batch_size,
+            args.warm_up_epochs, drop_last,
+        )
+        loader_kwargs = dict(batch_sampler=warmup_sampler)
+        print(f"Flex-MoE warm-up: {args.warm_up_epochs} epoch(s) of batches sorted by "
+              "stain count, most stains first")
     # Workers stay alive across epochs (starting them costs seconds per worker,
     # twice per epoch) and batches land in pinned memory for an asynchronous copy
     # to the GPU.
@@ -694,7 +785,39 @@ def main():
     )
 
     # --- Model ---------------------------------------------------------------
-    if args.fusion == "early":
+    combos = None
+    if args.fusion == "flexmoe":
+        combos = build_combos(
+            [r["slides"].keys() for r in train_records], len(vocab), args.min_combo_count
+        )
+        known = {frozenset(c) for c in combos}
+        covered = sum(frozenset(r["slides"]) in known for r in train_records)
+        n_full = sum(len(r["slides"]) == len(vocab) for r in train_records)
+        print(
+            f"Flex-MoE: {len(combos)} stain combinations with >= {args.min_combo_count} "
+            f"training biopsies (full panel: {n_full} biopsies) cover {covered}/"
+            f"{len(train_records)}; the other {len(train_records) - covered} share one index"
+        )
+        if n_full == 0:
+            print("[WARN] no training biopsy has every stain: the full-panel expert and "
+                  "the G-Router balancing get no training signal.")
+        model = FlexMoEFusion(
+            in_dim=train_ds.feat_dim,
+            n_stains=len(vocab),
+            combos=combos,
+            d_model=args.d_model,
+            n_tokens=args.n_tokens,
+            stain_layers=args.stain_layers,
+            fusion_layers=args.agg_layers,
+            n_heads=args.n_heads,
+            dropout=args.dropout,
+            n_experts=args.n_experts,
+            top_k=args.top_k,
+            gate_loss_weight=args.gate_loss_weight,
+            share_stain_encoder=args.share_stain_encoder,
+            out_dim=1,
+        ).to(device)
+    elif args.fusion == "early":
         model = EarlyFusionMIL(
             in_dim=train_ds.feat_dim,
             n_stains=len(vocab),
@@ -779,6 +902,14 @@ def main():
                 "early_layers": args.early_layers,
                 "per_slide": args.per_slide,
                 "max_slides": args.max_slides,
+                # Flex-MoE only (None otherwise): the combination vocabulary fixes the
+                # shape of the missing-stain bank, so inference needs it verbatim.
+                "combos": combos,
+                "n_tokens": args.n_tokens,
+                "n_experts": args.n_experts,
+                "top_k": args.top_k,
+                "gate_loss_weight": args.gate_loss_weight,
+                "warm_up_epochs": args.warm_up_epochs,
                 # Inverse transform for the model output: raw = pred * std + mean.
                 # Identity (0, 1) for survival, where the Cox score has no units.
                 "label_name": args.label_name,
@@ -791,6 +922,8 @@ def main():
 
     # --- Training -------------------------------------------------------------
     for epoch in range(start_epoch, args.epochs + 1):
+        if warmup_sampler is not None:
+            warmup_sampler.set_epoch(epoch)
         train_loss, wait_s, train_s = train_epoch(
             model,
             train_loader,

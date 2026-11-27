@@ -17,6 +17,8 @@
 #   early              one shared projection + stain embedding, one attention pool
 #                      over the patches of all stains
 #   early_tf           early, with one transformer layer over the joint bag first
+#   flexmoe            Flex-MoE: 16 tokens per stain, missing stains from a learned
+#                      bank, sparse mixture of experts specialised per stain combination
 #
 # Each run is named <variant>_s<seed> and filed under its foundation model:
 #   checkpoints_<FM>/<variant>_s<seed>/            checkpoints + multistain_config.json
@@ -77,6 +79,10 @@ declare -A VARIANT_ARGS=(
     [unicorn_per_slide]="--fusion unicorn --per_slide"
     [early]="--fusion early"
     [early_tf]="--fusion early --early_layers 1"
+    # Flex-MoE: 1 fusion layer (an MoE layer), as in the paper. No stain dropout:
+    # the missing-stain bank and the combination experts already handle missing
+    # stains, and dropout would take biopsies away from the full-panel expert.
+    [flexmoe]="--fusion flexmoe --agg_layers 1 --stain_dropout 0"
 )
 # Shared by every variant, so they differ only in the fusion architecture.
 COMMON_ARGS=(--task survival --patches_per_stain 256 --stain_dropout 0.2

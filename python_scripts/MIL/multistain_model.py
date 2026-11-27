@@ -37,8 +37,11 @@ discarded downstream).  Their outputs are junk and are dropped by the masked
 attention pooling that follows.
 """
 
+from collections import Counter
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torchmil.nn import AttentionPool
 
@@ -460,3 +463,348 @@ class EarlyFusionMIL(nn.Module):
             slide_att = torch.log(a.reshape(B, S, M, P).sum(-1).clamp_min(1e-30))
             return out, stain_att, (slide_att.masked_fill(~slide_mask, float("nan")), patch_att)
         return out, stain_att, patch_att.reshape(B, S, P)
+
+
+# ---------------------------------------------------------------------------
+# Flex-MoE intermediate fusion
+# ---------------------------------------------------------------------------
+# Flex-MoE (Yun et al., NeurIPS 2024, arXiv:2410.08245; reference implementation
+# github.com/UNITES-Lab/flex-moe) with every stain as a modality:
+#
+#     per stain s, observed
+#         X_s (P, D) -> projection -> transformer -> n_tokens learned queries
+#                       cross-attend the patches  -> n_tokens tokens
+#     per stain s, missing
+#         missing_bank[combination of the biopsy, s] -> n_tokens learned tokens
+#     fusion
+#         concat over stains (S * n_tokens tokens) + positional embedding
+#           -> fusion layers: joint self-attention; the FFN is a sparse mixture
+#              of experts in every other layer, the first one included
+#           -> LayerNorm, mean of each stain's tokens, concat -> linear head
+#
+# Missing-modality bank. As in the reference, the embedding that fills in a
+# missing stain depends on that stain and on the combination of stains the biopsy
+# does have. The reference indexes all 2^M - 1 combinations (15 for its 4
+# modalities); 14 stains would give 16383, almost all never seen. The combinations
+# are therefore a vocabulary built from the training biopsies (build_combos):
+# index 0 is the full panel, then every combination seen at least `min_count`
+# times, and one last index shared by every other combination.
+#
+# Routing. One noisy top-k router per MoE layer, routing each token (Shazeer et
+# al.). The paper's G-Router / S-Router split is, as in the reference code, a split
+# of the auxiliary loss, not two networks:
+#   - tokens of full-panel biopsies (combination 0): CV^2 load balancing over all
+#     experts, so every expert learns from full-information samples (G-Router);
+#   - tokens of other biopsies: cross-entropy pulling the router towards the
+#     expert of the biopsy's combination (S-Router), plus CV^2 balancing over the
+#     experts other than expert 0.
+# Expert e is thus the specialist of combination e; n_experts defaults to the
+# number of combination indices.
+#
+# Deliberate differences from the reference code:
+#   - modality encoders: patch embeddings of tabular data there; here a patch-
+#     level encoder whose output learned queries pool into n_tokens tokens;
+#   - the reference's attention residual (x = attn(x) + dropout(attn(x))) is
+#     replaced by the usual pre-norm residual;
+#   - a final LayerNorm before pooling (a pre-norm stack otherwise ends
+#     unnormalised).
+def build_combos(stain_sets, n_stains: int, min_count: int = 10) -> list:
+    """Combination vocabulary of FlexMoEFusion: a list of sorted stain-index lists.
+
+    Index 0 is always the full panel (even when no training biopsy has it), then
+    every combination occurring at least ``min_count`` times in ``stain_sets``
+    (iterables of stain indices, one per training biopsy), most frequent first.
+    Every other combination shares the index after the last one.
+    """
+    full = frozenset(range(n_stains))
+    counts = Counter(frozenset(s) for s in stain_sets)
+    return [sorted(full)] + [
+        sorted(c) for c, n in counts.most_common() if n >= min_count and c != full
+    ]
+
+
+def _cv_squared(x: torch.Tensor) -> torch.Tensor:
+    """Squared coefficient of variation: the load-balancing penalty."""
+    if x.numel() <= 1:
+        return x.new_zeros(())
+    x = x.float()
+    return x.var() / (x.mean() ** 2 + 1e-10)
+
+
+class NoisyTopKMoE(nn.Module):
+    """Sparse FFN: a noisy top-k router over ``n_experts`` 2-layer GELU experts.
+
+    ``forward(x, target, full)`` takes flattened tokens ``(T, d)``, the expert each
+    token's biopsy is assigned to ``(T,)`` (its combination index) and whether that
+    biopsy has the full panel ``(T,)``. Returns the output ``(T, d)`` and, in
+    training, the auxiliary router loss (None otherwise).
+    """
+
+    def __init__(self, d_model: int, n_experts: int, top_k: int, dropout: float):
+        super().__init__()
+        if not 0 < top_k < n_experts:
+            raise ValueError(f"top_k must be in [1, n_experts), got {top_k} of {n_experts}.")
+        self.top_k = top_k
+        self.experts = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(d_model, 2 * d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(2 * d_model, d_model),
+            )
+            for _ in range(n_experts)
+        )
+        self.w_gate = nn.Linear(d_model, n_experts, bias=False)
+        self.w_noise = nn.Linear(d_model, n_experts, bias=False)
+
+    def forward(self, x, target=None, full=None):
+        k = self.top_k
+        clean = self.w_gate(x)
+        if self.training:
+            noise_std = F.softplus(self.w_noise(x)) + 1e-2
+            logits = clean + torch.randn_like(clean) * noise_std
+        else:
+            logits = clean
+        # k + 1 values: the (k+1)-th is the threshold of the load estimate.
+        top_vals, top_idx = logits.topk(k + 1, dim=1)
+        gates_k = torch.softmax(top_vals[:, :k], dim=1)
+        idx_k = top_idx[:, :k]
+
+        out = torch.zeros_like(x)
+        for e, expert in enumerate(self.experts):
+            rows, slot = (idx_k == e).nonzero(as_tuple=True)
+            if rows.numel():
+                out = out.index_add(0, rows, gates_k[rows, slot, None] * expert(x[rows]))
+
+        if not self.training or target is None:
+            return out, None
+        gates = torch.zeros_like(logits).scatter(1, idx_k, gates_k)
+        # Smooth estimate of P(expert in the token's top-k), so the load is
+        # differentiable (Shazeer et al.'s _prob_in_top_k).
+        thr_in, thr_out = top_vals[:, k:k + 1], top_vals[:, k - 1:k]
+        load = torch.where(
+            logits > thr_in,
+            torch.special.ndtr((clean - thr_in) / noise_std),
+            torch.special.ndtr((clean - thr_out) / noise_std),
+        )
+        return out, self._aux_loss(logits, gates, load, target, full)
+
+    @staticmethod
+    def _aux_loss(logits, gates, load, target, full):
+        if full.all():
+            return _cv_squared(gates.sum(0)) + _cv_squared(load.sum(0))
+        part = ~full
+        # S-Router: route each partial-panel token to its combination's expert.
+        loss = F.cross_entropy(logits[part], target[part])
+        # G-Router: full-panel tokens spread over all experts.
+        if full.any():
+            loss = loss + _cv_squared(gates[full].sum(0)) + _cv_squared(load[full].sum(0))
+        # Partial-panel tokens spread over the specialists (expert 0 excluded).
+        return (loss + _cv_squared(gates[part, 1:].sum(0))
+                + _cv_squared(load[part, 1:].sum(0)))
+
+
+class FlexMoELayer(nn.Module):
+    """Pre-norm transformer layer whose FFN is a NoisyTopKMoE when ``moe`` is given."""
+
+    def __init__(self, d_model, n_heads, dropout, moe=None):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.moe = moe
+        self.ffn = None if moe is not None else nn.Sequential(
+            nn.Linear(d_model, 2 * d_model), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(2 * d_model, d_model),
+        )
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, combo, full):
+        h = self.norm1(x)
+        x = x + self.drop(self.attn(h, h, h, need_weights=False)[0])
+        h = self.norm2(x)
+        if self.moe is None:
+            return x + self.drop(self.ffn(h)), None
+        B, L, d = h.shape
+        y, aux = self.moe(
+            h.reshape(B * L, d), combo.repeat_interleave(L), full.repeat_interleave(L)
+        )
+        return x + self.drop(y.view(B, L, d)), aux
+
+
+class StainTokenizer(nn.Module):
+    """Patch bag of one stain -> ``n_tokens`` tokens: projection, transformer, then
+    learned queries cross-attending the patches."""
+
+    def __init__(self, in_dim, d_model, n_tokens, n_layers, n_heads, dropout):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.LayerNorm(in_dim), nn.Linear(in_dim, d_model), nn.GELU(), nn.Dropout(dropout)
+        )
+        self.encoder = (
+            _transformer(d_model, n_layers, n_heads, dropout) if n_layers > 0 else nn.Identity()
+        )
+        self.norm = nn.LayerNorm(d_model)
+        self.queries = nn.Parameter(torch.randn(n_tokens, d_model) * 0.02)
+        self.pool = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+
+    def forward(self, X):
+        H = self.norm(self.encoder(self.proj(X)))
+        q = self.queries.unsqueeze(0).expand(X.shape[0], -1, -1)
+        return self.pool(q, H, H, need_weights=False)[0]
+
+
+class _ConcatStains(nn.Module):
+    """(B, S, d) -> (B, S * d). A named step so analyze_stain_weights.py can hook
+    the per-stain tokens, as for the other fusion models."""
+
+    def forward(self, t):
+        return t.flatten(1)
+
+
+class FlexMoEFusion(nn.Module):
+    """Flex-MoE over stains (see the comment block above build_combos).
+
+    Takes and returns what MultiStainFusion does for pooled input — ``X``
+    (B, S, P, D) and ``stain_mask`` (B, S) — so the same training and evaluation
+    code runs on it. After a training-mode forward, ``self.aux_loss`` holds the
+    weighted router loss to add to the task loss (None in eval mode).
+    ``stain_att`` (``return_att=True``) is uniform over the stains present, since
+    Flex-MoE has no stain attention. Per-slide input is not supported.
+
+    Arguments:
+        in_dim: Patch feature dimension.
+        n_stains: Size of the stain vocabulary.
+        combos: Combination vocabulary from build_combos (combos[0] = full panel).
+        d_model: Token dimension.
+        n_tokens: Tokens per stain (the reference's num_patches, 16).
+        stain_layers: Transformer layers in each stain's patch encoder.
+        fusion_layers: Fusion layers; layers 0, 2, 4, ... are MoE layers.
+        n_heads: Attention heads.
+        dropout: Dropout of the encoders and fusion layers.
+        n_experts: Experts per MoE layer; default one per combination index (at
+            least top_k + 1).
+        top_k: Experts per token.
+        gate_loss_weight: Weight of the router loss (0.01 in the paper).
+        head_dropout: Dropout before the linear head (0.5 in the reference).
+        share_stain_encoder: One patch encoder for every stain.
+        out_dim: Head outputs.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        n_stains: int,
+        combos,
+        d_model: int = 256,
+        n_tokens: int = 16,
+        stain_layers: int = 2,
+        fusion_layers: int = 1,
+        n_heads: int = 8,
+        dropout: float = 0.1,
+        n_experts: int = None,
+        top_k: int = 4,
+        gate_loss_weight: float = 0.01,
+        head_dropout: float = 0.5,
+        share_stain_encoder: bool = False,
+        out_dim: int = 1,
+    ) -> None:
+        super().__init__()
+        if sorted(combos[0]) != list(range(n_stains)):
+            raise ValueError("combos[0] must be the full stain panel.")
+        self.n_stains = n_stains
+        self.n_tokens = n_tokens
+        self.out_dim = out_dim
+        self.share_stain_encoder = share_stain_encoder
+        self.gate_loss_weight = gate_loss_weight
+        self.other_combo = len(combos)  # index shared by the rare combinations
+        n_combo_idx = len(combos) + 1
+        # One per combination index, and at least top_k + 1 so routing is sparse.
+        n_experts = n_experts or max(n_combo_idx, top_k + 1)
+        if n_experts < n_combo_idx:
+            raise ValueError(
+                f"n_experts ({n_experts}) must cover the {n_combo_idx} combination indices."
+            )
+
+        combo_mask = torch.zeros(len(combos), n_stains, dtype=torch.bool)
+        for i, c in enumerate(combos):
+            combo_mask[i, list(c)] = True
+        self.register_buffer("combo_mask", combo_mask, persistent=False)
+
+        n_encoders = 1 if share_stain_encoder else n_stains
+        self.stain_encoders = nn.ModuleList(
+            StainTokenizer(in_dim, d_model, n_tokens, stain_layers, n_heads, dropout)
+            for _ in range(n_encoders)
+        )
+        self.missing_bank = nn.Parameter(
+            torch.randn(n_combo_idx, n_stains, n_tokens, d_model)
+        )
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_stains * n_tokens, d_model))
+        self.layers = nn.ModuleList(
+            FlexMoELayer(
+                d_model, n_heads, dropout,
+                moe=NoisyTopKMoE(d_model, n_experts, top_k, dropout) if i % 2 == 0 else None,
+            )
+            for i in range(fusion_layers)
+        )
+        self.norm = nn.LayerNorm(d_model)
+        self.stain_pool = _ConcatStains()
+        self.head = nn.Sequential(
+            nn.Dropout(head_dropout), nn.Linear(n_stains * d_model, out_dim)
+        )
+        self.aux_loss = None
+
+    def combo_index(self, stain_mask: torch.Tensor) -> torch.Tensor:
+        """(B, S) bool -> (B,) combination index; rare combinations share the last."""
+        match = (stain_mask.unsqueeze(1) == self.combo_mask.unsqueeze(0)).all(-1)
+        idx = match.int().argmax(1)
+        return torch.where(match.any(1), idx, torch.full_like(idx, self.other_combo))
+
+    def forward(self, X, stain_mask, return_att=False, slide_mask=None):
+        if X.dim() != 4 or slide_mask is not None:
+            raise ValueError("FlexMoEFusion takes pooled input (B, S, P, D), not per-slide.")
+        B, S = X.shape[:2]
+        if S != self.n_stains:
+            raise ValueError(f"X has {S} stains but the model was built for {self.n_stains}.")
+        mask = stain_mask.bool()
+        combo = self.combo_index(mask)
+
+        # Missing stains come from the bank; observed ones overwrite their slot.
+        tokens = self.missing_bank[combo]  # (B, S, n_tokens, d), a copy
+        for s in range(S):
+            idx = mask[:, s].nonzero(as_tuple=True)[0]
+            if idx.numel():
+                enc = self.stain_encoders[0 if self.share_stain_encoder else s]
+                tokens[idx, s] = enc(X[idx, s])
+
+        x = tokens.reshape(B, S * self.n_tokens, -1) + self.pos_embed
+        full = combo == 0
+        aux = []
+        for layer in self.layers:
+            x, a = layer(x, combo, full)
+            if a is not None:
+                aux.append(a)
+        self.aux_loss = self.gate_loss_weight * sum(aux) if aux else None
+
+        t = self.norm(x).view(B, S, self.n_tokens, -1).mean(2)  # (B, S, d)
+        out = self.head(self.stain_pool(t))
+        if self.out_dim == 1:
+            out = out.squeeze(-1)
+        if return_att:
+            # Zeros over the stains present (a uniform softmax), NaN for absent.
+            stain_att = torch.zeros_like(out.new_empty(mask.shape)).masked_fill(
+                ~mask, float("nan")
+            )
+            return out, stain_att, None
+        return out
+
+    def decompose(self, t: torch.Tensor):
+        """Exact per-stain split of the prediction from the pooled tokens ``t``
+        (B, S, d). The head is linear on their concatenation, so
+        ``prediction = contrib.sum(1) + const``. Missing stains (bank tokens)
+        contribute too."""
+        lin = self.head[-1]
+        W = lin.weight[0].view(self.n_stains, -1)
+        contrib = torch.einsum("sd,bsd->bs", W, t)
+        bias = lin.bias[0] if lin.bias is not None else contrib.new_zeros(())
+        return contrib, bias.expand(t.shape[0])

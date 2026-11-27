@@ -96,7 +96,7 @@ from multistain_data import (  # noqa: E402
     index_biopsies,
     split_records,
 )
-from multistain_model import EarlyFusionMIL, MultiStainFusion  # noqa: E402
+from multistain_model import EarlyFusionMIL, FlexMoEFusion, MultiStainFusion  # noqa: E402
 from evaluate_survival import concordance_index  # noqa: E402
 
 
@@ -172,6 +172,23 @@ def new_figure(theme: dict, **kwargs):
 # Model reconstruction
 # ---------------------------------------------------------------------------
 def build_model_from_config(cfg: dict):
+    if cfg.get("fusion") == "flexmoe":
+        return FlexMoEFusion(
+            in_dim=cfg["feat_dim"],
+            n_stains=len(cfg["stain_names"]),
+            combos=cfg["combos"],
+            d_model=cfg["d_model"],
+            n_tokens=cfg["n_tokens"],
+            stain_layers=cfg["stain_layers"],
+            fusion_layers=cfg["agg_layers"],
+            n_heads=cfg["n_heads"],
+            dropout=cfg["dropout"],
+            n_experts=cfg["n_experts"],
+            top_k=cfg["top_k"],
+            gate_loss_weight=cfg["gate_loss_weight"],
+            share_stain_encoder=cfg["share_stain_encoder"],
+            out_dim=1,
+        )
     # "fusion" is absent in configs written before early fusion existed.
     if cfg.get("fusion", "unicorn") == "early":
         return EarlyFusionMIL(
@@ -276,7 +293,15 @@ def collect(model, loader, device, check_tol=1e-4, keep_embeddings=False):
             )
 
             a = torch.softmax(stain_att.masked_fill(~mask, -torch.inf), dim=1)
-            contrib, const = decompose(model.head, a, captured["t"], mask)
+            if hasattr(model, "decompose"):
+                # Flex-MoE: linear head over every stain's tokens, the missing ones
+                # (learned bank embeddings) included. Their share goes into the
+                # constant, so the contributions cover the observed stains only.
+                contrib, const = model.decompose(captured["t"])
+                const = const + (contrib * ~mask).sum(1)
+                contrib = contrib * mask
+            else:
+                contrib, const = decompose(model.head, a, captured["t"], mask)
 
             # The decomposition is exact by construction; verify it so a future
             # change to the head fails here instead of silently mis-attributing.
