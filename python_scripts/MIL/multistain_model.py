@@ -619,17 +619,21 @@ class FlexMoELayer(nn.Module):
         )
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, x, combo, full):
+    def forward(self, x, combo, full, need_weights=False):
+        """Returns (x, aux loss or None, attention or None). With ``need_weights``
+        the attention is ``(B, L, L)``, averaged over heads, each query row summing
+        to 1. It is off in training, so attention keeps its fast kernel."""
         h = self.norm1(x)
-        x = x + self.drop(self.attn(h, h, h, need_weights=False)[0])
+        a, w = self.attn(h, h, h, need_weights=need_weights)
+        x = x + self.drop(a)
         h = self.norm2(x)
         if self.moe is None:
-            return x + self.drop(self.ffn(h)), None
+            return x + self.drop(self.ffn(h)), None, w
         B, L, d = h.shape
         y, aux = self.moe(
             h.reshape(B * L, d), combo.repeat_interleave(L), full.repeat_interleave(L)
         )
-        return x + self.drop(y.view(B, L, d)), aux
+        return x + self.drop(y.view(B, L, d)), aux, w
 
 
 class StainTokenizer(nn.Module):
@@ -669,8 +673,9 @@ class FlexMoEFusion(nn.Module):
     (B, S, P, D) and ``stain_mask`` (B, S) — so the same training and evaluation
     code runs on it. After a training-mode forward, ``self.aux_loss`` holds the
     weighted router loss to add to the task loss (None in eval mode).
-    ``stain_att`` (``return_att=True``) is uniform over the stains present, since
-    Flex-MoE has no stain attention. Per-slide input is not supported.
+    ``stain_att`` (``return_att=True``) is the log share of the fusion attention
+    each stain receives (see ``stain_attention``). Per-slide input is not
+    supported.
 
     Arguments:
         in_dim: Patch feature dimension.
@@ -779,11 +784,13 @@ class FlexMoEFusion(nn.Module):
 
         x = tokens.reshape(B, S * self.n_tokens, -1) + self.pos_embed
         full = combo == 0
-        aux = []
+        aux, received = [], []
         for layer in self.layers:
-            x, a = layer(x, combo, full)
+            x, a, w = layer(x, combo, full, need_weights=return_att)
             if a is not None:
                 aux.append(a)
+            if w is not None:
+                received.append(w.mean(1))  # (B, L): mean over the queries
         self.aux_loss = self.gate_loss_weight * sum(aux) if aux else None
 
         t = self.norm(x).view(B, S, self.n_tokens, -1).mean(2)  # (B, S, d)
@@ -791,12 +798,24 @@ class FlexMoEFusion(nn.Module):
         if self.out_dim == 1:
             out = out.squeeze(-1)
         if return_att:
-            # Zeros over the stains present (a uniform softmax), NaN for absent.
-            stain_att = torch.zeros_like(out.new_empty(mask.shape)).masked_fill(
-                ~mask, float("nan")
-            )
-            return out, stain_att, None
+            return out, self.stain_attention(received, mask), None
         return out
+
+    def stain_attention(self, received, mask):
+        """Attention received by each stain in the fusion layers, as log shares.
+
+        ``received`` holds, per fusion layer, the attention each token receives
+        averaged over all queries (B, L). It is averaged over the layers and summed
+        over each stain's n_tokens tokens: the share A_s of the fusion attention
+        that reads from stain s, summing to 1 over all stains. Queries include the
+        bank tokens of missing stains, since they too reach the head. Returned as
+        log A_s for the stains present (NaN for absent), so a softmax over the
+        present stains gives the shares renormalised over them, as for the other
+        fusion models' ``stain_att``.
+        """
+        B, S = mask.shape
+        share = torch.stack(received).mean(0).view(B, S, self.n_tokens).sum(-1)
+        return torch.log(share.clamp_min(1e-30)).masked_fill(~mask, float("nan"))
 
     def decompose(self, t: torch.Tensor):
         """Exact per-stain split of the prediction from the pooled tokens ``t``
